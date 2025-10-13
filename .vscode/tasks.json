@@ -1,0 +1,44 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "PlatformIO: Build",
+			"type": "shell",
+			"command": "pio",
+			"args": [
+				"run"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Build (retry)",
+			"type": "shell",
+			"command": "pio",
+			"args": [
+				"run"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Build (set 100ms)",
+			"type": "shell",
+			"command": "pio",
+			"args": [
+				"run"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		}
+	]
+}
