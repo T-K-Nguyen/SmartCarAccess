@@ -1,49 +1,20 @@
 #include <Arduino.h>
-#include <NimBLEDevice.h>
+#include "ble.h"
+#include "nfc.h"
 
-// LED control shared state
-static const int LED_PIN = GPIO_NUM_48; // Board LED pin
-static volatile uint8_t g_ledMode = 2;  // 0=OFF, 1=ON, 2=BLINK
-static volatile uint16_t g_blinkIntervalMs = 100; // Blink interval in ms (default fast blink)
+// LED control shared state (single definition; referenced by BLE module)
 
 // UUIDs (random custom UUIDs)
-static const char* kServiceUUID      = "12345678-1234-5678-1234-56789abcdef0";
-static const char* kCharModeUUID     = "12345678-1234-5678-1234-56789abcdef1";
-static const char* kCharIntervalUUID = "12345678-1234-5678-1234-56789abcdef2";
+// BLE/NFC details moved to modules
 
 // Forward declarations
-void startBLE();
 
-class LEDModeCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& /*connInfo*/) override {
-    std::string val = pCharacteristic->getValue();
-    if (val.empty()) return;
-    uint8_t mode = static_cast<uint8_t>(val[0]);
-    if (mode > 2) mode = 2; // clamp
-    g_ledMode = mode;
-    // Apply immediate effect for ON/OFF
-    if (mode == 0) {
-      digitalWrite(LED_PIN, LOW);
-    } else if (mode == 1) {
-      digitalWrite(LED_PIN, HIGH);
-    }
-    Serial.printf("[BLE] LED mode set to %u\n", static_cast<unsigned>(mode));
-  }
-};
+// Expose LED state for BLE module
+extern const int LED_PIN = GPIO_NUM_48;
+volatile uint8_t g_ledMode = 2;
+volatile uint16_t g_blinkIntervalMs = 100;
 
-class LEDIntervalCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& /*connInfo*/) override {
-    std::string val = pCharacteristic->getValue();
-    if (val.size() < 2) return;
-    // Expect little-endian uint16 in milliseconds
-    uint16_t ms = static_cast<uint8_t>(val[0]) | (static_cast<uint16_t>(static_cast<uint8_t>(val[1])) << 8);
-    // Constrain to sane bounds
-    if (ms < 50) ms = 50;          // at least 50ms
-    if (ms > 10000) ms = 10000;    // at most 10s
-    g_blinkIntervalMs = ms;
-    Serial.printf("[BLE] Blink interval set to %u ms\n", static_cast<unsigned>(ms));
-  }
-};
+// BLE callbacks moved to ble.cpp
 
 void TaskLEDControl(void *pvParameters) {
   pinMode(LED_PIN, OUTPUT); // Initialize LED pin
@@ -71,48 +42,23 @@ void TaskLEDControl(void *pvParameters) {
   }
 }
 
-void startBLE() {
-  NimBLEDevice::init("YoloUNO LED");
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9); // max power; adjust if needed
-  NimBLEDevice::setMTU(185);              // reasonable MTU
+// BLE init moved to BLEMod::begin()
 
-  NimBLEServer *pServer = NimBLEDevice::createServer();
-  NimBLEService *pService = pServer->createService(kServiceUUID);
+// NFC init moved to NFCMod::begin()
 
-  // LED Mode characteristic (uint8) R/W
-  NimBLECharacteristic *pCharMode = pService->createCharacteristic(
-    kCharModeUUID,
-    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE
-  );
-  static LEDModeCallbacks modeCallbacks;
-  pCharMode->setCallbacks(&modeCallbacks);
-  uint8_t initMode = g_ledMode;
-  pCharMode->setValue(&initMode, 1);
-
-  // Blink interval characteristic (uint16, ms) R/W
-  NimBLECharacteristic *pCharInterval = pService->createCharacteristic(
-    kCharIntervalUUID,
-    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE
-  );
-  static LEDIntervalCallbacks intervalCallbacks;
-  pCharInterval->setCallbacks(&intervalCallbacks);
-  uint16_t initInterval = g_blinkIntervalMs;
-  // NimBLE expects byte buffer; send little-endian
-  uint8_t intervalBuf[2] = { (uint8_t)(initInterval & 0xFF), (uint8_t)(initInterval >> 8) };
-  pCharInterval->setValue(intervalBuf, sizeof(intervalBuf));
-
-  pService->start();
-
-  NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(kServiceUUID);
-  // Some versions of NimBLE-Arduino do not support setScanResponse; omit it if unavailable.
-  pAdvertising->start();
-
-  Serial.println("[BLE] Advertising started: YoloUNO LED");
-}
+// NFC task moved to nfc.cpp
 
 void setup() {
   Serial.begin(115200);
+  // Wait briefly for USB-CDC host to open the port so early logs are visible
+  #ifdef ARDUINO_USB_CDC_ON_BOOT
+  {
+    unsigned long t0 = millis();
+    while (!Serial && (millis() - t0) < 3000) {
+      delay(10);
+    }
+  }
+  #endif
   delay(200);
   Serial.println("Booting...");
 
@@ -120,10 +66,20 @@ void setup() {
   xTaskCreate(TaskLEDControl, "LED Control", 4096, NULL, 2, NULL);
 
   // Start BLE
-  startBLE();
+  BLEMod::begin();
+
+  // Start NFC (I2C PN532) and polling task
+  NFCMod::begin();
+  NFCMod::startTask();
 }
 
 void loop() {
   // Nothing here; work is done in tasks and BLE stack
-  vTaskDelay(pdMS_TO_TICKS(500));
+  static uint32_t lastBeat = 0;
+  if (millis() - lastBeat > 2000) {
+    Serial.println("[HB] alive");
+    lastBeat = millis();
+  }
+  // Keep loop light; modules handle their own logs/tasks
+  vTaskDelay(pdMS_TO_TICKS(100));
 }
