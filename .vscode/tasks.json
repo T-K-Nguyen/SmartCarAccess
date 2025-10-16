@@ -182,6 +182,123 @@
 				"$platformio"
 			],
 			"group": "build"
+		},
+		{
+			"label": "Build firmware after serial tweaks",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Upload and open monitor (follow port)",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run",
+				"--target",
+				"upload",
+				"--upload-port",
+				"COM9",
+				";",
+				"C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+				"device",
+				"monitor"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build after provisioning/NFC reorder",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build after NFC log throttling",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build after adding tag auth",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build after suppressing NOT_FOUND spam",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build after admin/tag management",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build after adding BLE admin service",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build after wiring admin modes into NFC",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
 		}
 	]
 }

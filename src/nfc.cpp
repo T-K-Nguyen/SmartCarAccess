@@ -2,6 +2,8 @@
 #include <Wire.h>
 #include <Adafruit_PN532.h>
 #include "nfc.h"
+#include "provisioning.h"
+#include "ble.h"
 
 namespace {
   // I2C pins and PN532 control pins (keep defaults from existing code)
@@ -17,6 +19,9 @@ namespace {
   bool s_nfcReady = false;
   bool s_nfcInitAttempted = false;
   bool s_nfcRetried = false;
+  uint8_t s_lastUid[7];
+  uint8_t s_lastUidLen = 0;
+  volatile bool s_uidReady = false;
 
   // Helpers
   void hwResetPN532() {
@@ -124,6 +129,11 @@ namespace {
     uint8_t uidLength = 0;
     uint32_t lastGood = millis();
     int failCount = 0;
+    // De-duplicate repeated logs for the same tag
+    static uint8_t lastPrintedUid[7] = {0};
+    static uint8_t lastPrintedLen = 0;
+    static uint32_t lastPrintMs = 0;
+    const uint32_t printCooldownMs = 1500; // reprint same UID at most every 1.5s
     for(;;) {
       if (!s_nfcReady) {
         // Retry recovery while not ready
@@ -134,13 +144,52 @@ namespace {
       }
       bool found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
       if (found) {
-        Serial.print("[NFC] Tag UID: ");
-        for (uint8_t i = 0; i < uidLength; i++) {
-          if (uid[i] < 0x10) Serial.print("0");
-          Serial.print(uid[i], HEX);
-          if (i + 1 < uidLength) Serial.print(":");
+        bool sameAsLast = (uidLength == lastPrintedLen) && (memcmp(uid, lastPrintedUid, uidLength) == 0);
+        bool cooldownElapsed = (millis() - lastPrintMs) >= printCooldownMs;
+        if (!sameAsLast || cooldownElapsed) {
+          bool hasAuth = Provisioning::hasAuthorizedTag();
+          bool authorized = hasAuth ? Provisioning::isTagAuthorized(uid, uidLength) : false;
+          Serial.print("[NFC] Tag UID ");
+          Serial.print(authorized ? "(AUTHORIZED) ":"(UNAUTHORIZED) ");
+          for (uint8_t i = 0; i < uidLength; i++) {
+            if (uid[i] < 0x10) Serial.print("0");
+            Serial.print(uid[i], HEX);
+            if (i + 1 < uidLength) Serial.print(":");
+          }
+          Serial.println();
+          memcpy(lastPrintedUid, uid, uidLength);
+          lastPrintedLen = uidLength;
+          lastPrintMs = millis();
         }
-        Serial.println();
+        // Admin mode actions: enroll/remove on next seen tag
+        BLEMod::AdminMode mode = BLEMod::getAdminMode();
+        if (mode == BLEMod::ADMIN_ENROLL) {
+          if (Provisioning::addAuthorizedTag(uid, uidLength)) {
+            Serial.print("[NFC] Enrolled tag: ");
+            for (uint8_t i = 0; i < uidLength; ++i) { if (uid[i] < 0x10) Serial.print("0"); Serial.print(uid[i], HEX); if (i+1<uidLength) Serial.print(":"); }
+            Serial.println();
+            BLEMod::adminNotify("ENROLL_OK");
+          } else {
+            BLEMod::adminNotify("ENROLL_FAIL");
+          }
+          BLEMod::setAdminMode(BLEMod::ADMIN_NORMAL);
+        } else if (mode == BLEMod::ADMIN_REMOVE) {
+          if (Provisioning::removeAuthorizedTag(uid, uidLength)) {
+            Serial.print("[NFC] Removed tag: ");
+            for (uint8_t i = 0; i < uidLength; ++i) { if (uid[i] < 0x10) Serial.print("0"); Serial.print(uid[i], HEX); if (i+1<uidLength) Serial.print(":"); }
+            Serial.println();
+            BLEMod::adminNotify("REMOVE_OK");
+          } else {
+            BLEMod::adminNotify("REMOVE_FAIL");
+          }
+          BLEMod::setAdminMode(BLEMod::ADMIN_NORMAL);
+        }
+        // Cache UID for provisioning or app logic
+        if (uidLength <= sizeof(s_lastUid)) {
+          memcpy(s_lastUid, uid, uidLength);
+          s_lastUidLen = uidLength;
+          s_uidReady = true;
+        }
         lastGood = millis();
         failCount = 0;
         vTaskDelay(pdMS_TO_TICKS(800));
@@ -195,4 +244,15 @@ namespace NFCMod {
   }
 
   bool isReady() { return s_nfcReady; }
+
+  bool getLastTag(uint8_t* uid, uint8_t* uidLen) {
+    if (!uid || !uidLen) return false;
+    if (!s_uidReady) return false;
+    uint8_t n = s_lastUidLen;
+    if (n > 7) n = 7;
+    memcpy(uid, s_lastUid, n);
+    *uidLen = n;
+    s_uidReady = false; // consume once
+    return true;
+  }
 }
