@@ -2,13 +2,7 @@
 #include "ble.h"
 #include "nfc.h"
 
-// LED control shared state (single definition; referenced by BLE module)
-
-// UUIDs (random custom UUIDs)
-// BLE/NFC details moved to modules
-
-// Forward declarations
-
+//[NFC] Tag UID: 11:DA:37:06,      [NFC] Tag UID: EE:DE:6E:06
 // Expose LED state for BLE module
 extern const int LED_PIN = GPIO_NUM_48;
 volatile uint8_t g_ledMode = 2;
@@ -41,12 +35,6 @@ void TaskLEDControl(void *pvParameters) {
     }
   }
 }
-
-// BLE init moved to BLEMod::begin()
-
-// NFC init moved to NFCMod::begin()
-
-// NFC task moved to nfc.cpp
 
 void setup() {
   Serial.begin(115200);
