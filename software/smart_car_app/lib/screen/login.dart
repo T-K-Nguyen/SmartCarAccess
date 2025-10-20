@@ -60,7 +60,7 @@ class _LogInState extends State<LogIn> {
             SizedBox(
                 width: MediaQuery.of(context).size.width,
                 child: Image.asset(
-                  "images/car.PNG",
+                  'assets/images/car.PNG',
                   fit: BoxFit.cover,
                 )),
             SizedBox(
@@ -206,7 +206,7 @@ class _LogInState extends State<LogIn> {
                         passwordcontroller.clear();
                   },
                   child: Image.asset(
-                    "images/google.png",
+                    'assets/images/google.png',
                     height: 45,
                     width: 45,
                     fit: BoxFit.contain,

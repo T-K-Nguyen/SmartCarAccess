@@ -14,7 +14,6 @@ class _ForgotPasswordState extends State<ForgotPassword> {
   TextEditingController mailcontroller = TextEditingController();
 
   final _formkey = GlobalKey<FormState>();
-
   resetPassword() async {
     // ensure email is trimmed and non-empty
     email = mailcontroller.text.trim();
@@ -59,7 +58,12 @@ class _ForgotPasswordState extends State<ForgotPassword> {
     mailcontroller.dispose();
     super.dispose();
   }
-
+  
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    precacheImage(AssetImage('assets/images/forgot.jpg'), context);
+  }
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -74,7 +78,7 @@ class _ForgotPasswordState extends State<ForgotPassword> {
               child: SizedBox(
                 width: MediaQuery.of(context).size.width,
                 child: Image.asset(
-                  'images/forgot.jpg',
+                  'assets/images/forgot.jpg',
                   fit: BoxFit.cover,
                 ),
               ),
