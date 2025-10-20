@@ -1,4 +1,4 @@
-import 'package:smart_car_app/home.dart';
+import 'package:smart_car_app/screen/home.dart';
 import 'package:smart_car_app/service/database.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';

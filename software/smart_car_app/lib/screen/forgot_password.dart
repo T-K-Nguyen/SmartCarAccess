@@ -1,4 +1,4 @@
-import 'package:smart_car_app/signup.dart';
+import 'package:smart_car_app/screen/signup.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 

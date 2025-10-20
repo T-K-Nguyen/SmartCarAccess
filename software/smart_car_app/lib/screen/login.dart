@@ -1,9 +1,9 @@
 // ignore_for_file: use_build_context_synchronously
 
-import 'package:smart_car_app/forgot_password.dart';
-import 'package:smart_car_app/home.dart';
+import 'package:smart_car_app/screen/forgot_password.dart';
+import 'package:smart_car_app/screen/home.dart';
 import 'package:smart_car_app/service/auth.dart';
-import 'package:smart_car_app/signup.dart';
+import 'package:smart_car_app/screen/signup.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
