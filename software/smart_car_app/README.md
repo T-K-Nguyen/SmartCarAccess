@@ -31,14 +31,6 @@ The app replaces traditional physical keys with a **secure, digital, and user-fr
 
 ## Project Structure
 
-smart_car_app/
-├── lib/
-│ ├── main.dart # Entry point
-│ ├── service/ # Firebase Auth, KeyService, etc.
-├── images/ # App images/icons
-├── android/ # Android configuration
-├── pubspec.yaml # Dependencies
-└── README.md
 
 ---
 
