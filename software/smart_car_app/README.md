@@ -49,8 +49,8 @@ Follow the official guide:
 ➡️ Flutter Installation
 
 ### 2️⃣ Clone the Repository
-    git clone https://github.com/<your-username>/smart_car_app.git
-    cd smart_car_app
+    git clone https://github.com/T-K-Nguyen/SmartCarAccess.git
+    cd software/smart_car_app
 ### 3️⃣ Install Dependencies
     flutter pub get
 ### 4️⃣ Configure Firebase
