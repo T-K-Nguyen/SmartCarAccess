@@ -399,4 +399,15 @@ bool hasPhonePublicKey() {
   return ok;
 }
 
+bool setPhonePublicKey(const char* pem) {
+  if (!pem) return false;
+  size_t L = strlen(pem);
+  if (L < 32) return false; // sanity
+  prefs.begin(kPrefsNs, false);
+  bool ok = prefs.putString(kCertPem, pem) > 0;
+  prefs.end();
+  if (ok) Serial.println("[Prov] Stored phone public key (PEM) in NVS.");
+  return ok;
+}
+
 }

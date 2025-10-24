@@ -48,4 +48,7 @@ namespace Provisioning {
 
   // Whether a phone public key/cert is available for verification.
   bool hasPhonePublicKey();
+
+  // Set or replace the stored phone long-term public key (PEM). Returns true on success.
+  bool setPhonePublicKey(const char* pem);
 }

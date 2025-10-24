@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include "../include/ble.h"
+#include "../include/ble/ble.h"
 #include "../include/nfc.h"
 #include "../include/provisioning.h"
 

@@ -3,7 +3,7 @@
 #include <Adafruit_PN532.h>
 #include "../include/nfc.h"
 #include "../include/provisioning.h"
-#include "../include/ble.h"
+#include "../include/ble/ble.h"
 
 namespace {
   // I2C pins and PN532 control pins (keep defaults from existing code)
