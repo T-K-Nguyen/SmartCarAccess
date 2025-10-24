@@ -15,4 +15,7 @@ namespace BLEMod {
 
   // Update AdminInfo characteristic and notify connected central (short ASCII status)
   void adminNotify(const char* msg);
+
+  // Phase B: session status helper
+  bool isSessionReady();
 }

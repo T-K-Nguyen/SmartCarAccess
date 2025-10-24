@@ -36,4 +36,16 @@ namespace Provisioning {
   bool removeAuthorizedTag(const uint8_t* uid, uint8_t len);
   // Print list of authorized tags
   void listAuthorizedTags();
+
+  // Phase B helpers (crypto access)
+  // Sign arbitrary data with the device's long-term private key (ECDSA-SHA256).
+  // sigOut receives DER-encoded ECDSA signature.
+  bool signWithDeviceKey(const uint8_t* data, size_t dataLen, uint8_t* sigOut, size_t* sigLen);
+
+  // Verify signature using the stored phone long-term public key (from Phase A).
+  // Returns false if no phone key/cert is stored.
+  bool verifyWithPhoneKey(const uint8_t* data, size_t dataLen, const uint8_t* sig, size_t sigLen);
+
+  // Whether a phone public key/cert is available for verification.
+  bool hasPhonePublicKey();
 }

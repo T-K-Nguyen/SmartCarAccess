@@ -4,8 +4,8 @@
 #include <mbedtls/entropy.h>
 #include <mbedtls/sha256.h>
 #include <Preferences.h>
-#include "../include/nfc.h"
-#include "../include/provisioning.h"
+#include "nfc.h"
+#include "provisioning.h"
 
 namespace {
   mbedtls_pk_context keypair;
@@ -329,6 +329,74 @@ void clearAll() {
   prefs.remove(kTagUid); // legacy
   prefs.end();
   Serial.println("[Prov] Cleared all provisioning data (keys, cert, tags).");
+}
+
+}
+// Add Phase B crypto helper implementations
+namespace Provisioning {
+
+bool signWithDeviceKey(const uint8_t* data, size_t dataLen, uint8_t* sigOut, size_t* sigLen) {
+  if (!s_ready || !data || dataLen == 0 || !sigOut || !sigLen) return false;
+  // Hash data with SHA-256
+  unsigned char hash[32];
+  mbedtls_sha256_context c; mbedtls_sha256_init(&c);
+  mbedtls_sha256_starts(&c, 0);
+  mbedtls_sha256_update(&c, data, dataLen);
+  mbedtls_sha256_finish(&c, hash);
+  mbedtls_sha256_free(&c);
+
+  size_t outLen = 0;
+  int rc = mbedtls_pk_sign(&keypair, MBEDTLS_MD_SHA256,
+                           hash, sizeof(hash),
+                           sigOut, &outLen,
+                           mbedtls_ctr_drbg_random, &drbg);
+  if (rc != 0) return false;
+  *sigLen = outLen;
+  return true;
+}
+
+static bool loadPhonePk(mbedtls_pk_context &pk) {
+  // Try to interpret stored cert as a PEM public key for now
+  prefs.begin(kPrefsNs, true);
+  String certOrPub = prefs.getString(kCertPem, "");
+  prefs.end();
+  if (certOrPub.length() == 0) return false;
+  mbedtls_pk_init(&pk);
+  // First try parse as public key; if that fails, try as key contained in cert
+  int rc = mbedtls_pk_parse_public_key(&pk,
+      (const unsigned char*)certOrPub.c_str(), certOrPub.length()+1);
+  if (rc != 0) {
+    // Try parse certificate and extract pubkey
+    // Keep it simple: mbedTLS can parse cert via x509, but to limit code, fail here for now
+    mbedtls_pk_free(&pk);
+    return false;
+  }
+  return true;
+}
+
+bool verifyWithPhoneKey(const uint8_t* data, size_t dataLen, const uint8_t* sig, size_t sigLen) {
+  if (!data || dataLen == 0 || !sig || sigLen == 0) return false;
+  mbedtls_pk_context pk;
+  if (!loadPhonePk(pk)) return false;
+
+  unsigned char hash[32];
+  mbedtls_sha256_context c; mbedtls_sha256_init(&c);
+  mbedtls_sha256_starts(&c, 0);
+  mbedtls_sha256_update(&c, data, dataLen);
+  mbedtls_sha256_finish(&c, hash);
+  mbedtls_sha256_free(&c);
+
+  int rc = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256,
+                             hash, sizeof(hash), sig, sigLen);
+  mbedtls_pk_free(&pk);
+  return rc == 0;
+}
+
+bool hasPhonePublicKey() {
+  prefs.begin(kPrefsNs, true);
+  bool ok = prefs.isKey(kCertPem);
+  prefs.end();
+  return ok;
 }
 
 }
