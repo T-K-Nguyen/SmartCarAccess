@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
-#include "ble.h"
-#include "provisioning.h"
+#include "../include/ble.h"
+#include "../include/provisioning.h"
 
 // Shared LED state provided by main.cpp
 extern volatile uint8_t g_ledMode;

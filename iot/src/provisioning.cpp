@@ -4,8 +4,8 @@
 #include <mbedtls/entropy.h>
 #include <mbedtls/sha256.h>
 #include <Preferences.h>
-#include "nfc.h"
-#include "provisioning.h"
+#include "../include/nfc.h"
+#include "../include/provisioning.h"
 
 namespace {
   mbedtls_pk_context keypair;

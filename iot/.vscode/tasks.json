@@ -299,6 +299,18 @@
 				"$platformio"
 			],
 			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Build iot env",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
 		}
 	]
 }

@@ -1,9 +1,9 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_PN532.h>
-#include "nfc.h"
-#include "provisioning.h"
-#include "ble.h"
+#include "../include/nfc.h"
+#include "../include/provisioning.h"
+#include "../include/ble.h"
 
 namespace {
   // I2C pins and PN532 control pins (keep defaults from existing code)

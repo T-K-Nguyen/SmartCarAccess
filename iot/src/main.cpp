@@ -1,7 +1,7 @@
 #include <Arduino.h>
-#include "ble.h"
-#include "nfc.h"
-#include "provisioning.h"
+#include "../include/ble.h"
+#include "../include/nfc.h"
+#include "../include/provisioning.h"
 
 //[NFC] Tag UID: 11:DA:37:06,      [NFC] Tag UID: EE:DE:6E:06
 // Expose LED state for BLE module
