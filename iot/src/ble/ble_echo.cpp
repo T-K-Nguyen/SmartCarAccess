@@ -60,7 +60,6 @@ namespace BLEEcho {
 
     NimBLECharacteristic* cEchoIn = pAuth->createCharacteristic(kCharSecEchoInUUID, NIMBLE_PROPERTY::WRITE);
     static SecureEchoInCallbacks secEchoCb; cEchoIn->setCallbacks(&secEchoCb);
-    g_cSecEchoOut = pAuth->createCharacteristic(kCharSecEchoOutUUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-    pAuth->start();
+  g_cSecEchoOut = pAuth->createCharacteristic(kCharSecEchoOutUUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
   }
 }

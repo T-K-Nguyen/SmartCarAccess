@@ -56,19 +56,104 @@ Security goals:
 
 ---
 
-## Phase A — NFC provisioning (what it does)
+## Phase A — NFC provisioning (HCE protocol)
 
-- ESP32‑S3 generates an ECC P‑256 keypair and stores the private key in NVS (non‑volatile storage)
-- The phone provides its long‑term public key (or certificate) and the ECU stores it in NVS
-- Optional: enroll NFC tag UIDs that you can later manage over BLE Admin
+This phase uses real NFC over ISO‑DEP (ISO 14443‑4). The ECU (ESP32‑S3 + PN532) is the reader/initiator; the phone runs an Android HCE app that behaves like a smartcard.
 
-Key points in code:
-- ECC keypair: mbedTLS (see `Provisioning::begin()`)
-- Long‑term phone key currently expected as a PEM public key stored under NVS key `"cert"`
-- Tag management stored in a compact blob under NVS key `"tags"` (legacy single‑tag `"tag"` handled too)
+Overview
+- Roles
+  - ECU (ESP32‑S3 + PN532): NFC reader/initiator, emits RF field and sends C‑APDUs
+  - Phone (Android): NFC card/target via Host Card Emulation (HCE), receives C‑APDUs and returns R‑APDUs
+- Transport: APDU over ISO‑DEP (T=CL)
+- Scope: Entire provisioning exchange happens on 13.56 MHz NFC; no BLE/Wi‑Fi/internet needed for provisioning
 
-Console helpers:
-- `Provisioning::printInfo()` prints a fingerprint of the ECU public key and any enrolled tags
+System architecture (layers)
+- Physical: PN532 + antenna (ECU) ↔ phone NFC controller/antenna
+- Transport: ISO‑DEP; APDU frames carried by the NFC stacks (PN532 driver ↔ Android NFC)
+- Application: ECU firmware sends/receives APDUs; Android HCE service implements APDU logic
+- Logic: ECU issues commands (SELECT, GET_INFO, CHALLENGE); phone returns public key, optional cert chain, keyId, and signatures
+
+End‑to‑end flow
+1) Phone enters HCE range
+   - ECU enables RF field; Android detects field and activates HCE for matching AID
+2) ECU selects the app via SELECT AID
+   - C‑APDU (example): `00 A4 04 00 Lc <AID> 00`
+   - Success R‑APDU: `90 00`
+3) ECU requests provisioning data (custom INS)
+   - Example C‑APDU layout:
+     - CLA=00, INS=CA (GET_DATA/custom), P1=00, P2=00, Lc=N
+     - Data may include `vehicleId` and a fresh `nonce`
+4) Phone HCE handles the request
+   - HCE parses APDU, validates request
+   - Fetches or generates keypair (prefer Android Keystore)
+   - Optionally signs the ECU’s challenge (nonce)
+   - Returns payload `{ keyId | publicKey | certLen | cert... | signature? }` with `90 00`
+5) ECU stores pairing
+   - ECU parses R‑APDU, extracts `keyId`, `publicKey`, optional `certChain`
+   - Persists in NVS (with timestamp and optional phone NFC UID)
+
+Recommended APDUs (proposal)
+- SELECT AID
+  - C‑APDU: `00 A4 04 00 Lc <AID> 00`
+  - R‑APDU: `90 00`
+- GET_INFO (custom) — phone identity and proof
+  - C‑APDU: `00 CA 00 00 Lc { vehicleId(8) | challenge(8..32) }`
+  - R‑APDU: `{ keyIdLen(1) | keyId | pubKey(65) | certLen(2) | cert... | sigLen(2)? | sigDER? } 90 00`
+    - `pubKey` in uncompressed P‑256 form (0x04 || X || Y) = 65 bytes
+    - `cert` can be empty for demo; for large chains, add fragmentation (below)
+    - `signature` is optional here (can be moved to unlock flow), but recommended when you need attestation
+
+Fragmentation
+- Keep a single APDU payload < 255 bytes. For larger data (e.g., cert chains), implement a simple sequence:
+  - ECU sends GET_INFO(P1=seqIndex); phone returns piece + `90 00` until done
+  - Or use the ISO7816 GET RESPONSE pattern if your driver supports it
+
+Android HCE implementation (sketch)
+- Manifest service:
+  - Declare `HostApduService` with `android.permission.BIND_NFC_SERVICE`
+  - Add `res/xml/apduservice.xml` mapping your AID(s)
+  - Consider `android:requireDeviceUnlock="true"` if you need the device unlocked
+- HostApduService:
+  - Implement `processCommandApdu(byte[] apdu, Bundle extras)`
+  - Switch on INS; for GET_INFO: assemble `{keyId, pubKey, certChain, signature?}` then return data || `0x90 0x00`
+  - Implement `onDeactivated(int reason)` for cleanup
+- Key management:
+  - Prefer Android Keystore (hardware‑backed when available). Check `KeyInfo.isInsideSecureHardware()` when needed
+
+ECU firmware notes (PN532 + ESP32)
+- Link: I²C/SPI/UART; I²C is common on ESP32‑S3
+- Use initiator + ISO‑DEP support in your PN532 driver to exchange raw APDUs:
+  - `inDataExchange(selectAidApdu, ...) → 90 00`
+  - `inDataExchange(getInfoApdu, ...) → payload || 90 00`
+- Handle timeouts and deactivations (deselect/link loss) and restart polling gracefully
+
+Persistence format (example)
+```
+{
+  "vehicleId": "...",
+  "keyId": "...",
+  "publicKey": "PEM or raw",
+  "certChain": "PEM (optional)",
+  "phoneNfcUid": "... (optional)",
+  "timestamp": 1690000000
+}
+```
+
+Security and risks
+- HCE is software‑based; use Keystore (hardware‑backed if available) for stronger protections
+- Use a fresh challenge/nonce in provisioning to prevent replay
+- Don’t rely on NFC UID for security — it can be spoofed on some devices
+
+Throughput and practical limits
+- Data rate typically 106 kbps (can negotiate 212/424)
+- Single APDU payload < 255 bytes; fragment larger payloads
+- P‑256 uncompressed public key is 65 bytes — fits comfortably in one APDU without certs
+
+Checklist (both sides)
+- Register AID in the Android `apduservice.xml`
+- Implement PN532 initiator + ISO‑DEP APDU exchange on ECU
+- Define INS, data formats, and status words (e.g., `90 00`, `6D 00`)
+- Test: SELECT AID → `90 00`; GET_INFO → returns pubKey and metadata; verify failure cases
 
 ---
 
@@ -150,6 +235,87 @@ Troubleshooting:
 - If PN532 doesn’t respond, the firmware will scan I²C and try recovery (re‑init bus, optional HW reset, re‑begin). Check SDA/SCL pins and supply.
 - If BLE handshake fails at signature verification, ensure the phone’s public key is stored in NVS as a PEM public key under `cert`.
 - Make sure your app requests a large BLE MTU (>= 185) so the hello messages fit comfortably.
+
+---
+
+## Python demo: BLE mutual auth and Admin
+
+The repo includes a Python helper (`tools/demo_ble_auth.py`) that lets you:
+
+- Perform the full BLE mutual-auth handshake and run a secure AES‑GCM echo
+- Upload the phone’s public key (PEM) to the ECU via the Admin service
+- Enroll/remove/list NFC tags via Admin modes
+
+### Prerequisites
+
+- Python 3.10+
+- Install dependencies from the project root (iot/):
+
+```powershell
+pip install -r tools/requirements.txt
+```
+
+By default the script looks for a device named `ESP-Smart-Car-ECU` and a key file `phone_key.pem` in the current folder. The first run generates `phone_key.pem` automatically if it doesn’t exist.
+
+### CLI overview
+
+```text
+python tools\demo_ble_auth.py [options]
+
+Options:
+  --device-name NAME     BLE device name to connect (default: ESP-Smart-Car-ECU)
+  --keyfile PATH         Path to phone long-term private key PEM (default: phone_key.pem)
+
+  --upload-key           Upload phone public key PEM to ECU (Admin service), then exit
+
+  --enroll               Set Admin mode to ENROLL for ~10s; present a tag to add it
+  --remove               Set Admin mode to REMOVE for ~10s; present an authorized tag to remove it
+  --list-tags            Ask ECU to print the authorized tag list (to serial/log)
+
+No flags → perform BLE mutual-auth handshake + secure echo test.
+```
+
+### Typical workflows
+
+1) First-time setup: upload the phone public key once, then perform handshake
+
+```powershell
+# Upload public key (derived from --keyfile). Stores in ECU NVS.
+python tools\demo_ble_auth.py --upload-key
+
+# Start BLE mutual-auth handshake and run secure echo
+python tools\demo_ble_auth.py
+```
+
+2) Admin: enroll/remove/list NFC tags
+
+```powershell
+# Enroll window (~10s); present a tag
+python tools\demo_ble_auth.py --enroll --list-tags
+
+# Remove window (~10s); present an authorized tag
+python tools\demo_ble_auth.py --remove --list-tags
+
+# Just request the device to list tags (prints to serial/log)
+python tools\demo_ble_auth.py --list-tags
+```
+
+3) Device selection and custom key path
+
+```powershell
+# If your device advertises a different name
+python tools\demo_ble_auth.py --device-name My-ECU
+
+# Use a different private key PEM
+python tools\demo_ble_auth.py --keyfile .\my_phone_key.pem
+```
+
+### Notes and troubleshooting (Python)
+
+- The script prints your phone public key PEM at startup; that’s what the ECU stores in NVS.
+- On Windows, long BLE writes are chunked internally to avoid ATT/MTU issues.
+- If the device isn’t found, ensure it’s advertising and the `--device-name` matches.
+- Keep the device close to the PC during BLE operations to reduce packet loss.
 
 ---
 

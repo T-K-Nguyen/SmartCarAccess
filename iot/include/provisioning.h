@@ -51,4 +51,24 @@ namespace Provisioning {
 
   // Set or replace the stored phone long-term public key (PEM). Returns true on success.
   bool setPhonePublicKey(const char* pem);
+
+  // Convenience: store an uncompressed P-256 public key (65 bytes: 0x04||X||Y).
+  // Internally converts to PEM SubjectPublicKeyInfo and saves like setPhonePublicKey().
+  bool setPhonePublicKeyRaw65(const uint8_t* uncompressed65, size_t len);
+
+  // NFC pairing helpers (for coherent NFC-only provisioning/unlock)
+  // Persist a phone keyId string in NVS (used to identify which key signed).
+  bool setPhoneKeyId(const char* keyId);
+  // Load the stored keyId into the provided buffer. On input, *inoutLen is capacity.
+  bool getPhoneKeyId(char* out, size_t* inoutLen);
+
+  // Optional: store phone certificate chain (opaque string, e.g., PEM)
+  bool setPhoneCertChain(const char* certPem);
+  bool hasPhoneCertChain();
+
+  // Compute a fingerprint of the ECU device public key (32 bytes SHA-256 of PEM for demo)
+  bool getDevicePubKeyFingerprint(uint8_t* out, size_t* inoutLen);
+
+  // Fill random bytes using provisioning DRBG
+  void randomBytes(uint8_t* out, size_t len);
 }

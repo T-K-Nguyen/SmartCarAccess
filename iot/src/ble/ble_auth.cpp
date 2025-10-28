@@ -236,14 +236,17 @@ namespace BLEAuth {
     s_drbg = drbg;
     reset_auth_state();
 
-    NimBLEService* pAuth = server->createService(kAuthServiceUUID);
+    // Use existing Auth service if one was created (e.g., by Echo), else create it
+    NimBLEService* pAuth = server->getServiceByUUID(kAuthServiceUUID);
+    if (!pAuth) {
+      pAuth = server->createService(kAuthServiceUUID);
+    }
     NimBLECharacteristic* cCliHello = pAuth->createCharacteristic(kCharClientHelloUUID, NIMBLE_PROPERTY::WRITE);
     static ClientHelloCallbacks cliHelloCb; cCliHello->setCallbacks(&cliHelloCb);
     g_cSrvHello = pAuth->createCharacteristic(kCharServerHelloUUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     NimBLECharacteristic* cCliCfm = pAuth->createCharacteristic(kCharClientCfmUUID, NIMBLE_PROPERTY::WRITE);
     static ClientConfirmCallbacks cliCfmCb; cCliCfm->setCallbacks(&cliCfmCb);
-    g_cSrvCfm = pAuth->createCharacteristic(kCharServerCfmUUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-    pAuth->start();
+  g_cSrvCfm = pAuth->createCharacteristic(kCharServerCfmUUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
 
     // Start auth worker task with a larger stack to handle mbedTLS operations
     if (s_authTask == nullptr) {
@@ -255,4 +258,18 @@ namespace BLEAuth {
   bool isSessionReady() { return s_sessionReady; }
   const uint8_t* sessionEncKey() { return s_sessKeyEnc; }
   size_t sessionEncKeyLen() { return sizeof(s_sessKeyEnc); }
+
+  void resetSession() {
+    // Clear session flags and keys/buffers to allow a fresh handshake
+    s_sessionReady = false;
+    s_keysReady = false;
+    s_cliHelloBuf.clear();
+    s_cliSigLen = 0;
+    s_cliPubLen = 0;
+    s_srvPubLen = 0;
+    s_havePendingCfm = false;
+    memset(s_pendingCfm, 0, sizeof(s_pendingCfm));
+    memset(s_sessKeyEnc, 0, sizeof(s_sessKeyEnc));
+    memset(s_sessKeyMac, 0, sizeof(s_sessKeyMac));
+  }
 }

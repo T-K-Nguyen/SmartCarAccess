@@ -15,7 +15,9 @@ DEVICE_NAME = "ESP-Smart-Car-ECU"
 
 # UUIDs (must match firmware)
 ADMIN_SVC = "9a9b9c9d-0000-4000-8000-9a9b9c9d0000"
-ADMIN_INFO = "9a9b9c9d-0003-4000-8000-9a9b9c9d0003"  # notify
+ADMIN_INFO = "9a9b9c9d-0003-4000-8000-9a9b9c9d0003"      # notify
+ADMIN_MODE = "9a9b9c9d-0001-4000-8000-9a9b9c9d0001"      # read/write (0=normal,1=enroll,2=remove)
+ADMIN_CMD = "9a9b9c9d-0002-4000-8000-9a9b9c9d0002"        # write-only small commands
 ADMIN_PHONEKEY = "9a9b9c9d-0004-4000-8000-9a9b9c9d0004"  # write
 
 AUTH_SVC = "d0d0d0d0-0000-4000-8000-d0d0d0d00000"
@@ -85,6 +87,9 @@ def hmac_sha256(key: bytes, data: bytes) -> bytes:
     return h.finalize()
 
 
+    
+
+
 async def find_device_by_name(name: str):
     devs = await BleakScanner.discover()
     for d in devs:
@@ -124,6 +129,28 @@ async def ble_upload_phone_pubkey(client: BleakClient, pem: str):
         await client.write_gatt_char(ADMIN_PHONEKEY, data[i:i+chunksz], response=True)
         await asyncio.sleep(0.05)
     await asyncio.sleep(0.3)
+
+
+async def admin_set_mode(client: BleakClient, mode: int, enable_info=True):
+    # mode: 0 normal, 1 enroll, 2 remove
+    if enable_info:
+        async def _on_info(_, data: bytearray):
+            try:
+                print(f"[AdminInfo] {data.decode('utf-8', 'ignore')}")
+            except Exception:
+                print(f"[AdminInfo] {data!r}")
+        try:
+            await client.start_notify(ADMIN_INFO, _on_info)
+        except Exception:
+            pass
+    await client.write_gatt_char(ADMIN_MODE, bytes([mode & 0xFF]), response=True)
+    await asyncio.sleep(0.1)
+
+
+async def admin_list_tags(client: BleakClient):
+    # Triggers device to print authorized tags on serial/log; also sets AdminInfo
+    await client.write_gatt_char(ADMIN_CMD, bytes([0x10]), response=True)
+    await asyncio.sleep(0.2)
 
 
 def parse_server_hello(payload: bytes) -> ServerHello:
@@ -263,6 +290,9 @@ async def main():
     ap.add_argument("--device-name", default=DEVICE_NAME, help="BLE device name")
     ap.add_argument("--keyfile", default="phone_key.pem", help="path to phone long-term key (PEM)")
     ap.add_argument("--upload-key", action="store_true", help="upload phone public key PEM to device via Admin")
+    ap.add_argument("--enroll", action="store_true", help="set Admin mode to ENROLL and wait for tag present")
+    ap.add_argument("--remove", action="store_true", help="set Admin mode to REMOVE and wait for tag present")
+    ap.add_argument("--list-tags", action="store_true", help="request device to list authorized tags")
     args = ap.parse_args()
 
     phone_priv = load_or_create_phone_key(args.keyfile)
@@ -275,7 +305,7 @@ async def main():
         print(f"Device '{args.device_name}' not found. Make sure it's advertising.")
         return 2
 
-    # Connect once; if we're uploading the key, perform that and exit to allow ECU to settle.
+    # Connect once; route to the selected action and exit thereafter.
     async with BleakClient(dev) as client:
         print("Connected:", dev)
         if args.upload_key:
@@ -283,6 +313,29 @@ async def main():
             await ble_upload_phone_pubkey(client, pem)
             print("Upload complete. Re-run this script without --upload-key to start the handshake.")
             return 0
+        if args.enroll:
+            print("Entering ENROLL mode. Present an NFC tag to the ECU...")
+            await admin_set_mode(client, 1)
+            await asyncio.sleep(10.0)
+            print("Returning to NORMAL mode.")
+            await admin_set_mode(client, 0, enable_info=False)
+            if args.list_tags:
+                print("Requesting tag list...")
+                await admin_list_tags(client)
+            return 0
+        if args.remove:
+            print("Entering REMOVE mode. Present an authorized NFC tag to remove...")
+            await admin_set_mode(client, 2)
+            await asyncio.sleep(10.0)
+            print("Returning to NORMAL mode.")
+            await admin_set_mode(client, 0, enable_info=False)
+            if args.list_tags:
+                print("Requesting tag list...")
+                await admin_list_tags(client)
+            return 0
+        if args.list_tags:
+            print("Requesting tag list...")
+            await admin_list_tags(client)
         print("Starting mutual-auth handshake...")
         await handshake(client, phone_priv)
 

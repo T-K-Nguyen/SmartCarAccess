@@ -34,19 +34,41 @@ namespace BLEMod {
                           (const unsigned char*)pers, strlen(pers));
 
     NimBLEServer *pServer = NimBLEDevice::createServer();
+    // Keep advertising after connects and restart after disconnects
+    class ServerCallbacks : public NimBLEServerCallbacks {
+      void onConnect(NimBLEServer* /*pServer*/, NimBLEConnInfo& /*connInfo*/) override {
+        Serial.println("[BLE] Central connected. Keeping advertising active.");
+        NimBLEDevice::startAdvertising();
+      }
+      void onDisconnect(NimBLEServer* /*pServer*/, NimBLEConnInfo& /*connInfo*/, int reason) override {
+        Serial.printf("[BLE] Central disconnected (reason=%d). Restarting advertising and resetting session.\n", reason);
+        BLEAuth::resetSession();
+        NimBLEDevice::startAdvertising();
+      }
+    };
+    static ServerCallbacks s_serverCbs;
+    pServer->setCallbacks(&s_serverCbs);
 
-    // Register services
-    BLEAdmin::registerService(pServer);
-    BLEAuth::registerService(pServer, &s_drbg);
-    BLEEcho::registerService(pServer, &s_drbg);
+    // Register services (Auth/Echo share the same service UUID)
+  BLEAdmin::registerService(pServer);
+  BLEEcho::registerService(pServer, &s_drbg);
+  BLEAuth::registerService(pServer, &s_drbg);
+
+  if (pServer->getServiceByUUID("9a9b9c9d-0000-4000-8000-9a9b9c9d0000")) Serial.println("[BLE] Admin service registered");
+  if (pServer->getServiceByUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000")) Serial.println("[BLE] Auth/Echo service registered");
+
+    // Start the Auth service once after all characteristics are added
+    if (auto pAuth = pServer->getServiceByUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000")) {
+      pAuth->start();
+    }
 
     // Advertising
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
     NimBLEAdvertisementData advData; advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
     pAdvertising->setAdvertisementData(advData);
     NimBLEAdvertisementData scanResp; scanResp.setName(kDeviceName); pAdvertising->setScanResponseData(scanResp);
-    pAdvertising->addServiceUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000"); // Auth/Echo service UUID
-    pAdvertising->addServiceUUID("9a9b9c9d-0000-4000-8000-9a9b9c9d0000"); // Admin service UUID
+  pAdvertising->addServiceUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000"); // Auth/Echo service UUID
+  pAdvertising->addServiceUUID("9a9b9c9d-0000-4000-8000-9a9b9c9d0000"); // Admin service UUID
     pAdvertising->start();
 
     Serial.printf("[BLE] Advertising started: %s\n", kDeviceName);

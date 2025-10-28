@@ -14,4 +14,7 @@ namespace BLEAuth {
   bool isSessionReady();
   const uint8_t* sessionEncKey();
   size_t sessionEncKeyLen();
+
+  // Reset the current session state (keys, buffers) on disconnect.
+  void resetSession();
 }

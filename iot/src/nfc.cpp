@@ -4,6 +4,7 @@
 #include "../include/nfc.h"
 #include "../include/provisioning.h"
 #include "../include/ble/ble.h"
+#include <vector>
 
 namespace {
   // I2C pins and PN532 control pins (keep defaults from existing code)
@@ -212,6 +213,35 @@ namespace {
       }
     }
   }
+
+  // --- APDU helpers and HCE provisioning implementation ---
+  static void apduBuildSelectAid(const uint8_t* aid, size_t aidLen, std::vector<uint8_t>& out) {
+    out.clear(); out.reserve(6 + aidLen);
+    out.push_back(0x00); // CLA
+    out.push_back(0xA4); // INS = SELECT
+    out.push_back(0x04); // P1 = by AID
+    out.push_back(0x00); // P2
+    out.push_back((uint8_t)aidLen); // Lc
+    out.insert(out.end(), aid, aid + aidLen);
+    out.push_back(0x00); // Le
+  }
+
+  static void apduBuildGetInfo(const uint8_t* veh, size_t vehLen, const uint8_t* nonce, size_t nonceLen, std::vector<uint8_t>& out) {
+    out.clear();
+    const size_t Lc = vehLen + nonceLen;
+    out.reserve(5 + Lc);
+    out.push_back(0x00); // CLA
+    out.push_back(0xCA); // INS = GET DATA (customized semantics)
+    out.push_back(0x00); // P1
+    out.push_back(0x00); // P2
+    out.push_back((uint8_t)Lc); // Lc
+    if (veh && vehLen) out.insert(out.end(), veh, veh + vehLen);
+    if (nonce && nonceLen) out.insert(out.end(), nonce, nonce + nonceLen);
+  }
+
+  static bool apduOk(const uint8_t* resp, uint8_t len) {
+    return len >= 2 && resp[len-2] == 0x90 && resp[len-1] == 0x00;
+  }
 }
 
 namespace NFCMod {
@@ -253,6 +283,80 @@ namespace NFCMod {
     memcpy(uid, s_lastUid, n);
     *uidLen = n;
     s_uidReady = false; // consume once
+    return true;
+  }
+
+  bool runHceProvisioningOnce(const uint8_t* aid, size_t aidLen, uint32_t timeoutMs) {
+    if (!s_nfcReady || !aid || aidLen == 0 || aidLen > 16) return false;
+    Serial.println("[NFC] HCE provisioning: waiting for phone...");
+
+    // Wait for a passive ISO14443A target (phone HCE) within timeout
+    unsigned long t0 = millis();
+    uint8_t uid[10]; uint8_t uidLen = 0;
+    bool present = false;
+    while (millis() - t0 < timeoutMs) {
+      if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen)) { present = true; break; }
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!present) { Serial.println("[NFC] No phone detected for HCE provisioning."); return false; }
+
+    // SELECT AID
+    std::vector<uint8_t> apdu; apduBuildSelectAid(aid, aidLen, apdu);
+    uint8_t resp[255]; uint8_t rlen = sizeof(resp);
+    if (!nfc.inDataExchange(apdu.data(), apdu.size(), resp, &rlen) || !apduOk(resp, rlen)) {
+      Serial.println("[NFC] SELECT AID failed.");
+      return false;
+    }
+    Serial.println("[NFC] AID selected.");
+
+    // Build GET_INFO with vehicleId (first 8 bytes of ECU pubkey fingerprint) and a random nonce (16 bytes)
+    uint8_t fpr[32]; size_t F = sizeof(fpr); if (!Provisioning::getDevicePubKeyFingerprint(fpr, &F)) F = 0;
+    uint8_t veh[8]; size_t vehLen = 0;
+    if (F >= 8) { memcpy(veh, fpr, 8); vehLen = 8; }
+    uint8_t nonce[16]; Provisioning::randomBytes(nonce, sizeof(nonce));
+
+    apdu.clear(); apduBuildGetInfo(vehLen?veh:nullptr, vehLen, nonce, sizeof(nonce), apdu);
+    rlen = sizeof(resp);
+    if (!nfc.inDataExchange(apdu.data(), apdu.size(), resp, &rlen) || !apduOk(resp, rlen)) {
+      Serial.println("[NFC] GET_INFO failed.");
+      return false;
+    }
+    // Parse payload (without SW): { keyIdLen(1) | keyId | pubKey(65) | certLen(2) | cert... [| sigLen(2) | sig...] }
+    if (rlen < 2 + 1 + 65 + 2) { Serial.println("[NFC] R-APDU too short."); return false; }
+    uint8_t datalen = rlen - 2;
+    const uint8_t* p = resp;
+    uint8_t kIdLen = p[0]; size_t idx = 1;
+    if (idx + kIdLen + 65 + 2 > datalen) { Serial.println("[NFC] Bad keyId/pub layout."); return false; }
+    // Safe copy keyId (text) into a bounded buffer
+    char keyIdBuf[64];
+    if (kIdLen >= sizeof(keyIdBuf)) kIdLen = sizeof(keyIdBuf) - 1;
+    memcpy(keyIdBuf, p + idx, kIdLen);
+    keyIdBuf[kIdLen] = '\0';
+    String keyId(keyIdBuf);
+    idx += kIdLen;
+    const uint8_t* pub = p + idx; idx += 65;
+    uint16_t certLen = p[idx] | (p[idx+1] << 8); idx += 2;
+    if (idx + certLen > datalen) { Serial.println("[NFC] Bad certLen."); return false; }
+    String cert;
+    if (certLen) {
+      char* certBuf = (char*)malloc(certLen + 1);
+      if (!certBuf) { Serial.println("[NFC] OOM for cert buf."); return false; }
+      memcpy(certBuf, p + idx, certLen);
+      certBuf[certLen] = '\0';
+      cert = String(certBuf);
+      free(certBuf);
+    }
+
+    // Store in provisioning (convert raw pubkey 65 bytes if needed)
+    bool ok = false;
+    if (pub[0] == 0x04) ok = Provisioning::setPhonePublicKeyRaw65(pub, 65);
+    else ok = Provisioning::setPhonePublicKey((const char*)pub); // fallback if phone returned PEM
+    if (!ok) { Serial.println("[NFC] Failed to store phone public key."); return false; }
+    if (keyId.length()) Provisioning::setPhoneKeyId(keyId.c_str());
+    if (certLen && cert.length()) Provisioning::setPhoneCertChain(cert.c_str());
+
+    Serial.printf("[NFC] Provisioned keyId='%s', pubLen=%u, certLen=%u\n",
+                  keyId.c_str(), (unsigned)65, (unsigned)certLen);
     return true;
   }
 }
