@@ -1,26 +1,44 @@
 {
   "project_info": {
-    "project_number": "917652812987",
-    "project_id": "smart-car-de21b",
-    "storage_bucket": "smart-car-de21b.firebasestorage.app"
+    "project_number": "921499533697",
+    "project_id": "smart-car-access",
+    "storage_bucket": "smart-car-access.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:917652812987:android:c3cecfa14d8d39b8ba659e",
+        "mobilesdk_app_id": "1:921499533697:android:ee30dbb5e6f57fad17a880",
         "android_client_info": {
           "package_name": "com.example.smart_car_app"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "921499533697-ebmbp9mrpa1qo46sapkt06ujm5n86dm7.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.smart_car_app",
+            "certificate_hash": "7ca5306a6a703226b021a619678ecd267931b18a"
+          }
+        },
+        {
+          "client_id": "921499533697-ea4edrhj147qbqh637sni2mm810nk2gl.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
-          "current_key": "AIzaSyAnTAnoRmzkSmvC1RC4boOvDdTjHUWsdb0"
+          "current_key": "AIzaSyAPld1qbdWAzX2nDrez-wszeHnaaVTcBBg"
         }
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "921499533697-ea4edrhj147qbqh637sni2mm810nk2gl.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }

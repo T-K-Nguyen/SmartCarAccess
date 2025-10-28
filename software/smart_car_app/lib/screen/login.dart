@@ -1,7 +1,7 @@
 // ignore_for_file: use_build_context_synchronously
 
 import 'package:smart_car_app/screen/forgot_password.dart';
-import 'package:smart_car_app/screen/home.dart';
+import 'package:smart_car_app/screen/dashboard.dart';
 import 'package:smart_car_app/service/auth.dart';
 import 'package:smart_car_app/screen/signup.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -31,7 +31,7 @@ class _LogInState extends State<LogIn> {
       passwordcontroller.clear();
       email = '';
       password = '';
-      Navigator.push(context, MaterialPageRoute(builder: (context) => Home()));
+      Navigator.push(context, MaterialPageRoute(builder: (context) => const Dashboard()));
     } on FirebaseAuthException catch (e) {
       if (e.code == 'user-not-found') {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
