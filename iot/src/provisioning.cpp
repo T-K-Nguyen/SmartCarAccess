@@ -44,7 +44,10 @@ namespace {
     prefs.begin(kPrefsNs, true);
     // Try multi-tag blob first
     uint8_t buf[1 + MAX_TAGS * (1 + MAX_UID_LEN)];
-    size_t n = prefs.getBytes(kTagsBlob, buf, sizeof(buf));
+    size_t n = 0;
+    if (prefs.isKey(kTagsBlob)) {
+      n = prefs.getBytes(kTagsBlob, buf, sizeof(buf));
+    }
     if (n > 0) {
       prefs.end();
       uint8_t idx = 0;
@@ -63,7 +66,10 @@ namespace {
     }
     // Fallback to legacy single "tag"
     uint8_t legacy[16];
-    size_t legacyLen = prefs.getBytes(kTagUid, legacy, sizeof(legacy));
+    size_t legacyLen = 0;
+    if (prefs.isKey(kTagUid)) {
+      legacyLen = prefs.getBytes(kTagUid, legacy, sizeof(legacy));
+    }
     prefs.end();
     if (legacyLen > 0 && legacyLen <= MAX_UID_LEN) {
       out.count = 1;
@@ -175,11 +181,17 @@ void printInfo() {
   Serial.println();
   Serial.println("[Prov] ECC key loaded. Cert stored: ");
   prefs.begin(kPrefsNs, true);
-  String cert = prefs.getString(kCertPem, "(none)");
-  String keyId = prefs.getString(kKeyId, "(no keyId)");
+  String cert;
+  if (prefs.isKey(kCertPem)) {
+    cert = prefs.getString(kCertPem, "");
+  }
+  String keyId;
+  if (prefs.isKey(kKeyId)) {
+    keyId = prefs.getString(kKeyId, "");
+  }
   prefs.end();
-  Serial.println(cert);
-  Serial.print("[Prov] phone keyId: "); Serial.println(keyId);
+  Serial.println(cert.length() ? cert : String("(none)"));
+  Serial.print("[Prov] phone keyId: "); Serial.println(keyId.length() ? keyId : String("(no keyId)"));
   TagList tl;
   if (loadTagList(tl) && tl.count > 0) {
     for (uint8_t i = 0; i < tl.count; ++i) {

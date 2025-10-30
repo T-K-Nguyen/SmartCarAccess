@@ -295,7 +295,10 @@ namespace NFCMod {
     uint8_t uid[10]; uint8_t uidLen = 0;
     bool present = false;
     while (millis() - t0 < timeoutMs) {
-      if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen)) { present = true; break; }
+      if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen)) {
+        present = true;
+        break;
+      }
       vTaskDelay(pdMS_TO_TICKS(50));
     }
     if (!present) { Serial.println("[NFC] No phone detected for HCE provisioning."); return false; }
@@ -303,8 +306,15 @@ namespace NFCMod {
     // SELECT AID
     std::vector<uint8_t> apdu; apduBuildSelectAid(aid, aidLen, apdu);
     uint8_t resp[255]; uint8_t rlen = sizeof(resp);
-    if (!nfc.inDataExchange(apdu.data(), apdu.size(), resp, &rlen) || !apduOk(resp, rlen)) {
-      Serial.println("[NFC] SELECT AID failed.");
+    if (!nfc.inDataExchange(apdu.data(), apdu.size(), resp, &rlen)) {
+      Serial.println("[NFC] SELECT AID exchange failed (likely non-ISO14443-4 tag).");
+      nfc.SAMConfig();
+      return false;
+    }
+    if (!apduOk(resp, rlen)) {
+      uint16_t sw = (rlen >= 2) ? ((resp[rlen-2] << 8) | resp[rlen-1]) : 0;
+      Serial.printf("[NFC] SELECT AID rejected (SW=%04X).\n", sw);
+      nfc.SAMConfig();
       return false;
     }
     Serial.println("[NFC] AID selected.");
@@ -317,8 +327,15 @@ namespace NFCMod {
 
     apdu.clear(); apduBuildGetInfo(vehLen?veh:nullptr, vehLen, nonce, sizeof(nonce), apdu);
     rlen = sizeof(resp);
-    if (!nfc.inDataExchange(apdu.data(), apdu.size(), resp, &rlen) || !apduOk(resp, rlen)) {
-      Serial.println("[NFC] GET_INFO failed.");
+    if (!nfc.inDataExchange(apdu.data(), apdu.size(), resp, &rlen)) {
+      Serial.println("[NFC] GET_INFO exchange failed (phone removed?).");
+      nfc.SAMConfig();
+      return false;
+    }
+    if (!apduOk(resp, rlen)) {
+      uint16_t sw = (rlen >= 2) ? ((resp[rlen-2] << 8) | resp[rlen-1]) : 0;
+      Serial.printf("[NFC] GET_INFO rejected (SW=%04X).\n", sw);
+      nfc.SAMConfig();
       return false;
     }
     // Parse payload (without SW): { keyIdLen(1) | keyId | pubKey(65) | certLen(2) | cert... [| sigLen(2) | sig...] }
