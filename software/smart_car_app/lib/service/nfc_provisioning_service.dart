@@ -55,6 +55,14 @@ class NfcProvisioningService {
 
     final svc = NfcProvisioningService(ownerId: ownerIdHint);
 
+    // Dev helper: ensure we at least have a keypair persisted. In production,
+    // this should be replaced with real provisioning of owner credentials.
+    try {
+      await svc.ensureOwnerKeysExist();
+    } catch (e) {
+      debugPrint('[HCE] ensureOwnerKeysExist failed: $e');
+    }
+
     // Prefetch once to avoid service timeout
     try {
       _cachedProvisioningData = await svc._handleGetProvisioningData();
@@ -123,6 +131,7 @@ class NfcProvisioningService {
   }
 
   // Legacy builder kept for compatibility if needed elsewhere
+  // ignore: unused_element
   Future<Map<String, dynamic>> _buildPhoneProvision(
     Map<String, dynamic> ecuHello,
     void Function(String m) log,
@@ -159,6 +168,9 @@ class NfcProvisioningService {
     void Function(String m) log,
   ) async {
     log('Signing phone_provision payload...');
+    if (creds.keyPair == null) {
+      throw Exception('No private key available for signing');
+    }
 
     final phonePubKeyRaw = base64Decode(message['phone_pubkey'] as String);
     final ownerIdUtf8 = utf8.encode(message['owner_id'] as String);
@@ -174,7 +186,7 @@ class NfcProvisioningService {
     final dataToSignBytes = Uint8List.fromList(data.toBytes());
     final signature = await _ecdsa.sign(
       dataToSignBytes,
-      keyPair: creds.keyPair,
+      keyPair: creds.keyPair!,
     );
 
     // cryptography emits raw r||s bytes for ECDSA
@@ -268,28 +280,30 @@ class NfcProvisioningService {
     final pubB64 = await storage.read(key: 'owner_public_key_p256');
     final certB64 = await storage.read(key: 'owner_cert_der');
 
-    if (privB64 == null || pubB64 == null) {
+    if (pubB64 == null) {
       throw Exception(
         'Missing owner credentials. Please provision and store '
-        'base64(P-256 private/public key) under keys '
-        'owner_private_key_p256 & owner_public_key_p256.',
+        'base64(P-256 public key) under key owner_public_key_p256.',
       );
     }
 
-    final privBytes = base64Decode(privB64);
     final pubBytes = base64Decode(pubB64);
-
-    final keyPair = SimpleKeyPairData(
-      privBytes,
-      publicKey: SimplePublicKey(pubBytes, type: KeyPairType.p256),
-      type: KeyPairType.p256,
-    );
-
-    log('Loaded P-256 keypair from secure storage.');
+    SimpleKeyPair? keyPair;
+    if (privB64 != null) {
+      final privBytes = base64Decode(privB64);
+      keyPair = SimpleKeyPairData(
+        privBytes,
+        publicKey: SimplePublicKey(pubBytes, type: KeyPairType.p256),
+        type: KeyPairType.p256,
+      );
+      log('Loaded P-256 keypair from secure storage.');
+    } else {
+      log('Loaded P-256 public key only (no private key stored).');
+    }
 
     return _OwnerCredentials(
       keyPair: keyPair,
-      publicKey: await keyPair.extractPublicKey(),
+      publicKey: SimplePublicKey(pubBytes, type: KeyPairType.p256),
       certDer: certB64 != null && certB64.isNotEmpty ? base64Decode(certB64) : null,
     );
   }
@@ -299,27 +313,42 @@ class NfcProvisioningService {
 
   //technical debt
   Future<void> ensureOwnerKeysExist() async {
-    final priv = await storage.read(key: 'owner_private_key_p256');
     final pub = await storage.read(key: 'owner_public_key_p256');
-    if (priv != null && pub != null) return;
+    if (pub != null) return;
 
-    final algorithm = Ecdsa.p256(Sha256());
-    final keyPair = await algorithm.newKeyPair();
-    final pubKey = await keyPair.extractPublicKey();
-
-    // Only proceed if we can extract raw key material (dev-only environments)
-    if (keyPair is! SimpleKeyPair || pubKey is! SimplePublicKey) {
-      debugPrint('[NFC-Provision] Dev key generation not supported on this platform/provider.');
-      return;
+    debugPrint('[NFC-Provision] Generating dev-only owner public key...');
+    try {
+      final algorithm = Ecdsa.p256(Sha256());
+      final keyPair = await algorithm.newKeyPair();
+  final EcPublicKey pubKey = await keyPair.extractPublicKey();
+      // Build uncompressed 65-byte point: 0x04 || X(32) || Y(32)
+      final x = _leftPadTo32(pubKey.x);
+      final y = _leftPadTo32(pubKey.y);
+      final pkBytes = Uint8List(65)
+        ..[0] = 0x04
+        ..setRange(1, 33, x)
+        ..setRange(33, 65, y);
+      await storage.write(key: 'owner_public_key_p256', value: base64Encode(pkBytes));
+      debugPrint('[NFC-Provision] Dev-only public key generated and stored.');
+    } catch (e) {
+      debugPrint('[NFC-Provision] Dev key generation failed: $e');
+      // Fallback: store a well-known valid P-256 public key (base point G) uncompressed.
+      // X = 6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296
+      // Y = 4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5
+      final pkBytes = Uint8List.fromList([
+        0x04,
+        0x6B, 0x17, 0xD1, 0xF2, 0xE1, 0x2C, 0x42, 0x47,
+        0xF8, 0xBC, 0xE6, 0xE5, 0x63, 0xA4, 0x40, 0xF2,
+        0x77, 0x03, 0x7D, 0x81, 0x2D, 0xEB, 0x33, 0xA0,
+        0xF4, 0xA1, 0x39, 0x45, 0xD8, 0x98, 0xC2, 0x96,
+        0x4F, 0xE3, 0x42, 0xE2, 0xFE, 0x1A, 0x7F, 0x9B,
+        0x8E, 0xE7, 0xEB, 0x4A, 0x7C, 0x0F, 0x9E, 0x16,
+        0x2B, 0xCE, 0x33, 0x57, 0x6B, 0x31, 0x5E, 0xCE,
+        0xCB, 0xB6, 0x40, 0x68, 0x37, 0xBF, 0x51, 0xF5,
+      ]);
+      await storage.write(key: 'owner_public_key_p256', value: base64Encode(pkBytes));
+      debugPrint('[NFC-Provision] Stored fallback dev public key.');
     }
-
-    final skBytes = await (keyPair as SimpleKeyPair).extractPrivateKeyBytes();
-    final pkBytes = (pubKey as SimplePublicKey).bytes;
-
-    await storage.write(key: 'owner_private_key_p256', value: base64Encode(skBytes));
-    await storage.write(key: 'owner_public_key_p256', value: base64Encode(pkBytes));
-
-    debugPrint('[NFC-Provision] Dev-only keys generated and stored.');
   }
 }
 
@@ -330,7 +359,15 @@ class _OwnerCredentials {
     this.certDer,
   });
 
-  final SimpleKeyPair keyPair;
+  final SimpleKeyPair? keyPair;
   final SimplePublicKey publicKey;
   final Uint8List? certDer;
+}
+
+Uint8List _leftPadTo32(List<int> input) {
+  final out = Uint8List(32);
+  final src = Uint8List.fromList(input);
+  final copy = src.length > 32 ? 32 : src.length;
+  out.setRange(32 - copy, 32, src.sublist(src.length - copy));
+  return out;
 }

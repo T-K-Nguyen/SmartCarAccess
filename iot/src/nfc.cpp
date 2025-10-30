@@ -23,6 +23,8 @@ namespace {
   uint8_t s_lastUid[7];
   uint8_t s_lastUidLen = 0;
   volatile bool s_uidReady = false;
+  // Guard PN532 access across the poll task and provisioning routine
+  static SemaphoreHandle_t s_nfcMutex = nullptr;
 
   // Helpers
   void hwResetPN532() {
@@ -143,7 +145,13 @@ namespace {
         vTaskDelay(pdMS_TO_TICKS(1500));
         continue;
       }
+      // Try to acquire mutex briefly; skip this cycle if busy (e.g., provisioning is running)
+      if (s_nfcMutex && xSemaphoreTake(s_nfcMutex, pdMS_TO_TICKS(5)) != pdTRUE) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        continue;
+      }
       bool found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
+      if (s_nfcMutex) xSemaphoreGive(s_nfcMutex);
       if (found) {
         bool sameAsLast = (uidLength == lastPrintedLen) && (memcmp(uid, lastPrintedUid, uidLength) == 0);
         bool cooldownElapsed = (millis() - lastPrintMs) >= printCooldownMs;
@@ -198,7 +206,13 @@ namespace {
         failCount++;
         // If we've been failing for a while, probe and attempt recovery
         if ((millis() - lastGood > 1000) || failCount > 8) {
-          uint32_t v = nfc.getFirmwareVersion();
+          uint32_t v;
+          if (s_nfcMutex && xSemaphoreTake(s_nfcMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+            v = nfc.getFirmwareVersion();
+            xSemaphoreGive(s_nfcMutex);
+          } else {
+            v = 0; // force recovery if we can't query
+          }
           if (!v) {
             Serial.println("[NFC] Lost PN532, attempting re-init...");
             s_nfcReady = false;
@@ -262,9 +276,14 @@ namespace NFCMod {
                     (unsigned)((versiondata >> 24) & 0xFF),
                     (unsigned)((versiondata >> 16) & 0xFF),
                     (unsigned)((versiondata >> 8) & 0xFF));
+      // Increase target activation retries to improve ISO-DEP activation chances
+      nfc.setPassiveActivationRetries(0xFF);
       nfc.SAMConfig();
       Serial.println("[NFC] Waiting for NFC tag...");
       s_nfcReady = true;
+    }
+    if (!s_nfcMutex) {
+      s_nfcMutex = xSemaphoreCreateMutex();
     }
     s_nfcInitAttempted = true;
   }
@@ -290,6 +309,15 @@ namespace NFCMod {
     if (!s_nfcReady || !aid || aidLen == 0 || aidLen > 16) return false;
     Serial.println("[NFC] HCE provisioning: waiting for phone...");
 
+    // Ensure exclusive access to PN532 for the duration of provisioning
+    if (s_nfcMutex) {
+      // Wait up to the total timeout to acquire
+      if (xSemaphoreTake(s_nfcMutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) {
+        Serial.println("[NFC] Could not acquire NFC bus for provisioning.");
+        return false;
+      }
+    }
+
     // Wait for a passive ISO14443A target (phone HCE) within timeout
     unsigned long t0 = millis();
     uint8_t uid[10]; uint8_t uidLen = 0;
@@ -301,20 +329,27 @@ namespace NFCMod {
       }
       vTaskDelay(pdMS_TO_TICKS(50));
     }
-    if (!present) { Serial.println("[NFC] No phone detected for HCE provisioning."); return false; }
+    if (!present) {
+      Serial.println("[NFC] No phone detected for HCE provisioning.");
+      if (s_nfcMutex) xSemaphoreGive(s_nfcMutex);
+      return false;
+    }
 
-    // SELECT AID
+  // SELECT AID
+  Serial.println("[NFC] Attempting SELECT AID...");
     std::vector<uint8_t> apdu; apduBuildSelectAid(aid, aidLen, apdu);
     uint8_t resp[255]; uint8_t rlen = sizeof(resp);
     if (!nfc.inDataExchange(apdu.data(), apdu.size(), resp, &rlen)) {
       Serial.println("[NFC] SELECT AID exchange failed (likely non-ISO14443-4 tag).");
       nfc.SAMConfig();
+      if (s_nfcMutex) xSemaphoreGive(s_nfcMutex);
       return false;
     }
     if (!apduOk(resp, rlen)) {
       uint16_t sw = (rlen >= 2) ? ((resp[rlen-2] << 8) | resp[rlen-1]) : 0;
       Serial.printf("[NFC] SELECT AID rejected (SW=%04X).\n", sw);
       nfc.SAMConfig();
+      if (s_nfcMutex) xSemaphoreGive(s_nfcMutex);
       return false;
     }
     Serial.println("[NFC] AID selected.");
@@ -330,12 +365,14 @@ namespace NFCMod {
     if (!nfc.inDataExchange(apdu.data(), apdu.size(), resp, &rlen)) {
       Serial.println("[NFC] GET_INFO exchange failed (phone removed?).");
       nfc.SAMConfig();
+      if (s_nfcMutex) xSemaphoreGive(s_nfcMutex);
       return false;
     }
     if (!apduOk(resp, rlen)) {
       uint16_t sw = (rlen >= 2) ? ((resp[rlen-2] << 8) | resp[rlen-1]) : 0;
       Serial.printf("[NFC] GET_INFO rejected (SW=%04X).\n", sw);
       nfc.SAMConfig();
+      if (s_nfcMutex) xSemaphoreGive(s_nfcMutex);
       return false;
     }
     // Parse payload (without SW): { keyIdLen(1) | keyId | pubKey(65) | certLen(2) | cert... [| sigLen(2) | sig...] }
@@ -368,12 +405,17 @@ namespace NFCMod {
     bool ok = false;
     if (pub[0] == 0x04) ok = Provisioning::setPhonePublicKeyRaw65(pub, 65);
     else ok = Provisioning::setPhonePublicKey((const char*)pub); // fallback if phone returned PEM
-    if (!ok) { Serial.println("[NFC] Failed to store phone public key."); return false; }
+    if (!ok) {
+      Serial.println("[NFC] Failed to store phone public key.");
+      if (s_nfcMutex) xSemaphoreGive(s_nfcMutex);
+      return false;
+    }
     if (keyId.length()) Provisioning::setPhoneKeyId(keyId.c_str());
     if (certLen && cert.length()) Provisioning::setPhoneCertChain(cert.c_str());
 
     Serial.printf("[NFC] Provisioned keyId='%s', pubLen=%u, certLen=%u\n",
                   keyId.c_str(), (unsigned)65, (unsigned)certLen);
+    if (s_nfcMutex) xSemaphoreGive(s_nfcMutex);
     return true;
   }
 }

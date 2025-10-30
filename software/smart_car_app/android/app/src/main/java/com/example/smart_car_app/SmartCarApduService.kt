@@ -2,11 +2,12 @@ package com.example.smart_car_app
 
 import android.nfc.cardemulation.HostApduService
 import android.os.Bundle
+import android.util.Base64
 import android.util.Log
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.MethodChannel
-import java.nio.charset.Charset
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -51,10 +52,12 @@ class SmartCarApduService : HostApduService() {
             }
         }
 
-        // GET DATA (example): 00 CA 00 00
+        // GET INFO (custom): 00 CA 00 00 {vehicleId || nonce}
         if (isGetData(commandApdu)) {
+            Log.i(TAG, "GET_INFO request received; fetching data from Flutter...")
             val data = getProvisioningDataFromFlutter()
             return if (data != null) {
+                Log.i(TAG, "Returning provisioning payload (${data.size} bytes) + 0x9000")
                 data + SW_SUCCESS
             } else {
                 SW_UNKNOWN
@@ -93,17 +96,12 @@ class SmartCarApduService : HostApduService() {
             channel.invokeMethod("getProvisioningData", null, object : MethodChannel.Result {
                 override fun success(result: Any?) {
                     try {
-                        // Expect Map<String, Any?> or a String (JSON)
-                        val json = when (result) {
-                            is Map<*, *> -> mapToJson(result as Map<String, Any?>)
-                            is String -> result
-                            else -> null
-                        }
-                        if (json != null) {
-                            resultBytes = json.toByteArray(Charset.forName("UTF-8"))
+                        resultBytes = buildProvisioningPayload(result)
+                        if (resultBytes == null) {
+                            Log.e(TAG, "Provisioning payload formatting failed")
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "Error parsing provisioning data: ${e.message}", e)
+                        Log.e(TAG, "Error building provisioning payload: ${e.message}", e)
                     } finally {
                         latch.countDown()
                     }
@@ -124,8 +122,8 @@ class SmartCarApduService : HostApduService() {
             latch.countDown()
         }
 
-        // Wait up to 2 seconds for Dart to respond
-        latch.await(2, TimeUnit.SECONDS)
+        // Wait up to 4 seconds for Dart to respond
+        latch.await(4, TimeUnit.SECONDS)
         return resultBytes
     }
 
@@ -145,47 +143,66 @@ class SmartCarApduService : HostApduService() {
         return apdu.size >= 4 && apdu[0] == 0x00.toByte() && apdu[1] == 0xCA.toByte() && apdu[2] == 0x00.toByte() && apdu[3] == 0x00.toByte()
     }
 
-    private fun mapToJson(map: Map<String, Any?>): String {
-        // Minimal JSON building to avoid adding deps
-        val sb = StringBuilder()
-        sb.append('{')
-        var first = true
-        for ((k, v) in map) {
-            if (!first) sb.append(',')
-            first = false
-            sb.append('"').append(escape(k)).append('"').append(':')
-            sb.append(valueToJson(v))
+    @Suppress("UNCHECKED_CAST")
+    private fun buildProvisioningPayload(result: Any?): ByteArray? {
+        if (result !is Map<*, *>) {
+            Log.e(TAG, "Expected Map from Flutter but got ${result?.javaClass}")
+            return null
         }
-        sb.append('}')
-        return sb.toString()
-    }
 
-    private fun valueToJson(v: Any?): String {
-        return when (v) {
-            null -> "null"
-            is Number, is Boolean -> v.toString()
-            is Map<*, *> -> mapToJson(v as Map<String, Any?>)
-            is Iterable<*> -> {
-                val sb = StringBuilder("[")
-                var first = true
-                for (item in v) {
-                    if (!first) sb.append(',')
-                    first = false
-                    sb.append(valueToJson(item))
-                }
-                sb.append(']')
-                sb.toString()
+        val map = result as Map<String, Any?>
+        val keyId = map["keyId"] as? String ?: run {
+            Log.e(TAG, "Missing keyId in provisioning data")
+            return null
+        }
+        val pubB64 = map["publicKey"] as? String ?: run {
+            Log.e(TAG, "Missing publicKey in provisioning data")
+            return null
+        }
+        val certB64 = map["certChain"] as? String ?: ""
+
+        val keyIdBytes = keyId.toByteArray(Charsets.UTF_8)
+        if (keyIdBytes.size > 255) {
+            Log.e(TAG, "keyId too long (${keyIdBytes.size} bytes)")
+            return null
+        }
+
+        val pubBytes = try {
+            Base64.decode(pubB64, Base64.DEFAULT)
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "publicKey base64 decode failed", e)
+            return null
+        }
+        if (pubBytes.size != 65 || pubBytes[0] != 0x04.toByte()) {
+            Log.e(TAG, "publicKey must be uncompressed P-256 (65 bytes, starts with 0x04). Got len=${pubBytes.size}")
+            return null
+        }
+
+        val certBytes = if (certB64.isNotEmpty()) {
+            try {
+                Base64.decode(certB64, Base64.DEFAULT)
+            } catch (e: IllegalArgumentException) {
+                Log.e(TAG, "certChain base64 decode failed", e)
+                return null
             }
-            else -> '"' + escape(v.toString()) + '"'
+        } else {
+            ByteArray(0)
         }
-    }
+        if (certBytes.size > 0xFFFF) {
+            Log.e(TAG, "certChain too long (${certBytes.size} bytes)")
+            return null
+        }
 
-    private fun escape(s: String): String {
-        return s
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\t", "\\t")
+        val payload = ByteArrayOutputStream()
+        payload.write(keyIdBytes.size)
+        payload.write(keyIdBytes)
+        payload.write(pubBytes)
+        payload.write(certBytes.size and 0xFF)
+        payload.write((certBytes.size shr 8) and 0xFF)
+        if (certBytes.isNotEmpty()) {
+            payload.write(certBytes)
+        }
+
+        return payload.toByteArray()
     }
 }

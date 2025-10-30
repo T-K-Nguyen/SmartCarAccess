@@ -40,6 +40,7 @@ dependencies:
   # nfc_manager: ^3.5.0
   cryptography: ^2.7.0
   flutter_secure_storage: ^9.2.2
+  pointycastle: ^3.8.0
 
 dev_dependencies:
   flutter_test:
