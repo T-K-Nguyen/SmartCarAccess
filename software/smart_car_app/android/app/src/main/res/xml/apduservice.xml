@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/desc_smartcar_hce"
+    android:requireDeviceUnlock="true"
+    android:apduServiceBanner="@mipmap/ic_launcher">
+    <aid-group android:category="other" android:description="@string/desc_smartcar_hce">
+        <aid-filter android:name="F00102030405" />
+    </aid-group>
+</host-apdu-service>
