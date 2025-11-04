@@ -23,6 +23,8 @@ namespace {
 
   // polling task handle
   static TaskHandle_t s_task = nullptr;
+  static bool s_provHold = false; // when true, keep polling task suspended externally
+  static SemaphoreHandle_t s_pn532Mutex = nullptr;
 
   void TaskNFC(void* pv) {
     uint8_t uid[7];
@@ -32,9 +34,20 @@ namespace {
     uint8_t lastPrintLen = 0;
     uint32_t lastPrintAt = 0;
     const uint32_t cooldownMs = 1500;
+    
     for (;;) {
       if (!s_nfcReady) { vTaskDelay(pdMS_TO_TICKS(200)); continue; }
+
+      // 🔥 Do NOT poll during provisioning
+      if (s_provHold) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+        continue;
+      }
+      
+      // Normal tag polling when NOT in provisioning mode
+      xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
       bool found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen);
+      xSemaphoreGive(s_pn532Mutex);
       if (found) {
         bool same = (uidLen == lastPrintLen) && (memcmp(uid, lastPrintUid, uidLen) == 0);
         bool cool = (millis() - lastPrintAt) >= cooldownMs;
@@ -85,12 +98,29 @@ namespace NFCMod {
                   (unsigned)((versiondata >> 8) & 0xFF));
     // Configure SAM (required for reading passive targets/APDUs later)
     nfc.SAMConfig();
+    
+    // Initialize bus mutex
+    if (!s_pn532Mutex) {
+      s_pn532Mutex = xSemaphoreCreateMutex();
+    }
+    
     s_nfcReady = true;
   }
 
   void startTask() {
     if (!s_task) {
       xTaskCreate(TaskNFC, "NFC Poll", 4096, nullptr, 2, &s_task);
+    }
+  }
+
+  void setProvisionHold(bool enabled) {
+    s_provHold = enabled;
+    if (s_task) {
+      if (enabled) {
+        vTaskSuspend(s_task);
+      } else {
+        vTaskResume(s_task);
+      }
     }
   }
 
@@ -149,36 +179,35 @@ namespace NFCMod {
       return (elapsed >= overallTimeoutMs) ? 0 : (overallTimeoutMs - elapsed);
     };
 
-    // S1: INIT_NFC_FOR_PROVISION — suspend polling, re-init PN532
+  // S1: INIT_NFC_FOR_PROVISION — suspend polling unless held externally, light setup
   bool suspended = false;
-  if (s_task) { vTaskSuspend(s_task); suspended = true; }
-    // Keep I2C params stable
-    Wire.setTimeOut(1000);
-    Wire.setClock(100000);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    nfc.begin();
-    uint32_t versiondata = 0;
-    for (int i = 0; i < 2 && !versiondata; ++i) {
-      versiondata = nfc.getFirmwareVersion();
-      if (!versiondata) vTaskDelay(pdMS_TO_TICKS(30));
-    }
-    if (!versiondata) {
-      if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "PN532 not found");
-      nfc.SAMConfig();
-      if (s_task && suspended) vTaskResume(s_task);
-      return false;
-    }
-    nfc.setPassiveActivationRetries(0xFF);
-    nfc.SAMConfig();
+  if (!s_provHold && s_task) { vTaskSuspend(s_task); suspended = true; }
+    // assume PN532 already initialized before SM
+    xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    nfc.setPassiveActivationRetries(0xFF);  // ok
+    nfc.SAMConfig();   // light reset only
+    xSemaphoreGive(s_pn532Mutex);
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     // S2: WAIT_FOR_PHONE_TAP — loop until phone present or timeout
+    Serial.println("[Prov][NFC] Waiting for phone tap...");
     {
       uint8_t uid[10]; uint8_t uidLen = 0; bool present = false;
       while (timeLeft() > 0) {
-        if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen)) { present = true; break; }
+        xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+        bool found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen);
+        xSemaphoreGive(s_pn532Mutex);
+        if (found) { present = true; vTaskDelay(pdMS_TO_TICKS(100)); break; }
         vTaskDelay(pdMS_TO_TICKS(50));
       }
-  if (!present) { if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "no phone"); nfc.SAMConfig(); if (s_task && suspended) vTaskResume(s_task); return false; }
+  if (!present) { 
+    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "no phone"); 
+    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    // nfc.SAMConfig(); 
+    // xSemaphoreGive(s_pn532Mutex);
+    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
+    return false; 
+  }
     }
 
     // S3: ISODEP_ACTIVATION — handled implicitly by inDataExchange after tag presence
@@ -187,13 +216,24 @@ namespace NFCMod {
     {
       uint8_t apdu[32]; uint8_t alen = 0; buildSelectAid(aid, aidLen, apdu, &alen);
       uint8_t resp[255]; uint8_t rlen = sizeof(resp);
+      xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
       bool ok = nfc.inDataExchange(apdu, alen, resp, &rlen);
+      xSemaphoreGive(s_pn532Mutex);
       if ((!ok || !apduOk(resp, rlen)) && timeLeft() > 0) {
         // retry once
         vTaskDelay(pdMS_TO_TICKS(50)); rlen = sizeof(resp);
+        xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
         ok = nfc.inDataExchange(apdu, alen, resp, &rlen);
+        xSemaphoreGive(s_pn532Mutex);
       }
-  if (!ok || !apduOk(resp, rlen)) { if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "SELECT AID failed"); nfc.SAMConfig(); if (s_task && suspended) vTaskResume(s_task); return false; }
+  if (!ok || !apduOk(resp, rlen)) { 
+    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "SELECT AID failed"); 
+    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    // nfc.SAMConfig(); 
+    // xSemaphoreGive(s_pn532Mutex);
+    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
+    return false; 
+  }
     }
 
     // S5: SEND_CHALLENGE — vehicle fingerprint (8) + nonce (16)
@@ -205,28 +245,90 @@ namespace NFCMod {
     {
       uint8_t apdu[64]; uint8_t alen = 0; buildGetInfo(vehLen?veh:nullptr, vehLen, nonce, sizeof(nonce), apdu, &alen);
       uint8_t resp[255]; uint8_t rlen = sizeof(resp);
-  if (!nfc.inDataExchange(apdu, alen, resp, &rlen)) { if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "GET_INFO xchg fail"); nfc.SAMConfig(); if (s_task && suspended) vTaskResume(s_task); return false; }
-  if (!apduOk(resp, rlen)) { if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "GET_INFO SW not ok"); nfc.SAMConfig(); if (s_task && suspended) vTaskResume(s_task); return false; }
+      xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+      bool exchangeOk = nfc.inDataExchange(apdu, alen, resp, &rlen);
+      xSemaphoreGive(s_pn532Mutex);
+      
+  if (!exchangeOk) { 
+    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "GET_INFO xchg fail"); 
+    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    // nfc.SAMConfig(); 
+    // xSemaphoreGive(s_pn532Mutex);
+    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
+    return false; 
+  }
+  if (!apduOk(resp, rlen)) { 
+    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "GET_INFO SW not ok"); 
+    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    // nfc.SAMConfig(); 
+    // xSemaphoreGive(s_pn532Mutex);
+    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
+    return false; 
+  }
 
   // S6: RECEIVE_CREDENTIALS — parse payload (rlen includes SW)
-  if (rlen < 2 + 1 + 65 + 2) { if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "RAPDU too short"); nfc.SAMConfig(); if (s_task && suspended) vTaskResume(s_task); return false; }
+  if (rlen < 2 + 1 + 65 + 2) { 
+    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "RAPDU too short"); 
+    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    // nfc.SAMConfig(); 
+    // xSemaphoreGive(s_pn532Mutex);
+    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
+    return false; 
+  }
   uint8_t datalen = rlen - 2; const uint8_t* p = resp; size_t idx = 0;
+  if (idx >= datalen) { 
+    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "no keyId len"); 
+    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    // nfc.SAMConfig(); 
+    // xSemaphoreGive(s_pn532Mutex);
+    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
+    return false; 
+  }
   uint8_t rawKeyIdLen = p[idx++];
-  uint8_t copyKeyIdLen = rawKeyIdLen;
-  if (copyKeyIdLen >= sizeof(out->keyId)) copyKeyIdLen = sizeof(out->keyId) - 1;
+  if (idx + rawKeyIdLen > datalen) { 
+    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "keyId OOB"); 
+    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    // nfc.SAMConfig(); 
+    // xSemaphoreGive(s_pn532Mutex);
+    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
+    return false; 
+  }
+  uint8_t copyKeyIdLen = rawKeyIdLen > (sizeof(out->keyId)-1) ? (sizeof(out->keyId)-1) : rawKeyIdLen;
   memcpy(out->keyId, p + idx, copyKeyIdLen); out->keyId[copyKeyIdLen] = '\0'; idx += rawKeyIdLen;
-  if (idx + 65 + 2 > datalen) { if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "layout error"); nfc.SAMConfig(); if (s_task && suspended) vTaskResume(s_task); return false; }
+  if (idx + 65 + 2 > datalen) { 
+    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "layout error"); 
+    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    // nfc.SAMConfig(); 
+    // xSemaphoreGive(s_pn532Mutex);
+    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
+    return false; 
+  }
       memcpy(out->pubKey65, p + idx, 65); idx += 65;
       out->certLen = (uint16_t)(p[idx] | (p[idx+1] << 8)); idx += 2;
-  if (idx + out->certLen > datalen || out->certLen > sizeof(out->cert)) { if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "cert too big"); nfc.SAMConfig(); if (s_task && suspended) vTaskResume(s_task); return false; }
+  if (idx + out->certLen > datalen || out->certLen > sizeof(out->cert)) { 
+    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "cert too big"); 
+    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    // nfc.SAMConfig(); 
+    // xSemaphoreGive(s_pn532Mutex);
+    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
+    return false; 
+  }
       memcpy(out->cert, p + idx, out->certLen);
     }
 
     // Success up to S6
-    if (s_task && suspended) vTaskResume(s_task);
+    if (!s_provHold && s_task && suspended) vTaskResume(s_task);
     return true;
   }
   bool runHceProvisioningOnce(const uint8_t* aid, size_t aidLen, uint32_t timeoutMs) {
     (void)aid; (void)aidLen; (void)timeoutMs; return false;
+  }
+
+  void resetForProvisionRetry() {
+    // Minimal reset: re-apply SAM config; this drops any active card session
+    xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    nfc.SAMConfig();
+    xSemaphoreGive(s_pn532Mutex);
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }

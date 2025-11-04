@@ -61,11 +61,14 @@ void setup() {
 
   // Start provisioning (ECC keypair init)
   Provisioning::begin();
+  // Run NFC provisioning flow now; this will suspend NFC polling and resume when done
+  // and BLE will only start after provisioning completes.
+  Provisioning::runNfcProvisioning();
 
-  // Skip NFC provisioning for now
+  // After provisioning, print current info
   Provisioning::printInfo();
 
-  // Start BLE after provisioning setup
+  // Start BLE after provisioning completes
   BLEMod::begin();
 }
 

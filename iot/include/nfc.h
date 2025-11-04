@@ -5,6 +5,8 @@ namespace NFCMod {
   void begin();
   // Start a FreeRTOS task that polls for tags and prints UIDs
   void startTask();
+  // Suspend/resume polling task for provisioning window; keeps the reader in provision mode
+  void setProvisionHold(bool enabled);
 
   // Status helpers
   bool isReady();
@@ -27,4 +29,7 @@ namespace NFCMod {
 
   // Legacy placeholder (no-op now)
   bool runHceProvisioningOnce(const uint8_t* aid, size_t aidLen, uint32_t timeoutMs = 8000);
+
+  // Light reset of PN532 between provisioning attempts to avoid stale ISO-DEP sessions
+  void resetForProvisionRetry();
 }

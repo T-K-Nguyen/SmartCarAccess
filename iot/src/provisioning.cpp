@@ -4,6 +4,7 @@
 #include <mbedtls/entropy.h>
 #include <mbedtls/sha256.h>
 #include <Preferences.h>
+#include <mbedtls/x509_crt.h>
 #include "nfc.h"
 #include "provisioning.h"
 
@@ -16,9 +17,10 @@ namespace {
 
   const char *kPrefsNs = "prov";
   const char *kKeyPem = "ec_priv";
-  const char *kCertPem = "cert";
+  const char *kCertPem = "cert";       // device's own certificate (optional)
   const char *kKeyId   = "key_id";     // phone key identifier (optional)
-  const char *kCertChain = "certch";   // phone certificate chain (optional)
+  const char *kPhonePubRaw = "phone_pub_raw"; // phone public key raw (65 bytes)
+  const char *kCertChain = "phone_cert_chain";   // phone certificate chain (optional)
   const char *kTagUid = "tag";   // legacy single-tag storage
   const char *kTagsBlob = "tags"; // multi-tag blob storage
 
@@ -42,8 +44,8 @@ namespace {
   bool loadTagList(TagList &out) {
     memset(&out, 0, sizeof(out));
     prefs.begin(kPrefsNs, true);
-    // Try multi-tag blob first
-    uint8_t buf[1 + MAX_TAGS * (1 + MAX_UID_LEN)];
+    // Try multi-tag blob with header first: 'TAG1' + count + entries
+    uint8_t buf[4 + 1 + MAX_TAGS * (1 + MAX_UID_LEN)];
     size_t n = 0;
     if (prefs.isKey(kTagsBlob)) {
       n = prefs.getBytes(kTagsBlob, buf, sizeof(buf));
@@ -51,6 +53,8 @@ namespace {
     if (n > 0) {
       prefs.end();
       uint8_t idx = 0;
+      bool hasHeader = (n >= 5 && buf[0] == 'T' && buf[1] == 'A' && buf[2] == 'G' && buf[3] == '1');
+      if (hasHeader) idx += 4; // skip header
       uint8_t count = buf[idx++];
       if (count > MAX_TAGS) count = MAX_TAGS;
       out.count = count;
@@ -81,8 +85,10 @@ namespace {
   }
 
   void saveTagList(const TagList &in) {
-    uint8_t buf[1 + MAX_TAGS * (1 + MAX_UID_LEN)];
+    uint8_t buf[4 + 1 + MAX_TAGS * (1 + MAX_UID_LEN)];
     uint8_t idx = 0;
+    // Add header 'TAG1'
+    buf[idx++] = 'T'; buf[idx++] = 'A'; buf[idx++] = 'G'; buf[idx++] = '1';
     uint8_t count = in.count > MAX_TAGS ? MAX_TAGS : in.count;
     buf[idx++] = count;
     for (uint8_t i = 0; i < count; ++i) {
@@ -217,20 +223,31 @@ void runNfcProvisioning() {
 
   Serial.println("[Prov] Admin requested provisioning. Bring phone close...");
 
-  // Run NFC-side state machine S1..S6
-  NFCMod::ProvData pd{};
-  char err[64] = {0};
-  if (!NFCMod::runProvisioningSM(HCE_AID, sizeof(HCE_AID), overallTimeoutMs, &pd, err, sizeof err)) {
-    Serial.print("[Prov] NFC session failed: "); Serial.println(err[0] ? err : "unknown");
-    Serial.println("[Prov] Recovery: polling resumed.");
-    return;
-  }
+  // Keep reader in provisioning mode until success
+  NFCMod::setProvisionHold(true);
+  for (;;) {
+    // Run NFC-side state machine S1..S6
+    NFCMod::ProvData pd{};
+    char err[64] = {0};
+    if (!NFCMod::runProvisioningSM(HCE_AID, sizeof(HCE_AID), overallTimeoutMs, &pd, err, sizeof err)) {
+      // Stay in provisioning mode; continue waiting for phone
+      if (err[0]) {
+        Serial.print("[Prov] NFC session failed: "); Serial.println(err);
+      } else {
+        Serial.println("[Prov] NFC session retry...");
+      }
+      vTaskDelay(pdMS_TO_TICKS(250));
+      continue;
+    }
 
-  // S7 — VERIFY_DATA
+    // S7 — VERIFY_DATA
   //  - basic checks: pubkey format, lengths
   if (pd.pubKey65[0] != 0x04) {
-    Serial.println("[Prov] Invalid phone public key format (expected uncompressed 65 bytes).");
-    return;
+    Serial.println("[Prov] Invalid phone public key format (expected uncompressed 65 bytes). Remove phone and re-tap.");
+    NFCMod::resetForProvisionRetry();
+    vTaskDelay(pdMS_TO_TICKS(150));
+    // verification failed; continue waiting
+    continue;
   }
   // Reject duplicate keyId if already stored
   {
@@ -238,6 +255,8 @@ void runNfcProvisioning() {
     if (getPhoneKeyId(existing, &L)) {
       if (strncmp(existing, pd.keyId, sizeof(existing)) == 0) {
         Serial.println("[Prov] Duplicate keyId detected; aborting.");
+        // Ensure polling resumes if we abort early
+        NFCMod::setProvisionHold(false);
         return;
       }
     }
@@ -246,32 +265,37 @@ void runNfcProvisioning() {
   // TODO: Optional chain validation / replay protection via signature
 
   // S8 — COMMIT_TO_FLASH (attempt atomic-ish commit; rollback on failure)
-  bool committed = false;
-  do {
-    if (!setPhonePublicKeyRaw65(pd.pubKey65, 65)) break;
-    if (pd.keyId[0]) {
-      if (!setPhoneKeyId(pd.keyId)) { clearKeys(); break; }
-    }
-    if (pd.certLen > 0) {
-      // ensure string termination for PEM
-      char *buf = (char*)malloc(pd.certLen + 1);
-      if (!buf) { clearKeys(); break; }
-      memcpy(buf, pd.cert, pd.certLen); buf[pd.certLen] = '\0';
-      bool ok = setPhoneCertChain(buf);
-      free(buf);
-      if (!ok) { clearKeys(); break; }
-    }
-    committed = true;
-  } while(false);
+    bool committed = false;
+    do {
+      if (!setPhonePublicKeyRaw65(pd.pubKey65, 65)) break;
+      if (pd.keyId[0]) {
+        if (!setPhoneKeyId(pd.keyId)) { clearKeys(); break; }
+      }
+      if (pd.certLen > 0) {
+        // ensure string termination for PEM
+        char *buf = (char*)malloc(pd.certLen + 1);
+        if (!buf) { clearKeys(); break; }
+        memcpy(buf, pd.cert, pd.certLen); buf[pd.certLen] = '\0';
+        bool ok = setPhoneCertChain(buf);
+        free(buf);
+        if (!ok) { clearKeys(); break; }
+      }
+      committed = true;
+    } while(false);
 
-  if (!committed) {
-    Serial.println("[Prov] Commit to flash failed; rolled back.");
-    return;
+    if (!committed) {
+      Serial.println("[Prov] Commit to flash failed; rolled back. Remove phone and re-tap...");
+      NFCMod::resetForProvisionRetry();
+      vTaskDelay(pdMS_TO_TICKS(150));
+      continue;
+    }
+
+    // S9 — SUCCESS
+    Serial.print("[Prov] Provisioned keyId='"); Serial.print(pd.keyId); Serial.print("'\n");
+    Serial.println("[Prov] Provisioning success. Polling resumed.");
+    break; // exit loop on success
   }
-
-  // S9 — SUCCESS
-  Serial.print("[Prov] Provisioned keyId='"); Serial.print(pd.keyId); Serial.print("'\n");
-  Serial.println("[Prov] Provisioning success. Polling resumed.");
+  NFCMod::setProvisionHold(false);
 }
 
 bool storeAuthorizedTag(const uint8_t* uid, uint8_t len) {
@@ -379,22 +403,54 @@ bool signWithDeviceKey(const uint8_t* data, size_t dataLen, uint8_t* sigOut, siz
 }
 
 static bool loadPhonePk(mbedtls_pk_context &pk) {
-  // Try to interpret stored cert as a PEM public key for now
+  // Preferred: load raw 65-byte public key
   prefs.begin(kPrefsNs, true);
-  String certOrPub = prefs.getString(kCertPem, "");
+  size_t n = prefs.getBytesLength(kPhonePubRaw);
+  bool hasRaw = n == 65;
+  String chainStr;
+  if (!hasRaw && prefs.isKey(kCertChain)) chainStr = prefs.getString(kCertChain, "");
   prefs.end();
-  if (certOrPub.length() == 0) return false;
+
   mbedtls_pk_init(&pk);
-  // First try parse as public key; if that fails, try as key contained in cert
-  int rc = mbedtls_pk_parse_public_key(&pk,
-      (const unsigned char*)certOrPub.c_str(), certOrPub.length()+1);
-  if (rc != 0) {
-    // Try parse certificate and extract pubkey
-    // Keep it simple: mbedTLS can parse cert via x509, but to limit code, fail here for now
-    mbedtls_pk_free(&pk);
-    return false;
+  if (hasRaw) {
+    uint8_t raw[65];
+    prefs.begin(kPrefsNs, true);
+    prefs.getBytes(kPhonePubRaw, raw, sizeof(raw));
+    prefs.end();
+    if (mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY)) != 0) {
+      mbedtls_pk_free(&pk); return false;
+    }
+    mbedtls_ecp_keypair* eckey = mbedtls_pk_ec(pk);
+    if (mbedtls_ecp_group_load(&eckey->grp, MBEDTLS_ECP_DP_SECP256R1) != 0) {
+      mbedtls_pk_free(&pk); return false;
+    }
+    if (mbedtls_ecp_point_read_binary(&eckey->grp, &eckey->Q, raw, sizeof(raw)) != 0) {
+      mbedtls_pk_free(&pk); return false;
+    }
+    return true;
   }
-  return true;
+
+  // Fallback: parse X509 cert chain and take leaf public key
+  if (chainStr.length() > 0) {
+    mbedtls_x509_crt crt; mbedtls_x509_crt_init(&crt);
+    int rc = mbedtls_x509_crt_parse(&crt,
+      (const unsigned char*)chainStr.c_str(), chainStr.length()+1);
+    if (rc == 0 && crt.pk.pk_info) {
+      // Copy the pk into our context
+      if (mbedtls_pk_setup(&pk, crt.pk.pk_info) == 0) {
+        // Note: shallow copy is not safe; instead export pub and re-import
+        unsigned char buf[800]; memset(buf, 0, sizeof(buf));
+        if (mbedtls_pk_write_pubkey_pem(&crt.pk, buf, sizeof(buf)) == 0 &&
+            mbedtls_pk_parse_public_key(&pk, buf, strlen((char*)buf)+1) == 0) {
+          mbedtls_x509_crt_free(&crt);
+          return true;
+        }
+      }
+    }
+    mbedtls_x509_crt_free(&crt);
+  }
+  mbedtls_pk_free(&pk);
+  return false;
 }
 
 bool verifyWithPhoneKey(const uint8_t* data, size_t dataLen, const uint8_t* sig, size_t sigLen) {
@@ -417,42 +473,29 @@ bool verifyWithPhoneKey(const uint8_t* data, size_t dataLen, const uint8_t* sig,
 
 bool hasPhonePublicKey() {
   prefs.begin(kPrefsNs, true);
-  bool ok = prefs.isKey(kCertPem);
+  bool ok = (prefs.getBytesLength(kPhonePubRaw) == 65) || prefs.isKey(kCertChain);
   prefs.end();
   return ok;
 }
 
 bool setPhonePublicKey(const char* pem) {
+  // For compatibility, store PEM into phone_cert_chain if caller chooses to use this API
   if (!pem) return false;
   size_t L = strlen(pem);
   if (L < 32) return false; // sanity
   prefs.begin(kPrefsNs, false);
-  bool ok = prefs.putString(kCertPem, pem) > 0;
+  bool ok = prefs.putString(kCertChain, pem) > 0;
   prefs.end();
-  if (ok) Serial.println("[Prov] Stored phone public key (PEM) in NVS.");
+  if (ok) Serial.println("[Prov] Stored phone public key (PEM) into cert chain slot in NVS.");
   return ok;
 }
 
 bool setPhonePublicKeyRaw65(const uint8_t* uncompressed65, size_t len) {
   if (!uncompressed65 || len != 65 || uncompressed65[0] != 0x04) return false;
-  // Build an mbedTLS EC public key from uncompressed point and export PEM
-  mbedtls_pk_context pk; mbedtls_pk_init(&pk);
-  if (mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY)) != 0) {
-    mbedtls_pk_free(&pk); return false;
-  }
-  mbedtls_ecp_keypair* eckey = mbedtls_pk_ec(pk);
-  if (mbedtls_ecp_group_load(&eckey->grp, MBEDTLS_ECP_DP_SECP256R1) != 0) {
-    mbedtls_pk_free(&pk); return false;
-  }
-  if (mbedtls_ecp_point_read_binary(&eckey->grp, &eckey->Q, uncompressed65, len) != 0) {
-    mbedtls_pk_free(&pk); return false;
-  }
-  // Export as PEM SubjectPublicKeyInfo
-  unsigned char buf[800]; memset(buf, 0, sizeof(buf));
-  int rc = mbedtls_pk_write_pubkey_pem(&pk, buf, sizeof(buf));
-  if (rc != 0) { mbedtls_pk_free(&pk); return false; }
-  bool ok = setPhonePublicKey((const char*)buf);
-  mbedtls_pk_free(&pk);
+  prefs.begin(kPrefsNs, false);
+  bool ok = prefs.putBytes(kPhonePubRaw, uncompressed65, len) == len;
+  prefs.end();
+  if (ok) Serial.println("[Prov] Stored phone public key (raw 65 bytes) in NVS.");
   return ok;
 }
 
