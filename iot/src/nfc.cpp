@@ -25,6 +25,122 @@ namespace {
   static TaskHandle_t s_task = nullptr;
   static bool s_provHold = false; // when true, keep polling task suspended externally
   static SemaphoreHandle_t s_pn532Mutex = nullptr;
+  
+  // I2C error handling
+  static volatile bool s_i2cError = false;
+  static uint32_t s_lastSuccessfulComm = 0;
+  static uint32_t s_lastResetAttempt = 0;
+  static const uint32_t I2C_TIMEOUT_MS = 5000; // 5 second timeout
+  static const uint32_t I2C_RESET_COOLDOWN_MS = 2000; // 2 second cooldown between resets
+
+  // Forward declarations
+  void resetI2CBus();
+
+  // I2C error detection and recovery functions
+  bool initializeNFC() {
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setTimeOut(1000);
+    Wire.setClock(100000);
+    delay(50);
+
+    if (!nfc.begin()) {
+      Serial.println("[NFC] PN532 nfc.begin() failed");
+      return false;
+    }
+    
+    uint32_t versiondata = nfc.getFirmwareVersion();
+    if (!versiondata) {
+      Serial.println("[NFC] PN532 not responding to getFirmwareVersion()");
+      return false;
+    }
+
+    Serial.printf("[NFC] PN532 OK. IC: 0x%02X, Ver: %u.%u\n",
+                  (unsigned)((versiondata >> 24) & 0xFF),
+                  (unsigned)((versiondata >> 16) & 0xFF),
+                  (unsigned)((versiondata >> 8) & 0xFF));
+    // Configure SAM (required for reading passive targets/APDUs later)
+    nfc.SAMConfig();
+    
+    s_nfcReady = true;
+    s_i2cError = false;
+    s_lastSuccessfulComm = millis();
+    return true;
+  }
+
+  bool checkI2CHealth() {
+    // Test I2C communication by trying to read PN532 version
+    Wire.beginTransmission(0x24); // PN532 I2C address
+    uint8_t error = Wire.endTransmission();
+    
+    if (error == 0) {
+      s_lastSuccessfulComm = millis();
+      s_i2cError = false;
+      return true;
+    } else {
+      s_i2cError = true;
+      Serial.printf("[NFC] I2C Error: %d (0=OK, 1=too long, 2=NACK addr, 3=NACK data, 4=other)\n", error);
+      return false;
+    }
+  }
+  
+  // Check I2C health and reset bus if necessary
+  bool ensureI2CHealth() {
+    if (!checkI2CHealth()) {
+      resetI2CBus();
+      return s_nfcReady; // Return true only if reset was successful
+    }
+    return true;
+  }
+  
+  void resetI2CBus() {
+    uint32_t now = millis();
+    
+    // Prevent rapid consecutive resets
+    if (now - s_lastResetAttempt < I2C_RESET_COOLDOWN_MS) {
+      Serial.printf("[NFC] Reset cooldown active, waiting %lu ms\n", 
+                    I2C_RESET_COOLDOWN_MS - (now - s_lastResetAttempt));
+      return;
+    }
+    
+    s_lastResetAttempt = now;
+    Serial.println("[NFC] Resetting I2C bus due to communication failure...");
+    
+    // Mark I2C as problematic immediately to prevent concurrent access
+    s_i2cError = true;
+    s_nfcReady = false;
+    
+    // Reset I2C peripheral completely
+    Wire.end();
+    delay(500); // Longer delay to let bus settle completely
+    
+    // Try to clear any stuck conditions on the bus lines
+    // Generate clock pulses to unstick any device holding SDA low
+    pinMode(I2C_SCL_PIN, OUTPUT);
+    pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+    for (int i = 0; i < 9; i++) {
+      digitalWrite(I2C_SCL_PIN, LOW);
+      delayMicroseconds(5);
+      digitalWrite(I2C_SCL_PIN, HIGH);
+      delayMicroseconds(5);
+    }
+    delay(50);
+    
+    // Reinitialize Wire library with correct pins
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setTimeOut(1000);
+    Wire.setClock(100000); // 100kHz for reliable operation
+    delay(100); // Additional settling time
+    
+    // Use the same initialization procedure
+    if (initializeNFC()) {
+      Serial.println("[NFC] I2C bus reset successful, PN532 reconnected");
+      if (s_provHold) {
+        Serial.println("[NFC] Maintaining provisioning mode after I2C reset");
+      }
+    } else {
+      Serial.println("[NFC] I2C reset failed - PN532 still not responding");
+    }
+  }
 
   void TaskNFC(void* pv) {
     uint8_t uid[7];
@@ -36,7 +152,32 @@ namespace {
     const uint32_t cooldownMs = 1500;
     
     for (;;) {
-      if (!s_nfcReady) { vTaskDelay(pdMS_TO_TICKS(200)); continue; }
+      if (!s_nfcReady) { 
+        // Try to reconnect every 2 seconds when NFC is not ready
+        static uint32_t lastReconnectAttempt = 0;
+        if (millis() - lastReconnectAttempt > 2000) {
+          Serial.println("[NFC] Attempting to reconnect...");
+          if (initializeNFC()) {
+            Serial.println("[NFC] Reconnection successful!");
+            // If we're in provisioning mode, don't start polling - just wait
+            if (s_provHold) {
+              Serial.println("[NFC] Staying in provisioning mode after reconnect");
+            }
+          }
+          lastReconnectAttempt = millis();
+        }
+        vTaskDelay(pdMS_TO_TICKS(200)); 
+        continue; 
+      }
+
+      // Check I2C health periodically
+      if (millis() - s_lastSuccessfulComm > I2C_TIMEOUT_MS) {
+        if (!checkI2CHealth()) {
+          resetI2CBus();
+          vTaskDelay(pdMS_TO_TICKS(1000)); // Wait before retry
+          continue;
+        }
+      }
 
       // 🔥 Do NOT poll during provisioning
       if (s_provHold) {
@@ -47,7 +188,16 @@ namespace {
       // Normal tag polling when NOT in provisioning mode
       xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
       bool found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen);
+      bool commSuccess = !s_i2cError; // Check if I2C error occurred during call
       xSemaphoreGive(s_pn532Mutex);
+      
+      // Handle I2C communication failure
+      if (!commSuccess || s_i2cError) {
+        Serial.println("[NFC] I2C communication failed during tag read");
+        resetI2CBus();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        continue;
+      }
       if (found) {
         bool same = (uidLen == lastPrintLen) && (memcmp(uid, lastPrintUid, uidLen) == 0);
         bool cool = (millis() - lastPrintAt) >= cooldownMs;
@@ -79,32 +229,16 @@ namespace {
 
 namespace NFCMod {
   void begin() {
-    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-    Wire.setTimeOut(1000);
-    Wire.setClock(100000);
-    delay(50);
-
-    nfc.begin();
-    uint32_t versiondata = nfc.getFirmwareVersion();
-    if (!versiondata) {
-      Serial.println("[NFC] PN532 not found. Check wiring and address (default 0x24).");
-      s_nfcReady = false;
-      return;
-    }
-
-    Serial.printf("[NFC] PN532 OK. IC: 0x%02X, Ver: %u.%u\n",
-                  (unsigned)((versiondata >> 24) & 0xFF),
-                  (unsigned)((versiondata >> 16) & 0xFF),
-                  (unsigned)((versiondata >> 8) & 0xFF));
-    // Configure SAM (required for reading passive targets/APDUs later)
-    nfc.SAMConfig();
-    
-    // Initialize bus mutex
+    // Initialize bus mutex first
     if (!s_pn532Mutex) {
       s_pn532Mutex = xSemaphoreCreateMutex();
     }
     
-    s_nfcReady = true;
+    // Try to initialize NFC
+    if (!initializeNFC()) {
+      Serial.println("[NFC] Initial connection failed. Will retry in background...");
+      s_nfcReady = false;
+    }
   }
 
   void startTask() {
@@ -116,11 +250,13 @@ namespace NFCMod {
   void setProvisionHold(bool enabled) {
     s_provHold = enabled;
     if (s_task) {
-      if (enabled) {
-        vTaskSuspend(s_task);
-      } else {
-        vTaskResume(s_task);
-      }
+        if (enabled) {
+            Serial.println("[NFC] Provision mode: suspending polling");
+            vTaskSuspend(s_task);
+        } else {
+            Serial.println("[NFC] Provision mode: resuming polling");
+            vTaskResume(s_task);
+        }
     }
   }
 
@@ -179,13 +315,10 @@ namespace NFCMod {
       return (elapsed >= overallTimeoutMs) ? 0 : (overallTimeoutMs - elapsed);
     };
 
-  // S1: INIT_NFC_FOR_PROVISION — suspend polling unless held externally, light setup
-  bool suspended = false;
-  if (!s_provHold && s_task) { vTaskSuspend(s_task); suspended = true; }
+  // S1: INIT_NFC_FOR_PROVISION — minimal setup, no SAMConfig to avoid session interference
     // assume PN532 already initialized before SM
     xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
     nfc.setPassiveActivationRetries(0xFF);  // ok
-    nfc.SAMConfig();   // light reset only
     xSemaphoreGive(s_pn532Mutex);
     vTaskDelay(pdMS_TO_TICKS(50));
 
@@ -197,7 +330,12 @@ namespace NFCMod {
         xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
         bool found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen);
         xSemaphoreGive(s_pn532Mutex);
-        if (found) { present = true; vTaskDelay(pdMS_TO_TICKS(100)); break; }
+        
+        if (found) { 
+          present = true; 
+          delay(500); // Allow ISO-DEP activation to settle
+          break; 
+        }
         vTaskDelay(pdMS_TO_TICKS(50));
       }
   if (!present) { 
@@ -205,7 +343,6 @@ namespace NFCMod {
     // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
     // nfc.SAMConfig(); 
     // xSemaphoreGive(s_pn532Mutex);
-    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
     return false; 
   }
     }
@@ -219,6 +356,7 @@ namespace NFCMod {
       xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
       bool ok = nfc.inDataExchange(apdu, alen, resp, &rlen);
       xSemaphoreGive(s_pn532Mutex);
+      
       if ((!ok || !apduOk(resp, rlen)) && timeLeft() > 0) {
         // retry once
         vTaskDelay(pdMS_TO_TICKS(50)); rlen = sizeof(resp);
@@ -226,14 +364,11 @@ namespace NFCMod {
         ok = nfc.inDataExchange(apdu, alen, resp, &rlen);
         xSemaphoreGive(s_pn532Mutex);
       }
-  if (!ok || !apduOk(resp, rlen)) { 
-    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "SELECT AID failed"); 
-    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-    // nfc.SAMConfig(); 
-    // xSemaphoreGive(s_pn532Mutex);
-    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
-    return false; 
-  }
+      
+      if (!ok || !apduOk(resp, rlen)) { 
+        if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "SELECT AID failed"); 
+        return false; 
+      }
     }
 
     // S5: SEND_CHALLENGE — vehicle fingerprint (8) + nonce (16)
@@ -249,75 +384,47 @@ namespace NFCMod {
       bool exchangeOk = nfc.inDataExchange(apdu, alen, resp, &rlen);
       xSemaphoreGive(s_pn532Mutex);
       
-  if (!exchangeOk) { 
-    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "GET_INFO xchg fail"); 
-    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-    // nfc.SAMConfig(); 
-    // xSemaphoreGive(s_pn532Mutex);
-    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
-    return false; 
-  }
-  if (!apduOk(resp, rlen)) { 
-    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "GET_INFO SW not ok"); 
-    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-    // nfc.SAMConfig(); 
-    // xSemaphoreGive(s_pn532Mutex);
-    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
-    return false; 
-  }
+      if (!exchangeOk) { 
+        if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "GET_INFO xchg fail"); 
+        return false; 
+      }
+      if (!apduOk(resp, rlen)) { 
+        if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "GET_INFO SW not ok"); 
+        return false; 
+      }
 
   // S6: RECEIVE_CREDENTIALS — parse payload (rlen includes SW)
   if (rlen < 2 + 1 + 65 + 2) { 
     if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "RAPDU too short"); 
-    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-    // nfc.SAMConfig(); 
-    // xSemaphoreGive(s_pn532Mutex);
-    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
     return false; 
   }
   uint8_t datalen = rlen - 2; const uint8_t* p = resp; size_t idx = 0;
   if (idx >= datalen) { 
     if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "no keyId len"); 
-    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-    // nfc.SAMConfig(); 
-    // xSemaphoreGive(s_pn532Mutex);
-    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
     return false; 
   }
   uint8_t rawKeyIdLen = p[idx++];
   if (idx + rawKeyIdLen > datalen) { 
     if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "keyId OOB"); 
-    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-    // nfc.SAMConfig(); 
-    // xSemaphoreGive(s_pn532Mutex);
-    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
     return false; 
   }
   uint8_t copyKeyIdLen = rawKeyIdLen > (sizeof(out->keyId)-1) ? (sizeof(out->keyId)-1) : rawKeyIdLen;
   memcpy(out->keyId, p + idx, copyKeyIdLen); out->keyId[copyKeyIdLen] = '\0'; idx += rawKeyIdLen;
   if (idx + 65 + 2 > datalen) { 
     if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "layout error"); 
-    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-    // nfc.SAMConfig(); 
-    // xSemaphoreGive(s_pn532Mutex);
-    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
     return false; 
   }
-      memcpy(out->pubKey65, p + idx, 65); idx += 65;
-      out->certLen = (uint16_t)(p[idx] | (p[idx+1] << 8)); idx += 2;
+  memcpy(out->pubKey65, p + idx, 65); idx += 65;
+  out->certLen = (uint16_t)(p[idx] | (p[idx+1] << 8)); idx += 2;
   if (idx + out->certLen > datalen || out->certLen > sizeof(out->cert)) { 
     if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "cert too big"); 
-    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-    // nfc.SAMConfig(); 
-    // xSemaphoreGive(s_pn532Mutex);
-    if (!s_provHold && s_task && suspended) vTaskResume(s_task); 
     return false; 
   }
-      memcpy(out->cert, p + idx, out->certLen);
+  memcpy(out->cert, p + idx, out->certLen);
     }
 
-    // Success up to S6
-    if (!s_provHold && s_task && suspended) vTaskResume(s_task);
+    // Success up to S6 - update successful communication timestamp
+    s_lastSuccessfulComm = millis();
     return true;
   }
   bool runHceProvisioningOnce(const uint8_t* aid, size_t aidLen, uint32_t timeoutMs) {
