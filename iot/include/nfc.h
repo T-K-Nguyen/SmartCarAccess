@@ -13,8 +13,18 @@ namespace NFCMod {
   // Returns true if a new UID was captured since the last call and writes it to uid/uidLen (max 7 bytes).
   bool getLastTag(uint8_t* uid, uint8_t* uidLen);
 
-  // Run a single Android HCE provisioning attempt over ISO-DEP using APDUs.
-  // Returns true on success after storing phone key info in Provisioning.
-  // aid points to the application identifier to SELECT (e.g., {0xF0,0x01,0x02,0x03,0x04,0x05}).
+  // Provisioning state-machine helper (S1-S6): handles NFC-side session and APDUs, returns creds.
+  struct ProvData {
+    char keyId[64];
+    uint8_t pubKey65[65];
+    uint16_t certLen;
+    uint8_t cert[512]; // max cert blob we accept via NFC
+  };
+
+  // Runs S1..S6: suspend polling, (re)init PN532, wait for phone, SELECT AID, send challenge, receive creds.
+  // On success, fills out and returns true; on failure, resumes polling and returns false.
+  bool runProvisioningSM(const uint8_t* aid, size_t aidLen, uint32_t overallTimeoutMs, ProvData* out, char* errBuf = nullptr, size_t errBufLen = 0);
+
+  // Legacy placeholder (no-op now)
   bool runHceProvisioningOnce(const uint8_t* aid, size_t aidLen, uint32_t timeoutMs = 8000);
 }

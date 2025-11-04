@@ -205,22 +205,73 @@ void printInfo() {
 }
 
 void runNfcProvisioning() {
+  // S0 — SYSTEM_IDLE: entry when admin requests provisioning
   if (!NFCMod::isReady() || !s_ready) {
     Serial.println("[Prov] NFC or ECC not ready");
     return;
   }
-  // Configure your Android HCE AID here. Must match apduservice.xml on the phone.
-  // Default placeholder AID below — replace with your actual value when known.
-  static const uint8_t HCE_AID[] = { 0xF0, 0x01, 0x02, 0x03, 0x04, 0x05 };
-  const uint32_t timeoutMs = 10000;
 
-  Serial.println("[Prov] Bring phone close to start HCE provisioning...");
-  bool ok = NFCMod::runHceProvisioningOnce(HCE_AID, sizeof(HCE_AID), timeoutMs);
-  if (ok) {
-    Serial.println("[Prov] Provisioning complete (HCE). Phone key stored.");
-  } else {
-    Serial.println("[Prov] Provisioning failed or timed out.");
+  // AID must match the Android HCE service
+  static const uint8_t HCE_AID[] = { 0xF0, 0x01, 0x02, 0x03, 0x04, 0x05 };
+  const uint32_t overallTimeoutMs = 15000;
+
+  Serial.println("[Prov] Admin requested provisioning. Bring phone close...");
+
+  // Run NFC-side state machine S1..S6
+  NFCMod::ProvData pd{};
+  char err[64] = {0};
+  if (!NFCMod::runProvisioningSM(HCE_AID, sizeof(HCE_AID), overallTimeoutMs, &pd, err, sizeof err)) {
+    Serial.print("[Prov] NFC session failed: "); Serial.println(err[0] ? err : "unknown");
+    Serial.println("[Prov] Recovery: polling resumed.");
+    return;
   }
+
+  // S7 — VERIFY_DATA
+  //  - basic checks: pubkey format, lengths
+  if (pd.pubKey65[0] != 0x04) {
+    Serial.println("[Prov] Invalid phone public key format (expected uncompressed 65 bytes).");
+    return;
+  }
+  // Reject duplicate keyId if already stored
+  {
+    char existing[64]; size_t L = sizeof(existing);
+    if (getPhoneKeyId(existing, &L)) {
+      if (strncmp(existing, pd.keyId, sizeof(existing)) == 0) {
+        Serial.println("[Prov] Duplicate keyId detected; aborting.");
+        return;
+      }
+    }
+  }
+
+  // TODO: Optional chain validation / replay protection via signature
+
+  // S8 — COMMIT_TO_FLASH (attempt atomic-ish commit; rollback on failure)
+  bool committed = false;
+  do {
+    if (!setPhonePublicKeyRaw65(pd.pubKey65, 65)) break;
+    if (pd.keyId[0]) {
+      if (!setPhoneKeyId(pd.keyId)) { clearKeys(); break; }
+    }
+    if (pd.certLen > 0) {
+      // ensure string termination for PEM
+      char *buf = (char*)malloc(pd.certLen + 1);
+      if (!buf) { clearKeys(); break; }
+      memcpy(buf, pd.cert, pd.certLen); buf[pd.certLen] = '\0';
+      bool ok = setPhoneCertChain(buf);
+      free(buf);
+      if (!ok) { clearKeys(); break; }
+    }
+    committed = true;
+  } while(false);
+
+  if (!committed) {
+    Serial.println("[Prov] Commit to flash failed; rolled back.");
+    return;
+  }
+
+  // S9 — SUCCESS
+  Serial.print("[Prov] Provisioned keyId='"); Serial.print(pd.keyId); Serial.print("'\n");
+  Serial.println("[Prov] Provisioning success. Polling resumed.");
 }
 
 bool storeAuthorizedTag(const uint8_t* uid, uint8_t len) {

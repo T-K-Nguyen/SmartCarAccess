@@ -7,7 +7,7 @@
 // Expose LED state for BLE module
 extern const int LED_PIN = GPIO_NUM_48;
 volatile uint8_t g_ledMode = 2;
-volatile uint16_t g_blinkIntervalMs = 100;
+volatile uint16_t g_blinkIntervalMs = 2000;
 
 // BLE callbacks moved to ble.cpp
 
@@ -55,25 +55,14 @@ void setup() {
 
   // Start LED task
   xTaskCreate(TaskLEDControl, "LED Control", 4096, NULL, 2, NULL);
-  // Start NFC (I2C PN532) and polling task first so it's ready for provisioning
+  // Start NFC (I2C PN532) and begin simple polling for tag UIDs
   NFCMod::begin();
   NFCMod::startTask();
 
   // Start provisioning (ECC keypair init)
   Provisioning::begin();
 
-  // Give NFC a brief moment to become ready before provisioning
-  {
-    const uint32_t waitStart = millis();
-    while (!NFCMod::isReady() && (millis() - waitStart) < 2000) {
-      vTaskDelay(pdMS_TO_TICKS(50));
-    }
-  }
-
-  if (!Provisioning::isProvisioned()) {
-    Serial.println("[Main] ECU not provisioned; running NFC provisioning");
-    Provisioning::runNfcProvisioning();
-  }
+  // Skip NFC provisioning for now
   Provisioning::printInfo();
 
   // Start BLE after provisioning setup
