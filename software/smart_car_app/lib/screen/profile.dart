@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:smart_car_app/screen/login.dart';
 import 'package:smart_car_app/service/car_service.dart';
+import 'package:smart_car_app/service/nfc_provisioning_service.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -304,6 +305,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
           },
         ),
         _buildMenuItem(
+          icon: Icons.nfc,
+          title: 'Test NFC HCE',
+          subtitle: 'Debug NFC Host Card Emulation service',
+          onTap: () {
+            _testHceService();
+          },
+        ),
+        _buildMenuItem(
           icon: Icons.info_outline,
           title: 'About',
           subtitle: 'App version and information',
@@ -475,6 +484,68 @@ class _ProfileScreenState extends State<ProfileScreen> {
         );
       },
     );
+  }
+
+  void _testHceService() async {
+    print('=== HCE SERVICE TEST INITIATED ===');
+    
+    try {
+      // Check if NFC provisioning service is available
+      final result = await NfcProvisioningService.testHceService();
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('HCE Test Result: $result'),
+          backgroundColor: result.contains('success') ? Colors.green : Colors.orange,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+      
+      print('HCE Test completed: $result');
+      
+      // Show detailed dialog
+      showDialog(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: const Text('HCE Service Test Results'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Test Results:', 
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                Text(result),
+                const SizedBox(height: 16),
+                const Text('Next Steps:', 
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                const Text('1. Check Android logs: adb logcat -s SmartCarApduService'),
+                const Text('2. Tap phone to ESP32 NFC reader'),
+                const Text('3. Monitor for APDU exchanges'),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK'),
+              ),
+            ],
+          );
+        },
+      );
+      
+    } catch (e) {
+      print('HCE Test failed with error: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('HCE Test Error: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
   }
 }
 
@@ -755,6 +826,13 @@ class _ProfileContentState extends State<ProfileContent> {
           },
         ),
         _buildMenuItem(
+          icon: Icons.nfc,
+          title: 'Test NFC HCE',
+          onTap: () {
+            _testHceService();
+          },
+        ),
+        _buildMenuItem(
           icon: Icons.logout,
           title: 'Sign Out',
           onTap: () => _showLogoutDialog(),
@@ -860,6 +938,99 @@ class _ProfileContentState extends State<ProfileContent> {
           ],
         );
       },
+    );
+  }
+
+  Future<void> _testHceService() async {
+    try {
+      // Show a dialog with loading and logs
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _buildHceTestDialog(),
+      );
+
+      // Test HCE service
+      final service = NfcProvisioningService(ownerId: currentUser?.email ?? 'test@example.com');
+      
+      // Ensure keys exist
+      await service.ensureOwnerKeysExist();
+      
+      // Re-initialize to refresh cached data
+      await NfcProvisioningService.initialize(ownerIdHint: currentUser?.email ?? 'test@example.com');
+      
+      // Pop the dialog
+      if (mounted) Navigator.of(context).pop();
+      
+      // Show success
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✅ HCE Service initialized successfully! Your phone is ready for NFC provisioning.'),
+          backgroundColor: Colors.green,
+          duration: Duration(seconds: 5),
+        ),
+      );
+      
+    } catch (e) {
+      // Pop the dialog if still showing
+      if (mounted) Navigator.of(context).pop();
+      
+      // Show error
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ HCE Test failed: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
+  Widget _buildHceTestDialog() {
+    return AlertDialog(
+      title: const Row(
+        children: [
+          Icon(Icons.nfc, color: Colors.blue),
+          SizedBox(width: 8),
+          Text('Testing HCE Service'),
+        ],
+      ),
+      content: const Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Initializing NFC Host Card Emulation...'),
+          SizedBox(height: 16),
+          Row(
+            children: [
+              SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              SizedBox(width: 12),
+              Text('Setting up provisioning keys...'),
+            ],
+          ),
+          SizedBox(height: 8),
+          Row(
+            children: [
+              SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              SizedBox(width: 12),
+              Text('Preparing HCE service...'),
+            ],
+          ),
+          SizedBox(height: 16),
+          Text(
+            'After this test completes, try tapping your phone to the ESP32 device.',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+        ],
+      ),
     );
   }
 }

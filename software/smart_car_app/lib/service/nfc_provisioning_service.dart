@@ -89,6 +89,38 @@ class NfcProvisioningService {
     _initialized = true;
   }
 
+  /// Test HCE service functionality and connection
+  static Future<String> testHceService() async {
+    debugPrint('[HCE-TEST] Starting HCE service test...');
+    
+    try {
+      // Check if service is initialized
+      if (!_initialized) {
+        await initialize();
+      }
+      
+      // Test method channel communication
+      try {
+        final testResult = await _channel.invokeMethod('getProvisioningData');
+        if (testResult != null) {
+          debugPrint('[HCE-TEST] MethodChannel communication: SUCCESS');
+          debugPrint('[HCE-TEST] Provisioning data available: ${testResult.toString().substring(0, 50)}...');
+          return 'HCE service test SUCCESS - MethodChannel active, provisioning data ready';
+        } else {
+          debugPrint('[HCE-TEST] MethodChannel returned null');
+          return 'HCE service test WARNING - MethodChannel active but no provisioning data';
+        }
+      } catch (e) {
+        debugPrint('[HCE-TEST] MethodChannel test failed: $e');
+        return 'HCE service test FAILED - MethodChannel error: $e';
+      }
+      
+    } catch (e) {
+      debugPrint('[HCE-TEST] Overall test failed: $e');
+      return 'HCE service test FAILED - Initialization error: $e';
+    }
+  }
+
   /// Call once (e.g., app startup) to handle requests from HCE service.
   /// The HCE service will call method "getProvisioningData" and expect a Map:
   /// { publicKey: base64, certChain: base64, keyId: string }

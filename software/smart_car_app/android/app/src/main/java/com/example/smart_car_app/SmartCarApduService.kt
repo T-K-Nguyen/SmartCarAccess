@@ -32,22 +32,32 @@ class SmartCarApduService : HostApduService() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "HCE service created")
+        Log.i(TAG, "=== HCE SERVICE CREATED ===")
+        Log.i(TAG, "SmartCarApduService is now active and listening")
+        Log.i(TAG, "Registered AID: ${AID.joinToString("") { String.format("%02X", it) }}")
+        Log.i(TAG, "Expected ESP32 SELECT: 00 A4 04 00 06 F0 01 02 03 04 05")
+        Log.i(TAG, "Ready to receive APDU commands from NFC readers")
     }
 
     override fun processCommandApdu(commandApdu: ByteArray?, extras: Bundle?): ByteArray {
-        if (commandApdu == null) return SW_UNKNOWN
+        Log.i(TAG, "HCE Service processCommandApdu called!")
+        if (commandApdu == null) {
+            Log.w(TAG, "Received null APDU")
+            return SW_UNKNOWN
+        }
         Log.d(TAG, "APDU IN: ${commandApdu.joinToString(" ") { String.format("%02X", it) }}")
 
         // Simple APDU decoding:
         // SELECT AID: 00 A4 04 00 Lc <AID>
         if (isSelectAid(commandApdu)) {
             val aid = extractAid(commandApdu)
+            Log.d(TAG, "Extracted AID: ${aid?.joinToString("") { String.format("%02X", it) } ?: "null"}")
+            Log.d(TAG, "Expected AID: ${AID.joinToString("") { String.format("%02X", it) }}")
             return if (aid != null && aid.contentEquals(AID)) {
-                Log.i(TAG, "SELECT AID matched")
+                Log.i(TAG, "SELECT AID matched - returning SUCCESS (90 00)")
                 SW_SUCCESS
             } else {
-                Log.w(TAG, "SELECT AID mismatch")
+                Log.w(TAG, "SELECT AID mismatch - returning UNKNOWN (6A 80)")
                 SW_UNKNOWN
             }
         }
@@ -68,7 +78,7 @@ class SmartCarApduService : HostApduService() {
     }
 
     override fun onDeactivated(reason: Int) {
-        Log.i(TAG, "HCE deactivated, reason=$reason")
+        Log.i(TAG, "HCE deactivated, reason=$reason (0=LINK_LOST, 1=DESELECTED)")
     }
 
     private fun ensureEngine() {
