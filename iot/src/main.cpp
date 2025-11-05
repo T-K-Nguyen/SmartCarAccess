@@ -61,11 +61,11 @@ void setup() {
 
   // Start provisioning (ECC keypair init)
   Provisioning::begin();
-  // Run NFC provisioning flow now; this will suspend NFC polling and resume when done
-  // and BLE will only start after provisioning completes.
-  Provisioning::runNfcProvisioning();
+  // NOTE: Provisioning is now only triggered via BLE admin commands
+  // Auto-provisioning on boot was causing PN532 corruption and restart loops
+  // Provisioning::runNfcProvisioning();  // Disabled - only run on BLE request
 
-  // After provisioning, print current info
+  // Print current info without running provisioning
   Provisioning::printInfo();
 
   // Start BLE after provisioning completes

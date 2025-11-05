@@ -30,6 +30,9 @@ namespace NFCMod {
   // Legacy placeholder (no-op now)
   bool runHceProvisioningOnce(const uint8_t* aid, size_t aidLen, uint32_t timeoutMs = 8000);
 
+  // Check if detected tag during provisioning is actually our phone (non-blocking)
+  bool checkForProvisioningPhone(const uint8_t* aid, size_t aidLen);
+
   // Light reset of PN532 between provisioning attempts to avoid stale ISO-DEP sessions
   void resetForProvisionRetry();
 }

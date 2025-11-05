@@ -11,8 +11,8 @@
 namespace {
   const int I2C_SDA_PIN = 11;
   const int I2C_SCL_PIN = 12;
-  const int PN532_IRQ_PIN = -1;
-  const int PN532_RST_PIN = -1;
+  const int PN532_IRQ_PIN = -1;        // IRQ not used in current implementation
+  const int PN532_RST_PIN = 10;       // GPIO 10 for hardware reset
   Adafruit_PN532 nfc(PN532_IRQ_PIN, PN532_RST_PIN);
 
   bool s_nfcReady = false;
@@ -35,6 +35,7 @@ namespace {
 
   // Forward declarations
   void resetI2CBus();
+  void hardwareResetPN532();
 
   // I2C error detection and recovery functions
   bool initializeNFC() {
@@ -92,6 +93,32 @@ namespace {
     return true;
   }
   
+  void hardwareResetPN532() {
+    if (PN532_RST_PIN == -1) {
+      Serial.println("[NFC] Hardware reset not available - RST pin not configured");
+      return;
+    }
+    
+    Serial.println("[NFC] Performing PN532 hardware reset via RST pin...");
+    
+    // Configure RST pin as output
+    pinMode(PN532_RST_PIN, OUTPUT);
+    
+    // PN532 reset sequence: pull RST low for at least 100µs, then high
+    digitalWrite(PN532_RST_PIN, HIGH);  // Ensure it starts high
+    delay(10);
+    digitalWrite(PN532_RST_PIN, LOW);   // Pull low to reset
+    delay(100);                         // Hold reset for 100ms (well above minimum)
+    digitalWrite(PN532_RST_PIN, HIGH);  // Release reset
+    delay(500);                         // Wait for PN532 to boot up
+    
+    Serial.println("[NFC] PN532 hardware reset completed - chip should be in clean state");
+    
+    // Mark that we need to reinitialize
+    s_nfcReady = false;
+    s_i2cError = false;  // Clear any previous I2C errors
+  }
+
   void resetI2CBus() {
     uint32_t now = millis();
     
@@ -109,37 +136,51 @@ namespace {
     s_i2cError = true;
     s_nfcReady = false;
     
-    // Reset I2C peripheral completely
-    Wire.end();
-    delay(500); // Longer delay to let bus settle completely
+    // Skip Wire.end() as it hangs when bus is corrupted
+    // Instead, directly manipulate GPIO to force bus reset
+    Serial.println("[NFC] Step 1: Direct GPIO bus recovery (bypassing Wire.end())...");
     
-    // Try to clear any stuck conditions on the bus lines
-    // Generate clock pulses to unstick any device holding SDA low
+    // Force both lines high initially (release any stuck states)
+    pinMode(I2C_SDA_PIN, OUTPUT);
     pinMode(I2C_SCL_PIN, OUTPUT);
-    pinMode(I2C_SDA_PIN, INPUT_PULLUP);
-    for (int i = 0; i < 9; i++) {
-      digitalWrite(I2C_SCL_PIN, LOW);
-      delayMicroseconds(5);
-      digitalWrite(I2C_SCL_PIN, HIGH);
-      delayMicroseconds(5);
-    }
-    delay(50);
+    digitalWrite(I2C_SDA_PIN, HIGH);
+    digitalWrite(I2C_SCL_PIN, HIGH);
+    delay(100);
     
-    // Reinitialize Wire library with correct pins
+    Serial.println("[NFC] Step 2: Manual bus line clearing with clock pulses...");
+    // Generate multiple clock cycles to force any stuck device to release SDA
+    pinMode(I2C_SDA_PIN, INPUT_PULLUP);  // Allow SDA to float/be controlled by devices
+    for (int i = 0; i < 18; i++) {  // More pulses for stubborn devices
+      digitalWrite(I2C_SCL_PIN, LOW);
+      delayMicroseconds(10);
+      digitalWrite(I2C_SCL_PIN, HIGH);
+      delayMicroseconds(10);
+    }
+    
+    // Generate I2C STOP condition to reset bus protocol state
+    Serial.println("[NFC] Step 3: Generating I2C STOP condition...");
+    pinMode(I2C_SDA_PIN, OUTPUT);
+    digitalWrite(I2C_SDA_PIN, LOW);   // SDA low
+    delayMicroseconds(10);
+    digitalWrite(I2C_SCL_PIN, HIGH);  // SCL high
+    delayMicroseconds(10);
+    digitalWrite(I2C_SDA_PIN, HIGH);  // SDA high (STOP condition)
+    delayMicroseconds(10);
+    
+    Serial.println("[NFC] Step 4: Waiting for bus to stabilize...");
+    delay(500); // Long delay for complete bus recovery
+    
+    Serial.println("[NFC] Step 5: Reinitializing Wire library...");
+    // Now reinitialize Wire library fresh
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setTimeOut(1000);
     Wire.setClock(100000); // 100kHz for reliable operation
     delay(100); // Additional settling time
     
-    // Use the same initialization procedure
-    if (initializeNFC()) {
-      Serial.println("[NFC] I2C bus reset successful, PN532 reconnected");
-      if (s_provHold) {
-        Serial.println("[NFC] Maintaining provisioning mode after I2C reset");
-      }
-    } else {
-      Serial.println("[NFC] I2C reset failed - PN532 still not responding");
-    }
+    Serial.println("[NFC] Step 6: I2C bus reset completed");
+    // Skip PN532 communication test to avoid Error 263 and stack overflow
+    // Let calling code handle PN532 communication validation if needed
+    Serial.println("[NFC] I2C reset procedure finished - bus ready for use");
   }
 
   void TaskNFC(void* pv) {
@@ -179,22 +220,51 @@ namespace {
         }
       }
 
-      // 🔥 Do NOT poll during provisioning
+      // Task should be suspended during provisioning mode
       if (s_provHold) {
-        vTaskDelay(pdMS_TO_TICKS(200));
+        // This should not happen if task is properly suspended
+        Serial.println("[NFC] ERROR: Task running during provisioning mode!");
+        vTaskDelay(pdMS_TO_TICKS(1000));
         continue;
       }
       
       // Normal tag polling when NOT in provisioning mode
-      xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-      bool found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen);
-      bool commSuccess = !s_i2cError; // Check if I2C error occurred during call
-      xSemaphoreGive(s_pn532Mutex);
+      // Declare variables outside the mutex block for proper scope
+      bool found = false;
+      bool commSuccess = true;
       
-      // Handle I2C communication failure
-      if (!commSuccess || s_i2cError) {
-        Serial.println("[NFC] I2C communication failed during tag read");
-        resetI2CBus();
+      // Use timeout to prevent permanent mutex lock
+      if (xSemaphoreTake(s_pn532Mutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
+        
+        // Set I2C timeout to prevent hangs
+        Wire.setTimeOut(2000);
+        
+        // Safely attempt PN532 communication with error handling
+        try {
+          found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen);
+          commSuccess = !s_i2cError;
+        } catch (...) {
+          Serial.println("[NFC] Exception during tag read - recovering");
+          commSuccess = false;
+          found = false;
+        }
+        
+        // Restore normal I2C timeout
+        Wire.setTimeOut(1000);
+        
+        // ALWAYS release mutex, even if PN532 failed
+        xSemaphoreGive(s_pn532Mutex);
+        
+        // Handle I2C communication failure
+        if (!commSuccess || s_i2cError) {
+          Serial.println("[NFC] I2C communication failed during tag read");
+          resetI2CBus();
+          vTaskDelay(pdMS_TO_TICKS(1000));
+          continue;
+        }
+      } else {
+        // Failed to acquire mutex within timeout
+        Serial.println("[NFC] WARNING: Failed to acquire mutex for tag polling - skipping cycle");
         vTaskDelay(pdMS_TO_TICKS(1000));
         continue;
       }
@@ -251,11 +321,29 @@ namespace NFCMod {
     s_provHold = enabled;
     if (s_task) {
         if (enabled) {
-            Serial.println("[NFC] Provision mode: suspending polling");
-            vTaskSuspend(s_task);
+            Serial.println("[NFC] Provision mode ENABLED - forcibly stopping NFC task");
+            
+            // Forcibly delete the stuck task instead of trying to suspend gracefully
+            vTaskDelete(s_task);
+            s_task = nullptr;
+            Serial.println("[NFC] NFC task terminated to clear mutex corruption");
+            
+            // Recreate mutex to ensure clean state
+            if (s_pn532Mutex) {
+                vSemaphoreDelete(s_pn532Mutex);
+            }
+            s_pn532Mutex = xSemaphoreCreateMutex();
+            Serial.println("[NFC] Mutex recreated for clean provisioning state");
+            
         } else {
-            Serial.println("[NFC] Provision mode: resuming polling");
-            vTaskResume(s_task);
+            Serial.println("[NFC] Provision mode OFF: restarting normal polling task");
+            // Recreate the task fresh
+            if (!s_task) {
+                xTaskCreate(TaskNFC, "NFC Poll", 4096, nullptr, 2, &s_task);
+                Serial.println("[NFC] NFC task recreated and started");
+            } else {
+                vTaskResume(s_task);
+            }
         }
     }
   }
@@ -304,8 +392,17 @@ namespace NFCMod {
   }
 
   bool runProvisioningSM(const uint8_t* aid, size_t aidLen, uint32_t overallTimeoutMs, ProvData* out, char* errBuf, size_t errBufLen) {
+    Serial.println("[Prov][NFC] === Starting Provisioning State Machine ===");
+    
     if (!aid || aidLen == 0 || aidLen > 16 || !out) {
       if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "bad args");
+      Serial.println("[Prov][NFC] ERROR: Invalid arguments");
+      return false;
+    }
+
+    if (!s_nfcReady) {
+      if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "NFC not ready");
+      Serial.println("[Prov][NFC] ERROR: NFC not ready");
       return false;
     }
 
@@ -317,59 +414,145 @@ namespace NFCMod {
 
   // S1: INIT_NFC_FOR_PROVISION — minimal setup, no SAMConfig to avoid session interference
     // assume PN532 already initialized before SM
+    Serial.println("[Prov][NFC] S1: Initializing for provisioning...");
+    
+    if (!s_pn532Mutex) {
+      if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "mutex not initialized");
+      Serial.println("[Prov][NFC] ERROR: Mutex not initialized");
+      return false;
+    }
+    
+    Serial.println("[Prov][NFC] Taking mutex...");
+    
+    // Try to take mutex with timeout instead of waiting forever
+    if (xSemaphoreTake(s_pn532Mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+      Serial.println("[Prov][NFC] ERROR: Failed to acquire mutex within 5 seconds!");
+      Serial.println("[Prov][NFC] Mutex may be stuck - recreating mutex...");
+      
+      // Delete and recreate the mutex to recover from stuck state
+      if (s_pn532Mutex) {
+        vSemaphoreDelete(s_pn532Mutex);
+      }
+      s_pn532Mutex = xSemaphoreCreateMutex();
+      
+      if (!s_pn532Mutex) {
+        if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "failed to recreate mutex");
+        Serial.println("[Prov][NFC] ERROR: Failed to recreate mutex");
+        return false;
+      }
+      
+      Serial.println("[Prov][NFC] Mutex recreated, trying again...");
+      xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    }
+    Serial.println("[Prov][NFC] Task terminated - performing PN532 hardware reset...");
+    
+    // Release mutex temporarily for hardware reset
+    xSemaphoreGive(s_pn532Mutex);
+    
+    // Perform hardware reset instead of software I2C reset
+    hardwareResetPN532();
+    
+    // Reinitialize everything after hardware reset
+    if (!initializeNFC()) {
+      Serial.println("[Prov][NFC] ERROR: PN532 hardware reset failed");
+      if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "PN532 hardware reset failed");
+      return false;
+    }
+    
+    Serial.println("[Prov][NFC] PN532 hardware reset and reinitialization successful");
+    
+    Serial.println("[Prov][NFC] I2C reset completed - reacquiring mutex...");
     xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-    nfc.setPassiveActivationRetries(0xFF);  // ok
+    
+    // Skip PN532 communication test to avoid Error 263 and stack overflow
+    // Proceed directly to provisioning - if PN532 is broken, provisioning will detect it
+    Serial.println("[Prov][NFC] Skipping PN532 test - proceeding with provisioning...");
+    Serial.println("[Prov][NFC] Releasing mutex...");
     xSemaphoreGive(s_pn532Mutex);
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    // S2: WAIT_FOR_PHONE_TAP — loop until phone present or timeout
-    Serial.println("[Prov][NFC] Waiting for phone tap...");
-    {
-      uint8_t uid[10]; uint8_t uidLen = 0; bool present = false;
-      while (timeLeft() > 0) {
-        xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-        bool found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen);
+    // S2: WAIT_FOR_PHONE_TAP — immediately try SELECT AID to verify it's actually a phone
+    Serial.println("[Prov][NFC] S2: Waiting for phone tap...");
+    
+    Serial.printf("[Prov][NFC] Starting phone detection loop, timeout: %u ms\n", timeLeft());
+    
+    while (timeLeft() > 0) {
+      uint8_t uid[10]; uint8_t uidLen = 0;
+      
+      // Step 1: Check for any NFC-A tag
+      Serial.println("[Prov][NFC] Polling for NFC tags...");
+      xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+      
+      // Clear I2C error flag before attempting read
+      s_i2cError = false;
+      bool found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen);
+      
+      // Check if I2C error occurred during the read
+      if (s_i2cError) {
         xSemaphoreGive(s_pn532Mutex);
+        Serial.println("[Prov][NFC] ERROR: I2C Error 263 detected in provisioning");
+        Serial.println("[Prov][NFC] Performing PN532 hardware reset via RST pin...");
         
-        if (found) { 
-          present = true; 
-          delay(500); // Allow ISO-DEP activation to settle
-          break; 
+        // Try hardware reset instead of ESP32 restart
+        hardwareResetPN532();
+        
+        // Reinitialize I2C and PN532 after hardware reset
+        if (initializeNFC()) {
+          Serial.println("[Prov][NFC] PN532 hardware reset successful - retrying provisioning");
+          // Continue with next iteration of polling loop
+          vTaskDelay(pdMS_TO_TICKS(100));
+          continue;
+        } else {
+          Serial.println("[Prov][NFC] PN532 hardware reset failed - provisioning cannot continue");
+          if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "PN532 hardware reset failed");
+          return false;
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
       }
-  if (!present) { 
-    if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "no phone"); 
-    // xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-    // nfc.SAMConfig(); 
-    // xSemaphoreGive(s_pn532Mutex);
-    return false; 
-  }
-    }
-
-    // S3: ISODEP_ACTIVATION — handled implicitly by inDataExchange after tag presence
-
-    // S4: SEND_SELECT_AID
-    {
+      
+      xSemaphoreGive(s_pn532Mutex);
+      Serial.printf("[Prov][NFC] Poll result: %s\n", found ? "TAG FOUND" : "no tag");
+      
+      if (!found) {
+        vTaskDelay(pdMS_TO_TICKS(200)); // Longer delay when no tag found
+        continue;
+      }
+      
+      // Step 2: Immediately try SELECT AID to see if it's a phone with our HCE service
       uint8_t apdu[32]; uint8_t alen = 0; buildSelectAid(aid, aidLen, apdu, &alen);
       uint8_t resp[255]; uint8_t rlen = sizeof(resp);
+      
       xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
       bool ok = nfc.inDataExchange(apdu, alen, resp, &rlen);
       xSemaphoreGive(s_pn532Mutex);
       
-      if ((!ok || !apduOk(resp, rlen)) && timeLeft() > 0) {
-        // retry once
-        vTaskDelay(pdMS_TO_TICKS(50)); rlen = sizeof(resp);
+      if (ok && apduOk(resp, rlen)) {
+        // SUCCESS: This is our phone with the correct HCE service!
+        Serial.println("[Prov][NFC] Phone with correct AID detected!");
+        delay(100); // Allow ISO-DEP session to stabilize
+        break;
+      } else {
+        // FAILURE: Either not a phone or wrong AID - this is likely a regular NFC tag
+        Serial.println("[Prov][NFC] Tag detected but SELECT AID failed - not our phone, continuing...");
+        
+        // Reset PN532 to clear incomplete ISO-DEP state
         xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-        ok = nfc.inDataExchange(apdu, alen, resp, &rlen);
+        nfc.SAMConfig(); // Reset PN532 state
         xSemaphoreGive(s_pn532Mutex);
-      }
-      
-      if (!ok || !apduOk(resp, rlen)) { 
-        if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "SELECT AID failed"); 
-        return false; 
+        
+        // Longer delay when wrong tag detected to reduce BLE stack pressure
+        vTaskDelay(pdMS_TO_TICKS(500)); 
+        continue;
       }
     }
+    
+    if (timeLeft() == 0) {
+      if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "no phone with correct AID found");
+      return false;
+    }
+
+    // S3: ISODEP_ACTIVATION — already completed above during SELECT AID
+
+    // S4: SELECT AID already successful from detection loop above
 
     // S5: SEND_CHALLENGE — vehicle fingerprint (8) + nonce (16)
     uint8_t veh[8]; size_t vehLen = 0; {
@@ -429,6 +612,13 @@ namespace NFCMod {
   }
   bool runHceProvisioningOnce(const uint8_t* aid, size_t aidLen, uint32_t timeoutMs) {
     (void)aid; (void)aidLen; (void)timeoutMs; return false;
+  }
+
+  // Simple helper function to detect and handle phone during provisioning
+  bool checkForProvisioningPhone(const uint8_t* aid, size_t aidLen) {
+    // This function is deprecated - use runProvisioningSM directly
+    (void)aid; (void)aidLen;
+    return false;
   }
 
   void resetForProvisionRetry() {

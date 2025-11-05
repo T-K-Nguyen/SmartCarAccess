@@ -41,6 +41,12 @@ namespace {
         case 0x01: Provisioning::clearKeys(); _info->setValue("CLEARED_KEYS"); break;
         case 0x02: Provisioning::clearAll(); _info->setValue("CLEARED_ALL"); break;
         case 0x10: _info->setValue("LISTED_TAGS"); Provisioning::listAuthorizedTags(); break;
+        case 0x20: 
+          _info->setValue("STARTING_PROVISIONING"); 
+          _info->notify();
+          Serial.println("[BLE Admin] Provisioning requested via BLE command 0x20");
+          Provisioning::runNfcProvisioning(); 
+          break;
         default: _info->setValue("UNKNOWN_CMD"); break;
       }
     }
