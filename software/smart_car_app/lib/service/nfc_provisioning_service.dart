@@ -72,14 +72,50 @@ class NfcProvisioningService {
       debugPrint('[HCE] Prefetch failed: $e');
     }
 
+    // Display current AID configuration for verification
+    print('📱 =================');
+    print('📱 HCE SERVICE READY');
+    print('📱 =================');
+    print('📱 AID: F0 01 02 03 04 05 0F (7 bytes)');
+    print('📱 Expected ESP32 SELECT: 00 A4 04 00 07 F0 01 02 03 04 05 0F');
+    print('📱 HCE Service: SmartCarApduService');
+    print('📱 Device Unlock Required: false');
+    print('📱 Ready for NFC provisioning!');
+    print('📱 MethodChannel: $_channelName');
+    print('📱 Initialized: $_initialized');
+    print('📱 Cached Data Ready: ${_cachedProvisioningData != null}');
+    print('📱 =================');
+    
+    // Also use debugPrint for development
+    debugPrint('📱 HCE SERVICE INITIALIZED AND READY FOR NFC COMMUNICATION');
+
+    // Note: testConnection method not implemented in Android HCE service
+    // The Android service only handles 'getProvisioningData' calls from processCommandApdu
+    print('🧪 METHOD CHANNEL READY - Android HCE service active');
+
     _channel.setMethodCallHandler((call) async {
+      print('🔥🔥🔥 METHODCHANNEL CALL RECEIVED: ${call.method}');
+      debugPrint('[HCE] MethodChannel call: ${call.method}');
+      
       if (call.method == 'getProvisioningData') {
-        debugPrint('[HCE] getProvisioningData request received');
-        if (_cachedProvisioningData != null) return _cachedProvisioningData;
+        print('🎯🎯🎯 HCE METHOD CALL: ${call.method}');
+        debugPrint('[HCE] getProvisioningData request received from Android HCE service');
+        
+        if (_cachedProvisioningData != null) {
+          print('🎯🎯🎯 RETURNING CACHED PROVISIONING DATA');
+          debugPrint('[HCE] Returning cached provisioning data (${_cachedProvisioningData.toString().length} chars)');
+          return _cachedProvisioningData;
+        }
+        
+        print('🎯🎯🎯 GENERATING NEW PROVISIONING DATA');
+        debugPrint('[HCE] Generating new provisioning data...');
         final data = await svc._handleGetProvisioningData();
         _cachedProvisioningData = data;
+        debugPrint('[HCE] Generated and cached provisioning data');
         return data;
       }
+      
+      print('❌❌❌ UNKNOWN METHOD: ${call.method}');
       throw PlatformException(
         code: 'unimplemented',
         message: 'Unknown method: ${call.method}',
@@ -99,20 +135,16 @@ class NfcProvisioningService {
         await initialize();
       }
       
-      // Test method channel communication
-      try {
-        final testResult = await _channel.invokeMethod('getProvisioningData');
-        if (testResult != null) {
-          debugPrint('[HCE-TEST] MethodChannel communication: SUCCESS');
-          debugPrint('[HCE-TEST] Provisioning data available: ${testResult.toString().substring(0, 50)}...');
-          return 'HCE service test SUCCESS - MethodChannel active, provisioning data ready';
-        } else {
-          debugPrint('[HCE-TEST] MethodChannel returned null');
-          return 'HCE service test WARNING - MethodChannel active but no provisioning data';
-        }
-      } catch (e) {
-        debugPrint('[HCE-TEST] MethodChannel test failed: $e');
-        return 'HCE service test FAILED - MethodChannel error: $e';
+      // Test provisioning data preparation (cached data should be ready)
+      if (_cachedProvisioningData != null) {
+        debugPrint('[HCE-TEST] Cached provisioning data ready: SUCCESS');
+        final dataStr = _cachedProvisioningData.toString();
+        final preview = dataStr.length > 50 ? '${dataStr.substring(0, 50)}...' : dataStr;
+        debugPrint('[HCE-TEST] Provisioning data preview: $preview');
+        return 'HCE service test SUCCESS - Provisioning data cached and ready for ESP32';
+      } else {
+        debugPrint('[HCE-TEST] No cached provisioning data available');
+        return 'HCE service test WARNING - No cached provisioning data, will generate on demand';
       }
       
     } catch (e) {

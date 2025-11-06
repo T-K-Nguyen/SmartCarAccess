@@ -311,6 +311,33 @@
 				"$platformio"
 			],
 			"group": "build"
+		},
+		{
+			"label": "Build with BLE/NFC yield coordination",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build with proper mutex coordination",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build with SELECT AID retry reliability",
+			"type": "shell",
+			"command": "C:\\Users\\thuan\\.platformio\\penv\\Scripts\\platformio.exe",
+			"args": [
+				"run"
+			],
+			"group": "build"
 		}
 	]
 }

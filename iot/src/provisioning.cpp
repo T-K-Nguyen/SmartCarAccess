@@ -217,14 +217,27 @@ void runNfcProvisioning() {
     return;
   }
 
-  // AID must match the Android HCE service
-  static const uint8_t HCE_AID[] = { 0xF0, 0x01, 0x02, 0x03, 0x04, 0x05 };
+  // AID must match the Android HCE service (7 bytes for Android compatibility)
+  static const uint8_t HCE_AID[] = { 0xF0, 0x01, 0x02, 0x03, 0x04, 0x05, 0x0F };
   const uint32_t overallTimeoutMs = 15000;
 
   Serial.println("[Prov] Admin requested provisioning. Bring phone close...");
+  
+  // Debug: Print memory status and AID we're using
+  Serial.printf("[Prov] Free heap: %d bytes\n", esp_get_free_heap_size());
+  Serial.printf("[Prov] Using AID (len=%d): ", sizeof(HCE_AID));
+  for (int i = 0; i < sizeof(HCE_AID); i++) {
+    Serial.printf("%02X ", HCE_AID[i]);
+  }
+  Serial.println();
 
   // Keep reader in provisioning mode until success
   NFCMod::setProvisionHold(true);
+  
+  // Give NFC polling task time to release mutex and suspend properly
+  Serial.println("[Prov] Waiting for NFC task to suspend...");
+  vTaskDelay(pdMS_TO_TICKS(500)); // Longer delay to ensure proper suspension
+  
   for (;;) {
     // Run NFC-side state machine S1..S6
     NFCMod::ProvData pd{};

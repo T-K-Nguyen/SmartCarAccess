@@ -63,7 +63,7 @@ void setup() {
   Provisioning::begin();
   // NOTE: Provisioning is now only triggered via BLE admin commands
   // Auto-provisioning on boot was causing PN532 corruption and restart loops
-  // Provisioning::runNfcProvisioning();  // Disabled - only run on BLE request
+  Provisioning::runNfcProvisioning();  // should be Disabled - only run on BLE request
 
   // Print current info without running provisioning
   Provisioning::printInfo();

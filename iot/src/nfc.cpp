@@ -32,10 +32,69 @@ namespace {
   static uint32_t s_lastResetAttempt = 0;
   static const uint32_t I2C_TIMEOUT_MS = 5000; // 5 second timeout
   static const uint32_t I2C_RESET_COOLDOWN_MS = 2000; // 2 second cooldown between resets
+  
+  // Mutex safety tracking
+  static TaskHandle_t s_mutexOwner = nullptr;
+  static uint32_t s_mutexTakeTime = 0;
 
   // Forward declarations
   void resetI2CBus();
   void hardwareResetPN532();
+  
+  // Safe mutex operations to prevent corruption
+  bool safeMutexTake(uint32_t timeoutMs) {
+    if (!s_pn532Mutex) {
+      Serial.println("[NFC] ERROR: Mutex is null!");
+      return false;
+    }
+    
+    TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
+    if (s_mutexOwner == currentTask) {
+      Serial.println("[NFC] WARNING: Task already owns mutex - avoiding deadlock");
+      return true; // Already own it
+    }
+    
+    if (xSemaphoreTake(s_pn532Mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {
+      s_mutexOwner = currentTask;
+      s_mutexTakeTime = millis();
+      return true;
+    }
+    
+    Serial.printf("[NFC] ERROR: Failed to acquire mutex in %dms\n", timeoutMs);
+    return false;
+  }
+  
+  void safeMutexGive() {
+    if (!s_pn532Mutex) {
+      Serial.println("[NFC] ERROR: Cannot give null mutex!");
+      return;
+    }
+    
+    TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
+    if (s_mutexOwner != currentTask) {
+      Serial.println("[NFC] WARNING: Task doesn't own mutex - not giving");
+      return;
+    }
+    
+    s_mutexOwner = nullptr;
+    s_mutexTakeTime = 0;
+    xSemaphoreGive(s_pn532Mutex);
+  }
+  
+  void recreateMutex() {
+    Serial.println("[NFC] Recreating mutex due to corruption...");
+    if (s_pn532Mutex) {
+      vSemaphoreDelete(s_pn532Mutex);
+    }
+    s_pn532Mutex = xSemaphoreCreateMutex();
+    s_mutexOwner = nullptr;
+    s_mutexTakeTime = 0;
+    if (s_pn532Mutex) {
+      Serial.println("[NFC] Mutex recreated successfully");
+    } else {
+      Serial.println("[NFC] ERROR: Failed to recreate mutex!");
+    }
+  }
 
   // I2C error detection and recovery functions
   bool initializeNFC() {
@@ -222,9 +281,18 @@ namespace {
 
       // Task should be suspended during provisioning mode
       if (s_provHold) {
-        // This should not happen if task is properly suspended
-        Serial.println("[NFC] ERROR: Task running during provisioning mode!");
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Ensure we're not holding the mutex when entering provisioning mode
+        if (s_mutexOwner == xTaskGetCurrentTaskHandle()) {
+          Serial.println("[NFC] Releasing mutex before entering provisioning mode");
+          safeMutexGive();
+        }
+        
+        // Suspend this task until provisioning mode is disabled
+        Serial.println("[NFC] Provisioning mode active - suspending NFC polling task");
+        while (s_provHold) {
+          vTaskDelay(pdMS_TO_TICKS(500)); // Check every 500ms if we can resume
+        }
+        Serial.println("[NFC] Provisioning mode ended - resuming NFC polling");
         continue;
       }
       
@@ -233,8 +301,13 @@ namespace {
       bool found = false;
       bool commSuccess = true;
       
-      // Use timeout to prevent permanent mutex lock
-      if (xSemaphoreTake(s_pn532Mutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
+      // Check again if provisioning hold was activated while we were waiting
+      if (s_provHold) {
+        continue; // Go back to provisioning hold check
+      }
+      
+      // Use safe mutex operations to prevent corruption
+      if (safeMutexTake(5000)) {
         
         // Set I2C timeout to prevent hangs
         Wire.setTimeOut(2000);
@@ -252,8 +325,8 @@ namespace {
         // Restore normal I2C timeout
         Wire.setTimeOut(1000);
         
-        // ALWAYS release mutex, even if PN532 failed
-        xSemaphoreGive(s_pn532Mutex);
+        // ALWAYS release mutex safely, even if PN532 failed
+        safeMutexGive();
         
         // Handle I2C communication failure
         if (!commSuccess || s_i2cError) {
@@ -313,38 +386,17 @@ namespace NFCMod {
 
   void startTask() {
     if (!s_task) {
-      xTaskCreate(TaskNFC, "NFC Poll", 4096, nullptr, 2, &s_task);
+      // Increase stack size and lower priority to avoid BLE interference
+      xTaskCreate(TaskNFC, "NFC Poll", 8192, nullptr, 1, &s_task);
     }
   }
 
   void setProvisionHold(bool enabled) {
     s_provHold = enabled;
-    if (s_task) {
-        if (enabled) {
-            Serial.println("[NFC] Provision mode ENABLED - forcibly stopping NFC task");
-            
-            // Forcibly delete the stuck task instead of trying to suspend gracefully
-            vTaskDelete(s_task);
-            s_task = nullptr;
-            Serial.println("[NFC] NFC task terminated to clear mutex corruption");
-            
-            // Recreate mutex to ensure clean state
-            if (s_pn532Mutex) {
-                vSemaphoreDelete(s_pn532Mutex);
-            }
-            s_pn532Mutex = xSemaphoreCreateMutex();
-            Serial.println("[NFC] Mutex recreated for clean provisioning state");
-            
-        } else {
-            Serial.println("[NFC] Provision mode OFF: restarting normal polling task");
-            // Recreate the task fresh
-            if (!s_task) {
-                xTaskCreate(TaskNFC, "NFC Poll", 4096, nullptr, 2, &s_task);
-                Serial.println("[NFC] NFC task recreated and started");
-            } else {
-                vTaskResume(s_task);
-            }
-        }
+    if (enabled) {
+        Serial.println("[NFC] Provision mode ENABLED - normal polling suspended");
+    } else {
+        Serial.println("[NFC] Provision mode DISABLED - normal polling resumed");
     }
   }
 
@@ -370,7 +422,9 @@ namespace NFCMod {
     out[idx++] = 0x00; // P2
     out[idx++] = (uint8_t)aidLen; // Lc
     for (size_t i = 0; i < aidLen; ++i) out[idx++] = aid[i];
-    out[idx++] = 0x00; // Le
+    // ADD Le field (0x00) for HCE compatibility - the PN532 Android HCE example includes this!
+    // Based on working PN532 android_hce.ino example which successfully communicates with Android HCE
+    out[idx++] = 0x00; // Le (expected length of response)
     *outLen = idx;
   }
 
@@ -393,6 +447,13 @@ namespace NFCMod {
 
   bool runProvisioningSM(const uint8_t* aid, size_t aidLen, uint32_t overallTimeoutMs, ProvData* out, char* errBuf, size_t errBufLen) {
     Serial.println("[Prov][NFC] === Starting Provisioning State Machine ===");
+    
+    // Debug: Show the AID we received
+    Serial.printf("[Prov][NFC] Received AID (len=%d): ", aidLen);
+    for (int i = 0; i < aidLen; i++) {
+      Serial.printf("%02X ", aid[i]);
+    }
+    Serial.println();
     
     if (!aid || aidLen == 0 || aidLen > 16 || !out) {
       if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "bad args");
@@ -424,30 +485,28 @@ namespace NFCMod {
     
     Serial.println("[Prov][NFC] Taking mutex...");
     
-    // Try to take mutex with timeout instead of waiting forever
-    if (xSemaphoreTake(s_pn532Mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    // Wait a bit more if another task might still be releasing the mutex
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Try to take mutex with safe operations
+    if (!safeMutexTake(5000)) {
       Serial.println("[Prov][NFC] ERROR: Failed to acquire mutex within 5 seconds!");
       Serial.println("[Prov][NFC] Mutex may be stuck - recreating mutex...");
       
-      // Delete and recreate the mutex to recover from stuck state
-      if (s_pn532Mutex) {
-        vSemaphoreDelete(s_pn532Mutex);
-      }
-      s_pn532Mutex = xSemaphoreCreateMutex();
+      // Recreate the mutex using safe function
+      recreateMutex();
       
-      if (!s_pn532Mutex) {
-        if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "failed to recreate mutex");
-        Serial.println("[Prov][NFC] ERROR: Failed to recreate mutex");
+      // Try again with new mutex
+      if (!safeMutexTake(1000)) {
+        if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "mutex recreation failed");
+        Serial.println("[Prov][NFC] ERROR: Still can't acquire mutex after recreation!");
         return false;
       }
-      
-      Serial.println("[Prov][NFC] Mutex recreated, trying again...");
-      xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
     }
     Serial.println("[Prov][NFC] Task terminated - performing PN532 hardware reset...");
     
     // Release mutex temporarily for hardware reset
-    xSemaphoreGive(s_pn532Mutex);
+    safeMutexGive();
     
     // Perform hardware reset instead of software I2C reset
     hardwareResetPN532();
@@ -462,13 +521,17 @@ namespace NFCMod {
     Serial.println("[Prov][NFC] PN532 hardware reset and reinitialization successful");
     
     Serial.println("[Prov][NFC] I2C reset completed - reacquiring mutex...");
-    xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+    if (!safeMutexTake(1000)) {
+      Serial.println("[Prov][NFC] ERROR: Can't reacquire mutex after reset!");
+      if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "mutex reacquire failed");
+      return false;
+    }
     
     // Skip PN532 communication test to avoid Error 263 and stack overflow
     // Proceed directly to provisioning - if PN532 is broken, provisioning will detect it
     Serial.println("[Prov][NFC] Skipping PN532 test - proceeding with provisioning...");
     Serial.println("[Prov][NFC] Releasing mutex...");
-    xSemaphoreGive(s_pn532Mutex);
+    safeMutexGive();
     vTaskDelay(pdMS_TO_TICKS(50));
 
     // S2: WAIT_FOR_PHONE_TAP — immediately try SELECT AID to verify it's actually a phone
@@ -477,15 +540,31 @@ namespace NFCMod {
     Serial.printf("[Prov][NFC] Starting phone detection loop, timeout: %u ms\n", timeLeft());
     
     while (timeLeft() > 0) {
+      // Yield to BLE stack at start of each polling iteration
+      vTaskDelay(pdMS_TO_TICKS(5));
+      
       uint8_t uid[10]; uint8_t uidLen = 0;
       
       // Step 1: Check for any NFC-A tag
       Serial.println("[Prov][NFC] Polling for NFC tags...");
-      xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+      if (xSemaphoreTake(s_pn532Mutex, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        Serial.println("[Prov][NFC] WARNING: Could not acquire mutex for tag polling");
+        continue; // Skip this iteration and try again
+      }
       
       // Clear I2C error flag before attempting read
       s_i2cError = false;
+      
+      // Try to activate ISO14443A target for HCE communication
+      Serial.println("[Prov][NFC] Attempting ISO14443A target activation...");
       bool found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen);
+      
+      if (found) {
+        Serial.printf("[Prov][NFC] ISO14443A target activated successfully, UID length: %d\n", uidLen);
+        // Additional PN532 setup for ISO-DEP/HCE communication
+        Serial.println("[Prov][NFC] Configuring PN532 for ISO-DEP communication...");
+        nfc.SAMConfig(); // Ensure SAM is properly configured for APDU exchange
+      }
       
       // Check if I2C error occurred during the read
       if (s_i2cError) {
@@ -517,13 +596,109 @@ namespace NFCMod {
         continue;
       }
       
-      // Step 2: Immediately try SELECT AID to see if it's a phone with our HCE service
-      uint8_t apdu[32]; uint8_t alen = 0; buildSelectAid(aid, aidLen, apdu, &alen);
-      uint8_t resp[255]; uint8_t rlen = sizeof(resp);
+      // Give additional time for Android HCE service to fully activate
+      Serial.println("[Prov][NFC] Tag detected - waiting for HCE initialization...");
+      vTaskDelay(pdMS_TO_TICKS(300)); // Extra delay for HCE service
       
-      xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-      bool ok = nfc.inDataExchange(apdu, alen, resp, &rlen);
-      xSemaphoreGive(s_pn532Mutex);
+      // Step 2: Try SELECT AID to see if it's a phone with our HCE service
+      uint8_t apdu[32]; 
+      uint8_t alen = 0; 
+      buildSelectAid(aid, aidLen, apdu, &alen);
+      
+      // Use smaller response buffer to prevent stack issues
+      uint8_t resp[64]; 
+      uint8_t rlen = sizeof(resp);
+      
+      // LOG: Show exactly what APDU we're sending
+      Serial.print("[Prov][NFC] >>> Sending SELECT AID: ");
+      for (int i = 0; i < alen; i++) {
+        Serial.printf("%02X ", apdu[i]);
+      }
+      Serial.println();
+
+      // Print the UID we detected (helpful to correlate tag appearance)
+      if (uidLen > 0) {
+        Serial.print("[Prov][NFC] Detected UID: ");
+        for (uint8_t u = 0; u < uidLen; ++u) {
+          Serial.printf("%02X", uid[u]);
+          if (u + 1 < uidLen) Serial.print(":");
+        }
+        Serial.println();
+      }
+
+      // Give HCE service time to activate (reduced to avoid BLE interference)
+      Serial.println("[Prov][NFC] Waiting for HCE service activation...");
+      delay(200); // Reduced from 500ms to avoid BLE stack interference
+      
+      // Yield to BLE stack before critical APDU operation
+      vTaskDelay(pdMS_TO_TICKS(5));
+      
+      // Try SELECT AID multiple times to ensure HCE service activation
+      bool ok = false;
+      int attempts = 0;
+      const int maxAttempts = 5; // Try up to 5 times
+      
+      while (!ok && attempts < maxAttempts) {
+        attempts++;
+        Serial.printf("[Prov][NFC] SELECT AID attempt %d/%d...\n", attempts, maxAttempts);
+        
+        // Progressive timeout increase: give HCE more time on later attempts
+        uint32_t timeout = 3000 + (attempts * 1000); // 3s, 4s, 5s, 6s, 7s
+        Wire.setTimeOut(timeout);
+        
+        if (!safeMutexTake(3000)) {
+          Serial.println("[Prov][NFC] ERROR: Could not acquire mutex for SELECT AID exchange");
+          return false; // This will cause the provisioning to retry
+        }
+        
+        // Reset response buffer for each attempt
+        rlen = sizeof(resp);
+        
+        Serial.printf("[Prov][NFC] Sending APDU via inDataExchange (attempt %d)...\n", attempts);
+        Serial.println("[Prov][NFC] Before inDataExchange call");
+        
+        ok = nfc.inDataExchange(apdu, alen, resp, &rlen);
+        
+        Serial.printf("[Prov][NFC] inDataExchange returned: ok=%s, rlen=%d\n", ok ? "true" : "false", rlen);
+        
+        if (ok && rlen > 0) {
+          Serial.print("[Prov][NFC] Raw response bytes: ");
+          for (int i = 0; i < rlen; i++) {
+            Serial.printf("%02X ", resp[i]);
+          }
+          Serial.println();
+        } else if (!ok) {
+          Serial.println("[Prov][NFC] inDataExchange failed - no communication with target");
+        } else {
+          Serial.println("[Prov][NFC] inDataExchange succeeded but got empty response");
+        }
+        
+        safeMutexGive();
+        
+        if (!ok || !apduOk(resp, rlen)) {
+          Serial.printf("[Prov][NFC] Attempt %d failed (ok=%s, apduOk=%s), waiting before retry...\n", 
+                       attempts, ok ? "true" : "false", apduOk(resp, rlen) ? "true" : "false");
+          vTaskDelay(pdMS_TO_TICKS(300)); // Wait between attempts
+        } else {
+          Serial.printf("[Prov][NFC] SELECT AID succeeded on attempt %d!\n", attempts);
+        }
+      }
+      
+      Wire.setTimeOut(1000); // Reset timeout
+      
+      // Allow BLE stack to run after APDU exchange
+      vTaskDelay(pdMS_TO_TICKS(10));
+      
+      // LOG: Show what we got back
+      Serial.printf("[Prov][NFC] <<< Response (ok=%s, len=%d): ", ok ? "true" : "false", rlen);
+      if (ok && rlen > 0) {
+        for (int i = 0; i < rlen; i++) {
+          Serial.printf("%02X ", resp[i]);
+        }
+      } else {
+        Serial.printf("ERROR or empty");
+      }
+      Serial.println();
       
       if (ok && apduOk(resp, rlen)) {
         // SUCCESS: This is our phone with the correct HCE service!
@@ -535,9 +710,12 @@ namespace NFCMod {
         Serial.println("[Prov][NFC] Tag detected but SELECT AID failed - not our phone, continuing...");
         
         // Reset PN532 to clear incomplete ISO-DEP state
-        xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-        nfc.SAMConfig(); // Reset PN532 state
-        xSemaphoreGive(s_pn532Mutex);
+        if (xSemaphoreTake(s_pn532Mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+          nfc.SAMConfig(); // Reset PN532 state
+          xSemaphoreGive(s_pn532Mutex);
+        } else {
+          Serial.println("[Prov][NFC] WARNING: Could not acquire mutex for SAMConfig reset");
+        }
         
         // Longer delay when wrong tag detected to reduce BLE stack pressure
         vTaskDelay(pdMS_TO_TICKS(500)); 
@@ -562,8 +740,11 @@ namespace NFCMod {
     uint8_t nonce[16]; Provisioning::randomBytes(nonce, sizeof(nonce));
     {
       uint8_t apdu[64]; uint8_t alen = 0; buildGetInfo(vehLen?veh:nullptr, vehLen, nonce, sizeof(nonce), apdu, &alen);
-      uint8_t resp[255]; uint8_t rlen = sizeof(resp);
-      xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
+      uint8_t resp[128]; uint8_t rlen = sizeof(resp);
+      if (xSemaphoreTake(s_pn532Mutex, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        if (errBuf && errBufLen) snprintf(errBuf, errBufLen, "GET_INFO mutex timeout");
+        return false;
+      }
       bool exchangeOk = nfc.inDataExchange(apdu, alen, resp, &rlen);
       xSemaphoreGive(s_pn532Mutex);
       
@@ -623,9 +804,10 @@ namespace NFCMod {
 
   void resetForProvisionRetry() {
     // Minimal reset: re-apply SAM config; this drops any active card session
-    xSemaphoreTake(s_pn532Mutex, portMAX_DELAY);
-    nfc.SAMConfig();
-    xSemaphoreGive(s_pn532Mutex);
+    if (xSemaphoreTake(s_pn532Mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      nfc.SAMConfig();
+      xSemaphoreGive(s_pn532Mutex);
+    }
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }

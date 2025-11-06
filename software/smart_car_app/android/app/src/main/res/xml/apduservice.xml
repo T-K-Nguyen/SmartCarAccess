@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/desc_smartcar_hce"
-    android:requireDeviceUnlock="true"
+    android:requireDeviceUnlock="false"
     android:apduServiceBanner="@mipmap/ic_launcher">
+    <!-- Use "other" category to avoid payment conflicts -->
     <aid-group android:category="other" android:description="@string/desc_smartcar_hce">
-        <aid-filter android:name="F00102030405" />
+        <!-- AID: Use standard 7-byte format (14 hex chars) for Android compatibility -->
+        <aid-filter android:name="F001020304050F" />
     </aid-group>
 </host-apdu-service>

@@ -17,14 +17,18 @@ import io.flutter.FlutterInjector
 class SmartCarApduService : HostApduService() {
     companion object {
         private const val TAG = "SmartCarApduService"
-        // Example AID (F00102030405). Replace with your production AID.
+        // AID (7 bytes) - must match ESP32 and apduservice.xml
         private val AID = byteArrayOf(
-            0xF0.toByte(), 0x01, 0x02, 0x03, 0x04, 0x05
+            0xF0.toByte(), 0x01, 0x02, 0x03, 0x04, 0x05, 0x0F
         )
 
         private const val CHANNEL_NAME = "smartcar.hce"
         private val SW_SUCCESS = byteArrayOf(0x90.toByte(), 0x00)
         private val SW_UNKNOWN = byteArrayOf(0x6A.toByte(), 0x80.toByte())
+        
+        // Activation tracking
+        private var activationCount = 0
+        private var lastActivation = 0L
     }
 
     private var engine: FlutterEngine? = null
@@ -35,29 +39,98 @@ class SmartCarApduService : HostApduService() {
         Log.i(TAG, "=== HCE SERVICE CREATED ===")
         Log.i(TAG, "SmartCarApduService is now active and listening")
         Log.i(TAG, "Registered AID: ${AID.joinToString("") { String.format("%02X", it) }}")
-        Log.i(TAG, "Expected ESP32 SELECT: 00 A4 04 00 06 F0 01 02 03 04 05")
+        Log.i(TAG, "Expected ESP32 SELECT: 00 A4 04 00 07 F0 01 02 03 04 05 0F")
+        Log.i(TAG, "Device unlock required: false (changed from true)")
+        Log.i(TAG, "Service category: other (non-payment)")
         Log.i(TAG, "Ready to receive APDU commands from NFC readers")
+        
+        // Also send debug message to system logs that can be seen in Flutter console
+        System.out.println("🔥 SmartCarApduService CREATED - HCE is ready!")
+        System.err.println("🔥 HCE AID: ${AID.joinToString(" ") { String.format("%02X", it) }}")
+        
+        // Force immediate method channel setup
+        ensureEngine()
+        
+        // Log service registration info
+        try {
+            val packageManager = packageManager
+            val serviceInfo = packageManager.getServiceInfo(
+                android.content.ComponentName(this, SmartCarApduService::class.java),
+                android.content.pm.PackageManager.GET_META_DATA
+            )
+            Log.i(TAG, "✅ HCE Service successfully registered in manifest")
+            Log.i(TAG, "Service enabled: ${serviceInfo.isEnabled}")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ HCE Service registration check failed: ${e.message}")
+        }
     }
 
     override fun processCommandApdu(commandApdu: ByteArray?, extras: Bundle?): ByteArray {
-        Log.i(TAG, "HCE Service processCommandApdu called!")
+        // Track activations
+        val currentTime = System.currentTimeMillis()
+        
+        // ALWAYS log activation to system streams for immediate visibility
+        System.out.println("🚨🚨🚨 HCE processCommandApdu CALLED - ESP32 IS COMMUNICATING!")
+        System.err.println("🚨🚨🚨 TIMESTAMP: $currentTime THREAD: ${Thread.currentThread().name}")
+        
+        if (currentTime - lastActivation > 1000) { // New session if >1 second gap
+            activationCount++
+            lastActivation = currentTime
+            Log.i(TAG, "=== HCE SERVICE ACTIVATION #$activationCount ===")
+            Log.i(TAG, "🎯 NFC READER DETECTED! ESP32 is trying to communicate!")
+            
+            // CRITICAL: Print to system streams for Flutter console visibility
+            System.out.println("🎯🎯🎯 HCE ACTIVATION #$activationCount - ESP32 DETECTED!")
+            System.err.println("🎯🎯🎯 NFC READER IS COMMUNICATING WITH PHONE!")
+        }
+        
+        Log.i(TAG, "=== processCommandApdu called (activation #$activationCount) ===")
+        Log.i(TAG, "Timestamp: $currentTime")
+        Log.i(TAG, "Thread: ${Thread.currentThread().name}")
+        
+        // CRITICAL: Always print APDU reception to system streams with different markers
+        System.out.println("📨📨📨 HCE RECEIVED APDU!")
+        println("📨📨📨 HCE RECEIVED APDU!") // Also use println for Dart console
+        
         if (commandApdu == null) {
-            Log.w(TAG, "Received null APDU")
+            Log.w(TAG, "❌ Received null APDU - returning error")
+            System.err.println("❌❌❌ NULL APDU RECEIVED!")
+            println("❌❌❌ NULL APDU RECEIVED!")
             return SW_UNKNOWN
         }
-        Log.d(TAG, "APDU IN: ${commandApdu.joinToString(" ") { String.format("%02X", it) }}")
+        
+        val apduHex = commandApdu.joinToString(" ") { String.format("%02X", it) }
+        Log.i(TAG, "📨 APDU IN (${commandApdu.size} bytes): $apduHex")
+        Log.i(TAG, "📋 Expected SELECT AID: 00 A4 04 00 07 F0 01 02 03 04 05 0F")
+        
+        // CRITICAL: Print APDU details to system streams
+        System.out.println("📨📨📨 APDU (${commandApdu.size} bytes): $apduHex")
+        System.out.println("📋📋📋 Expected: 00 A4 04 00 07 F0 01 02 03 04 05 0F")
 
         // Simple APDU decoding:
         // SELECT AID: 00 A4 04 00 Lc <AID>
         if (isSelectAid(commandApdu)) {
+            System.out.println("🔍🔍🔍 DETECTED SELECT AID COMMAND!")
             val aid = extractAid(commandApdu)
-            Log.d(TAG, "Extracted AID: ${aid?.joinToString("") { String.format("%02X", it) } ?: "null"}")
-            Log.d(TAG, "Expected AID: ${AID.joinToString("") { String.format("%02X", it) }}")
+            val extractedHex = aid?.joinToString("") { String.format("%02X", it) } ?: "null"
+            val expectedHex = AID.joinToString("") { String.format("%02X", it) }
+            
+            Log.d(TAG, "Extracted AID: $extractedHex")
+            Log.d(TAG, "Expected AID: $expectedHex")
+            
+            System.out.println("🔍🔍🔍 Extracted AID: $extractedHex")
+            System.out.println("🔍🔍🔍 Expected AID: $expectedHex")
+            
             return if (aid != null && aid.contentEquals(AID)) {
                 Log.i(TAG, "SELECT AID matched - returning SUCCESS (90 00)")
+                System.out.println("✅✅✅ AID MATCHED! RETURNING SUCCESS (90 00)")
+                System.err.println("✅✅✅ SENDING 90 00 RESPONSE TO ESP32")
                 SW_SUCCESS
             } else {
                 Log.w(TAG, "SELECT AID mismatch - returning UNKNOWN (6A 80)")
+                System.err.println("❌❌❌ AID MISMATCH! RETURNING ERROR (6A 80)")
+                System.err.println("❌❌❌ EXPECTED: ${AID.joinToString("") { String.format("%02X", it) }}")
+                System.err.println("❌❌❌ RECEIVED: ${aid?.joinToString("") { String.format("%02X", it) } ?: "null"}")
                 SW_UNKNOWN
             }
         }
@@ -78,8 +151,15 @@ class SmartCarApduService : HostApduService() {
     }
 
     override fun onDeactivated(reason: Int) {
-        Log.i(TAG, "HCE deactivated, reason=$reason (0=LINK_LOST, 1=DESELECTED)")
+        Log.i(TAG, "=== HCE Service DEACTIVATED ===")
+        Log.i(TAG, "Deactivation reason: $reason (0=LINK_LOST, 1=DESELECTED)")
+        Log.i(TAG, "Session ended at: ${System.currentTimeMillis()}")
+        
+        System.out.println("🔚🔚🔚 HCE SESSION ENDED - reason: $reason")
     }
+    
+    // This method is called when the HCE service is activated by an NFC reader
+    // Unfortunately, there's no onActivated() callback, but we can detect it in processCommandApdu
 
     private fun ensureEngine() {
         if (engine != null && methodChannel != null) return
@@ -101,6 +181,26 @@ class SmartCarApduService : HostApduService() {
 
         var resultBytes: ByteArray? = null
         val latch = CountDownLatch(1)
+
+        // Test connection first
+        try {
+            Log.i(TAG, "🧪 Testing method channel connection...")
+            System.out.println("🧪 TESTING METHOD CHANNEL CONNECTION...")
+            channel.invokeMethod("testConnection", null, object : MethodChannel.Result {
+                override fun success(result: Any?) {
+                    Log.i(TAG, "✅ Method channel test successful")
+                    System.out.println("✅ METHOD CHANNEL TEST SUCCESSFUL")
+                }
+                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+                    Log.w(TAG, "⚠️ Method channel test error: $errorCode $errorMessage")
+                }
+                override fun notImplemented() {
+                    Log.w(TAG, "⚠️ Method channel test not implemented")
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Method channel test failed: ${e.message}", e)
+        }
 
         try {
             channel.invokeMethod("getProvisioningData", null, object : MethodChannel.Result {
