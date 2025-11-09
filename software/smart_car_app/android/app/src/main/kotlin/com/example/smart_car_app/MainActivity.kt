@@ -25,7 +25,7 @@ class MainActivity : FlutterActivity() {
                 
                 // Set our HCE service as preferred when app is in foreground
                 val cardEmulation = CardEmulation.getInstance(nfcAdapter)
-                val componentName = android.content.ComponentName(this, SmartCarApduService::class.java)
+                val componentName = android.content.ComponentName(this, ProvisioningHostApduService::class.java)
                 
                 try {
                     cardEmulation.setPreferredService(this, componentName)
@@ -48,7 +48,7 @@ class MainActivity : FlutterActivity() {
         val nfcAdapter = NfcAdapter.getDefaultAdapter(this)
         if (nfcAdapter?.isEnabled == true) {
             val cardEmulation = CardEmulation.getInstance(nfcAdapter)
-            val componentName = android.content.ComponentName(this, SmartCarApduService::class.java)
+            val componentName = android.content.ComponentName(this, ProvisioningHostApduService::class.java)
             
             try {
                 cardEmulation.setPreferredService(this, componentName)

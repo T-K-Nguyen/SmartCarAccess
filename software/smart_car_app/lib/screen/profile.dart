@@ -521,7 +521,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 const Text('Next Steps:', 
                   style: TextStyle(fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
-                const Text('1. Check Android logs: adb logcat -s SmartCarApduService'),
+                const Text('1. Check Android logs: adb logcat -s ProvisioningHostApduService'),
                 const Text('2. Tap phone to ESP32 NFC reader'),
                 const Text('3. Monitor for APDU exchanges'),
               ],

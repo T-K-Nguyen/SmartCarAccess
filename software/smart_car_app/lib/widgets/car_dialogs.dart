@@ -168,7 +168,7 @@ class _AddDigitalKeyDialogState extends State<AddDigitalKeyDialog> {
   final _nameController = TextEditingController();
   String? _selectedCarId;
   String _keyType = 'Shared';
-  List<String> _selectedPermissions = ['unlock', 'lock'];
+  final List<String> _selectedPermissions = ['unlock', 'lock'];
   DateTime _validUntil = DateTime.now().add(const Duration(days: 30));
 
   final List<Map<String, String>> _availablePermissions = [
@@ -217,7 +217,7 @@ class _AddDigitalKeyDialogState extends State<AddDigitalKeyDialog> {
               ),
               const SizedBox(height: 16),
               DropdownButtonFormField<String>(
-                value: _selectedCarId,
+                initialValue: _selectedCarId,
                 decoration: const InputDecoration(
                   labelText: 'Select Vehicle',
                   border: OutlineInputBorder(),
@@ -243,7 +243,7 @@ class _AddDigitalKeyDialogState extends State<AddDigitalKeyDialog> {
               ),
               const SizedBox(height: 16),
               DropdownButtonFormField<String>(
-                value: _keyType,
+                initialValue: _keyType,
                 decoration: const InputDecoration(
                   labelText: 'Key Type',
                   border: OutlineInputBorder(),

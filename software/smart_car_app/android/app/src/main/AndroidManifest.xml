@@ -37,7 +37,7 @@
 
         <!-- Host Card Emulation (HCE) service for provisioning -->
         <service
-            android:name=".SmartCarApduService"
+            android:name=".ProvisioningHostApduService"
             android:enabled="true"
             android:exported="true"
             android:permission="android.permission.BIND_NFC_SERVICE">

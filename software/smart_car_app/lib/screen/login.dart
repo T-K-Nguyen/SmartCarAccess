@@ -6,6 +6,7 @@ import 'package:smart_car_app/service/auth.dart';
 import 'package:smart_car_app/screen/signup.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class LogIn extends StatefulWidget {
   const LogIn({super.key});
@@ -22,10 +23,17 @@ class _LogInState extends State<LogIn> {
 
   final _formkey = GlobalKey<FormState>();
 
+  Future<void> _setLoggedIn(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('is_logged_in', value); // Android HCE reads this as 'flutter.is_logged_in'
+  }
+
   userLogin() async {
     try {
       await FirebaseAuth.instance
           .signInWithEmailAndPassword(email: email, password: password);
+      // Mark user as logged in for Android HCE gating
+      await _setLoggedIn(true);
       // Clear stored credentials so returning to login screen won't show them
       mailcontroller.clear();
       passwordcontroller.clear();
@@ -199,11 +207,15 @@ class _LogInState extends State<LogIn> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 GestureDetector(
-                  onTap: (){
-                    AuthMethods().signInWithGoogle(context);
-                        // clear local fields after initiating social login
-                        mailcontroller.clear();
-                        passwordcontroller.clear();
+                  onTap: () async {
+                    await AuthMethods().signInWithGoogle(context);
+                    // If Google sign-in succeeded, mark as logged in
+                    if (FirebaseAuth.instance.currentUser != null) {
+                      await _setLoggedIn(true);
+                    }
+                    // clear local fields after initiating social login
+                    mailcontroller.clear();
+                    passwordcontroller.clear();
                   },
                   child: Image.asset(
                     'assets/images/google.png',

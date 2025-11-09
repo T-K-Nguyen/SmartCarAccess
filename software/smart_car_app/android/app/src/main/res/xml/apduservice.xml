@@ -4,13 +4,10 @@
     android:requireDeviceUnlock="false"
     android:apduServiceBanner="@drawable/hce_service_banner">
 
-    <aid-group 
-        android:category="other" 
+    <!-- Provisioning AID group: single custom AID F0 01 02 03 04 05 -->
+    <aid-group
+        android:category="other"
         android:description="@string/desc_smartcar_group">
-        
-        <!-- Standard test AID -->
-        <aid-filter android:name="A0000000041010" />
-        <!-- Alternative well-known test AID -->
-        <aid-filter android:name="A000000476416E64726F6964484345" />
+        <aid-filter android:name="F00102030405" />
     </aid-group>
 </host-apdu-service>

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:smart_car_app/service/car_service.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 
 class InitialDataHelper {
   static final CarService _carService = CarService();
