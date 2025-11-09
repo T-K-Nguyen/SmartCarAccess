@@ -17,8 +17,31 @@ namespace ProvisioningPhase {
   // Overwrite stored keyId unconditionally (for testing provisioning repeatedly)
   bool storeKeyIdAsciiForce(const char* ascii);
 
+  // Persist phone long-term public key (raw uncompressed 65 bytes: 0x04||X||Y)
+  bool storePhonePubRaw(const uint8_t* pub65);
+  // Persist optional certificate chain blob
+  bool storeCertChain(const uint8_t* cert, size_t certLen);
+
+  // Verify ECDSA-P256 DER signature over data using uncompressed 65-byte public key
+  bool verifySignatureP256(const uint8_t* pub65,
+                           const uint8_t* data, size_t dataLen,
+                           const uint8_t* sigDer, size_t sigLen);
+
   // Clear all provisioning-related state (keys and key id)
   void clearAll();
+  // Clear only phone provisioning artifacts (keyId, phone pub, cert), keep device keypair
+  void clearProvisionedOnly();
+
+  // Read-back helpers for diagnostics
+  bool getKeyId(String& out);
+  // Returns number of bytes copied (0 if missing). Expects max>=65 for full key.
+  size_t getPhonePubRaw(uint8_t* out, size_t max);
+  // Returns cert chain length (0 if missing). If 'out' provided and max>=len, copies into out.
+  size_t getCertChain(uint8_t* out, size_t max);
+
+  // Validate that a provided or stored certificate's subject public key matches the 65-byte pubkey
+  bool validateCertPublicKeyMatchesPub(const uint8_t* cert, size_t certLen, const uint8_t* pub65);
+  bool validateStoredCertMatchesStoredPub();
 
   // Optional: run a simple provisioning exchange using the currently working HCE flow.
   // Uses the SELECT payload or subsequent UID APDU payload as the persistent ID.

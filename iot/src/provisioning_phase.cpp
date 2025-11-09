@@ -5,6 +5,9 @@
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/ecdsa.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/x509_crt.h>
 #include "provisioning_phase.h"
 
 namespace {
@@ -103,11 +106,136 @@ bool storeKeyIdAsciiForce(const char* ascii) {
   return ok;
 }
 
+bool storePhonePubRaw(const uint8_t* pub65) {
+  if (!pub65 || pub65[0] != 0x04) return false;
+  prefs.begin(kNs, false);
+  bool ok = prefs.putBytes("phone_pub_raw", pub65, 65) == 65;
+  prefs.end();
+  if (ok) Serial.println("[PhaseA] Stored phone public key raw (65 bytes) in NVS");
+  return ok;
+}
+
+bool storeCertChain(const uint8_t* cert, size_t certLen) {
+  if (!cert || certLen == 0) return false;
+  prefs.begin(kNs, false);
+  bool ok = prefs.putBytes("phone_cert_chain", cert, certLen) == certLen;
+  prefs.end();
+  if (ok) Serial.printf("[PhaseA] Stored phone cert chain (%u bytes) in NVS\n", (unsigned)certLen);
+  return ok;
+}
+
+static bool importPubKey65(mbedtls_pk_context &pk, const uint8_t* raw65) {
+  mbedtls_pk_init(&pk);
+  if (mbedtls_pk_setup(&pk, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY)) != 0) return false;
+  mbedtls_ecp_keypair* eckey = mbedtls_pk_ec(pk);
+  if (mbedtls_ecp_group_load(&eckey->grp, MBEDTLS_ECP_DP_SECP256R1) != 0) { mbedtls_pk_free(&pk); return false; }
+  if (mbedtls_ecp_point_read_binary(&eckey->grp, &eckey->Q, raw65, 65) != 0) { mbedtls_pk_free(&pk); return false; }
+  return true;
+}
+
+bool verifySignatureP256(const uint8_t* pub65,
+                         const uint8_t* data, size_t dataLen,
+                         const uint8_t* sigDer, size_t sigLen) {
+  if (!pub65 || !data || !sigDer || dataLen == 0 || sigLen == 0) return false;
+  mbedtls_pk_context pk; if (!importPubKey65(pk, pub65)) return false;
+  // Hash data
+  unsigned char hash[32];
+  mbedtls_sha256_context c; mbedtls_sha256_init(&c);
+  mbedtls_sha256_starts(&c, 0);
+  mbedtls_sha256_update(&c, data, dataLen);
+  mbedtls_sha256_finish(&c, hash);
+  mbedtls_sha256_free(&c);
+  // Verify (sigDer assumed to be DER encoded ECDSA signature)
+  int rc = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, sizeof(hash), sigDer, sigLen);
+  mbedtls_pk_free(&pk);
+  return rc == 0;
+}
+
 void clearAll() {
   prefs.begin(kNs, false);
-  prefs.remove(kKeyPem);
-  prefs.remove(kKeyId);
+  if (prefs.isKey(kKeyPem)) prefs.remove(kKeyPem);
+  if (prefs.isKey(kKeyId)) prefs.remove(kKeyId);
+  if (prefs.isKey("phone_pub_raw")) prefs.remove("phone_pub_raw");
+  if (prefs.isKey("phone_cert_chain")) prefs.remove("phone_cert_chain");
   prefs.end();
+}
+
+void clearProvisionedOnly() {
+  prefs.begin(kNs, false);
+  if (prefs.isKey(kKeyId)) prefs.remove(kKeyId);
+  if (prefs.isKey("phone_pub_raw")) prefs.remove("phone_pub_raw");
+  if (prefs.isKey("phone_cert_chain")) prefs.remove("phone_cert_chain");
+  prefs.end();
+}
+
+bool getKeyId(String& out) {
+  prefs.begin(kNs, true);
+  if (!prefs.isKey(kKeyId)) { prefs.end(); return false; }
+  out = prefs.getString(kKeyId, "");
+  prefs.end();
+  return out.length() > 0;
+}
+
+size_t getPhonePubRaw(uint8_t* out, size_t max) {
+  prefs.begin(kNs, true);
+  if (!prefs.isKey("phone_pub_raw")) { prefs.end(); return 0; }
+  size_t need = prefs.getBytesLength("phone_pub_raw");
+  if (need == 0 || !out || max == 0) { prefs.end(); return 0; }
+  size_t toCopy = (need <= max) ? need : max;
+  size_t got = prefs.getBytes("phone_pub_raw", out, toCopy);
+  prefs.end();
+  return got;
+}
+
+size_t getCertChain(uint8_t* out, size_t max) {
+  prefs.begin(kNs, true);
+  if (!prefs.isKey("phone_cert_chain")) { prefs.end(); return 0; }
+  size_t need = prefs.getBytesLength("phone_cert_chain");
+  if (need == 0) { prefs.end(); return 0; }
+  if (!out) { prefs.end(); return need; }
+  size_t toCopy = (need <= max) ? need : max;
+  size_t got = prefs.getBytes("phone_cert_chain", out, toCopy);
+  prefs.end();
+  return (got > 0) ? got : need; // if truncated, caller sees at least required length via earlier branch
+}
+
+bool validateCertPublicKeyMatchesPub(const uint8_t* cert, size_t certLen, const uint8_t* pub65) {
+  if (!cert || certLen == 0 || !pub65 || pub65[0] != 0x04) return false;
+  mbedtls_x509_crt crt; mbedtls_x509_crt_init(&crt);
+  // Try parse (PEM or DER). For PEM, buffer need not be null-terminated if not relying on PEM; but mbedtls can parse DER directly.
+  int rc = mbedtls_x509_crt_parse(&crt, cert, certLen);
+  if (rc != 0) {
+    mbedtls_x509_crt_free(&crt);
+    return false;
+  }
+  bool match = false;
+  if (mbedtls_pk_can_do(&crt.pk, MBEDTLS_PK_ECKEY)) {
+    mbedtls_ecp_keypair* eckey = mbedtls_pk_ec(crt.pk);
+    unsigned char out[65]; size_t olen = 0;
+    if (mbedtls_ecp_point_write_binary(&eckey->grp, &eckey->Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &olen, out, sizeof(out)) == 0 && olen == 65) {
+      match = (memcmp(out, pub65, 65) == 0);
+    }
+  }
+  mbedtls_x509_crt_free(&crt);
+  return match;
+}
+
+bool validateStoredCertMatchesStoredPub() {
+  uint8_t pub[65]; size_t pubLen = getPhonePubRaw(pub, sizeof(pub));
+  if (pubLen != 65 || pub[0] != 0x04) return false;
+  size_t certLen = getCertChain(nullptr, 0);
+  if (certLen == 0) return false;
+  // Allocate temp buffer to read cert (avoid std::unique_ptr for toolchain compatibility)
+  uint8_t* buf = (uint8_t*)malloc(certLen);
+  if (!buf) return false;
+  size_t got = getCertChain(buf, certLen);
+  if (got < certLen) {
+    // best-effort even if truncated
+    certLen = got;
+  }
+  bool ok = validateCertPublicKeyMatchesPub(buf, certLen, pub);
+  free(buf);
+  return ok;
 }
 
 // Minimal helper wrapping current working flow

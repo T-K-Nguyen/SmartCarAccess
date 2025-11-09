@@ -2,6 +2,7 @@
 #include <PN532_HSU.h>
 #include <PN532.h>
 #include <esp_system.h> // for esp_random()
+#include <esp_log.h>
 #include "provisioning_phase.h"
 
 PN532_HSU pn532hsu(Serial2);
@@ -102,7 +103,16 @@ static bool ensureSAMConfig(uint8_t attempts = 5, uint16_t backoffMs = 150) {
 static bool gSamConfigured = false;
 
 // Set to true to always run provisioning GET_CHALLENGE after a successful SELECT (for testing)
-static const bool kForceProvisioning = true;
+static bool kForceProvisioning = false; // default false: keep first successful provisioning
+
+// Simple hex printer for outgoing APDUs (separate from PN532 helper which expects buffer layout)
+static void printHex(const uint8_t* d, size_t n) {
+  for (size_t i=0;i<n;i++) {
+    Serial.printf("%02X", d[i]);
+    if (i+1<n) Serial.print(' ');
+  }
+  Serial.println();
+}
 
 void setup() {
   Serial.begin(115200);
@@ -115,6 +125,9 @@ void setup() {
 
   nfc.begin();
   ProvisioningPhase::begin();
+
+  // Reduce noisy error prints from Preferences when probing or clearing non-existent keys
+  esp_log_level_set("Preferences", ESP_LOG_NONE);
 
   uint32_t version = nfc.getFirmwareVersion();
   if (!version) {
@@ -141,11 +154,37 @@ void setup() {
   Serial.printf("[PhaseA] Provisioned=%s  ForceProvisioning=%s\n",
                 ProvisioningPhase::isProvisioned()?"YES":"NO",
                 kForceProvisioning?"YES":"NO");
+  Serial.println("[PhaseA] Serial commands: 'p'=print stored, 'f'=toggle force provisioning, 'r'=reset provisioned only, 'C'=clear ALL, 'v'=validate cert vs pub");
 
   // Removed boot provisioning window; provisioning now happens directly after SELECT + GET_CHALLENGE.
 }
 
 void loop() {
+  // Handle simple serial admin commands without blocking NFC polling
+  while (Serial.available()) {
+    char cmd = Serial.read();
+    if (cmd == 'p') {
+      String kid; bool haveId = ProvisioningPhase::getKeyId(kid);
+      uint8_t pub[65]; size_t pubLen = ProvisioningPhase::getPhonePubRaw(pub, sizeof(pub));
+      size_t certLen = ProvisioningPhase::getCertChain(nullptr, 0);
+      Serial.println("[Admin] Stored provisioning state:");
+      Serial.printf("  keyId: %s\n", haveId? kid.c_str():"<none>");
+      Serial.printf("  pubKey: %s (len=%u)\n", (pubLen==65 && pub[0]==0x04)?"present":"<none>", (unsigned)pubLen);
+      Serial.printf("  certLen: %u\n", (unsigned)certLen);
+    } else if (cmd == 'f') {
+      kForceProvisioning = !kForceProvisioning;
+      Serial.printf("[Admin] Force provisioning toggled: %s\n", kForceProvisioning?"ON":"OFF");
+    } else if (cmd == 'r') {
+      ProvisioningPhase::clearProvisionedOnly();
+      Serial.println("[Admin] Cleared phone provisioning data (kept device keypair)");
+    } else if (cmd == 'C') {
+      ProvisioningPhase::clearAll();
+      Serial.println("[Admin] CLEARED ALL (including device keypair)");
+    } else if (cmd == 'v') {
+      bool ok = ProvisioningPhase::validateStoredCertMatchesStoredPub();
+      Serial.printf("[Admin] Cert vs pub match: %s\n", ok?"YES":"NO/UNAVAILABLE");
+    }
+  }
   // Wait up to 15s for a card with 2 consecutive confirmations
   if (!waitForCard(15000, 2, 60)) {
     // If we timed out and SAM wasn't confirmed, try to (re)configure once more
@@ -189,66 +228,97 @@ void loop() {
       Serial.printf("SELECT SW1SW2=%02X%02X payloadLen=%d\n", selectSw1, selectSw2, selectPayloadLen);
     }
 
-    // Phase A: GET_CHALLENGE (only if not yet provisioned and SELECT succeeded with 9000)
-    if ((kForceProvisioning || !ProvisioningPhase::isProvisioned()) && selectSw1 == 0x90 && selectSw2 == 0x00) {
-      Serial.println("[PhaseA] Initiating GET_CHALLENGE APDU...");
-      // Build challenge = vehicleId(8 random bytes) || nonce(16 random bytes)
-      uint8_t vehicleId[8]; uint8_t nonce[16];
-      for (int i=0;i<8;i++) vehicleId[i] = (uint8_t)esp_random();
-      for (int i=0;i<16;i++) nonce[i] = (uint8_t)esp_random();
-      uint8_t challenge[24]; memcpy(challenge, vehicleId, 8); memcpy(challenge+8, nonce, 16);
-
-      uint8_t getChal[5 + sizeof(challenge)];
-      uint8_t cIdx = 0;
-      getChal[cIdx++] = 0x00; // CLA
-      getChal[cIdx++] = 0xCA; // INS (custom GET_CHALLENGE)
-      getChal[cIdx++] = 0x00; // P1
-      getChal[cIdx++] = 0x00; // P2
-      getChal[cIdx++] = sizeof(challenge); // Lc
-      memcpy(getChal + cIdx, challenge, sizeof(challenge)); cIdx += sizeof(challenge);
-
-      uint8_t chalResp[200]; uint8_t chalLen = sizeof(chalResp);
-      if (apduExchangeWithRetry(getChal, cIdx, chalResp, &chalLen, 3, 120)) {
-        if (chalLen >= 2 && chalResp[chalLen-2] == 0x90 && chalResp[chalLen-1] == 0x00) {
-          int payloadLen = chalLen - 2; const uint8_t* p = chalResp; int idx = 0;
+    // Phase A split flow: 1) Base GET_CHALLENGE (Lc=0) returns identifiers 2) Signature GET_CHALLENGE (Lc=24)
+    bool alreadyProv = ProvisioningPhase::isProvisioned();
+    if ((kForceProvisioning || !alreadyProv) && selectSw1 == 0x90 && selectSw2 == 0x00) {
+      Serial.println("[PhaseA] Step1: Base GET_CHALLENGE (Lc=0)");
+      uint8_t baseApdu[] = {0x00,0xCA,0x00,0x00,0x00,0x00}; // Case 4: Lc=0, Le=0
+      uint8_t baseResp[255]; uint8_t baseLen = sizeof(baseResp);
+      if (apduExchangeWithRetry(baseApdu, sizeof(baseApdu), baseResp, &baseLen, 5, 150)) {
+        if (baseLen >= 2 && baseResp[baseLen-2] == 0x90 && baseResp[baseLen-1] == 0x00) {
+          int payloadLen = baseLen - 2; const uint8_t* p = baseResp; int idx=0;
           if (payloadLen < 1 + 65 + 2) {
-            Serial.println("[PhaseA] GET_CHALLENGE payload too short");
+            Serial.println("[PhaseA] Base payload too short");
           } else {
             uint8_t keyIdLen = p[idx++];
             if (keyIdLen > payloadLen - idx) {
-              Serial.println("[PhaseA] keyId length OOB");
+              Serial.println("[PhaseA] keyIdLen OOB base");
             } else {
-              String keyIdAscii;
-              for (uint8_t k=0; k<keyIdLen; ++k) keyIdAscii += (char)p[idx+k];
+              String keyIdAscii; for (uint8_t k=0;k<keyIdLen;k++) keyIdAscii += (char)p[idx+k];
               idx += keyIdLen;
               if (idx + 65 + 2 > payloadLen) {
-                Serial.println("[PhaseA] Layout error after keyId");
+                Serial.println("[PhaseA] Layout error before pubKey base");
               } else {
                 const uint8_t* pubKey65 = p + idx; idx += 65;
                 uint16_t certLen = (uint16_t)(p[idx] << 8 | p[idx+1]); idx += 2;
                 const uint8_t* cert = p + idx;
                 if (idx + certLen > payloadLen) {
-                  Serial.println("[PhaseA] cert length OOB");
+                  Serial.println("[PhaseA] certLen OOB base");
                 } else {
-                  Serial.printf("[PhaseA] keyId='%s' pubKey[0]=%02X certLen=%u\n", keyIdAscii.c_str(), pubKey65[0], certLen);
-                  if (pubKey65[0] != 0x04) {
-                    Serial.println("[PhaseA] WARNING: pubKey is not uncompressed (expected 0x04 prefix)");
-                  }
-                  // Store keyId (force overwrite if testing)
-                  if (kForceProvisioning) {
-                    ProvisioningPhase::storeKeyIdAsciiForce(keyIdAscii.c_str());
+                  Serial.printf("[PhaseA] Base keyId='%s' pubKey[0]=%02X certLen=%u\n", keyIdAscii.c_str(), pubKey65[0], certLen);
+                  // Keep data for step2
+                  bool havePub = pubKey65[0] == 0x04;
+                  // Step2: Signature challenge
+                  Serial.println("[PhaseA] Step2: Signature GET_CHALLENGE (Lc=24)");
+                  uint8_t vehicleId[8]; uint8_t nonce[16];
+                  for (int i=0;i<8;i++) vehicleId[i] = (uint8_t)esp_random();
+                  for (int i=0;i<16;i++) nonce[i] = (uint8_t)esp_random();
+                  uint8_t challenge[24]; memcpy(challenge, vehicleId, 8); memcpy(challenge+8, nonce, 16);
+                  uint8_t sigApdu[5 + sizeof(challenge) + 1]; uint8_t sIdx2=0;
+                  sigApdu[sIdx2++] = 0x00; sigApdu[sIdx2++] = 0xCA; sigApdu[sIdx2++] = 0x00; sigApdu[sIdx2++] = 0x00;
+                  sigApdu[sIdx2++] = sizeof(challenge); memcpy(sigApdu+sIdx2, challenge, sizeof(challenge)); sIdx2 += sizeof(challenge); sigApdu[sIdx2++] = 0x00; // Le
+                  Serial.print("[PhaseA] OUT SIG APDU (len="); Serial.print(sIdx2); Serial.println(")"); printHex(sigApdu, sIdx2);
+                  delay(30);
+                  uint8_t sigResp[255]; uint8_t sigLenTotal = sizeof(sigResp);
+                  if (apduExchangeWithRetry(sigApdu, sIdx2, sigResp, &sigLenTotal, 5, 150)) {
+                    if (sigLenTotal >= 2 && sigResp[sigLenTotal-2] == 0x90 && sigResp[sigLenTotal-1] == 0x00) {
+                      int sigPayloadLen = sigLenTotal - 2; const uint8_t* sp = sigResp; int sIdx=0;
+                      if (sigPayloadLen < 2) {
+                        Serial.println("[PhaseA] Signature payload too short");
+                      } else {
+                        uint16_t sigLen = (uint16_t)(sp[sIdx] << 8 | sp[sIdx+1]); sIdx += 2;
+                        const uint8_t* sigDer = sp + sIdx;
+                        if (sIdx + sigLen > sigPayloadLen) {
+                          Serial.println("[PhaseA] sigLen OOB");
+                        } else {
+                          Serial.printf("[PhaseA] sigLen=%u\n", sigLen);
+                          bool sigOk = false;
+                          if (sigLen > 0 && havePub) {
+                            sigOk = ProvisioningPhase::verifySignatureP256(pubKey65, challenge, sizeof(challenge), sigDer, sigLen);
+                            Serial.printf("[PhaseA] Signature verify %s\n", sigOk?"OK":"FAIL");
+                          } else if (sigLen == 0) {
+                            Serial.println("[PhaseA] No signature provided (sigLen=0) - allowing fallback provisioning");
+                            sigOk = true;
+                          }
+                          if (sigOk) {
+                            if (!alreadyProv || kForceProvisioning) {
+                              if (kForceProvisioning) ProvisioningPhase::storeKeyIdAsciiForce(keyIdAscii.c_str());
+                              else ProvisioningPhase::storeKeyIdAsciiIfEmpty(keyIdAscii.c_str());
+                              if (havePub) ProvisioningPhase::storePhonePubRaw(pubKey65);
+                              if (certLen > 0) ProvisioningPhase::storeCertChain(cert, certLen);
+                            } else {
+                              Serial.println("[PhaseA] Already provisioned; skipping re-store (toggle 'f' to force)");
+                            }
+                          } else {
+                            Serial.println("[PhaseA] Credentials NOT stored (signature failure)");
+                          }
+                        }
+                      }
+                    } else {
+                      Serial.println("[PhaseA] Signature APDU failed SW");
+                    }
                   } else {
-                    ProvisioningPhase::storeKeyIdAsciiIfEmpty(keyIdAscii.c_str());
+                    Serial.println("[PhaseA] Signature GET_CHALLENGE exchange failed");
                   }
                 }
               }
             }
           }
         } else {
-          Serial.println("[PhaseA] GET_CHALLENGE failed SW");
+          Serial.println("[PhaseA] Base GET_CHALLENGE failed SW");
         }
       } else {
-        Serial.println("[PhaseA] GET_CHALLENGE exchange failed");
+        Serial.println("[PhaseA] Base GET_CHALLENGE exchange failed");
       }
     }
 
