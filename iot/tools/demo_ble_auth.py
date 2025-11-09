@@ -153,6 +153,13 @@ async def admin_list_tags(client: BleakClient):
     await asyncio.sleep(0.2)
 
 
+async def admin_start_provisioning(client: BleakClient):
+    # Triggers NFC provisioning via BLE Admin command 0x20
+    print("[Admin] Triggering NFC provisioning...")
+    await client.write_gatt_char(ADMIN_CMD, bytes([0x20]), response=True)
+    await asyncio.sleep(0.5)  # Give time for command to process
+
+
 def parse_server_hello(payload: bytes) -> ServerHello:
     if len(payload) < 1 + 2:
         raise ValueError("ServerHello too short")
@@ -290,6 +297,7 @@ async def main():
     ap.add_argument("--device-name", default=DEVICE_NAME, help="BLE device name")
     ap.add_argument("--keyfile", default="phone_key.pem", help="path to phone long-term key (PEM)")
     ap.add_argument("--upload-key", action="store_true", help="upload phone public key PEM to device via Admin")
+    ap.add_argument("--provision", action="store_true", help="trigger NFC provisioning via BLE Admin command")
     ap.add_argument("--enroll", action="store_true", help="set Admin mode to ENROLL and wait for tag present")
     ap.add_argument("--remove", action="store_true", help="set Admin mode to REMOVE and wait for tag present")
     ap.add_argument("--list-tags", action="store_true", help="request device to list authorized tags")
@@ -312,6 +320,12 @@ async def main():
             print("Uploading phone public key to AdminPhoneKey...")
             await ble_upload_phone_pubkey(client, pem)
             print("Upload complete. Re-run this script without --upload-key to start the handshake.")
+            return 0
+        if args.provision:
+            print("Triggering NFC provisioning via BLE Admin command...")
+            await admin_start_provisioning(client)
+            print("Provisioning command sent. Check device serial output.")
+            print("Bring your Android HCE phone close to the ECU now.")
             return 0
         if args.enroll:
             print("Entering ENROLL mode. Present an NFC tag to the ECU...")
