@@ -3,7 +3,9 @@
 #include <string>
 
 #include "../../include/ble/ble_admin.h"
-#include "provisioning.h"
+#include "provisioning_phase.h"
+#include "../../include/nfc_session.h"
+
 
 namespace {
   // Admin service (preserved for NFC admin operations)
@@ -36,18 +38,110 @@ namespace {
     explicit AdminCmdCallbacks(NimBLECharacteristic* info): _info(info) {}
     void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
       std::string v = c->getValue(); if (v.empty()) return;
-      uint8_t cmd = static_cast<uint8_t>(v[0]);
+
+      // Robust command parsing:
+      // - If user writes a single byte, use that as the command.
+      // - If user writes ASCII hex ("01","02","10","20","33".."36"), parse to the corresponding byte.
+      // - Also accept "0xNN"/"0XNN" form.
+      auto isHex = [](char c){ return (c>='0'&&c<='9')||(c>='a'&&c<='f')||(c>='A'&&c<='F'); };
+      auto hexVal = [](char c)->uint8_t{
+        if (c>='0'&&c<='9') return (uint8_t)(c-'0');
+        if (c>='a'&&c<='f') return (uint8_t)(10 + (c-'a'));
+        if (c>='A'&&c<='F') return (uint8_t)(10 + (c-'A'));
+        return 0;
+      };
+      uint8_t raw0 = static_cast<uint8_t>(v[0]);
+      uint8_t cmd = raw0;
+      bool asciiHexParsed = false;
+      if (v.size() == 2 && isHex(v[0]) && isHex(v[1])) {
+        cmd = (uint8_t)((hexVal(v[0]) << 4) | hexVal(v[1]));
+        asciiHexParsed = true;
+      } else if (v.size() == 4 && v[0] == '0' && (v[1] == 'x' || v[1] == 'X') && isHex(v[2]) && isHex(v[3])) {
+        cmd = (uint8_t)((hexVal(v[2]) << 4) | hexVal(v[3]));
+        asciiHexParsed = true;
+      }
+      Serial.printf("[BLE-Admin] Cmd write: raw0=0x%02X len=%u parsedHex=%s -> cmd=0x%02X\n", raw0, (unsigned)v.size(), asciiHexParsed?"YES":"NO", cmd);
+
       switch (cmd) {
-        case 0x01: Provisioning::clearKeys(); _info->setValue("CLEARED_KEYS"); break;
-        case 0x02: Provisioning::clearAll(); _info->setValue("CLEARED_ALL"); break;
-        case 0x10: _info->setValue("LISTED_TAGS"); Provisioning::listAuthorizedTags(); break;
-        case 0x20: 
-          _info->setValue("STARTING_PROVISIONING"); 
+        case 0x01:
+          // Clear phone provisioning only (equivalent to 'r')
+          ProvisioningPhase::clearProvisionedOnly();
+          _info->setValue("CLEARED_PROVISIONED");
           _info->notify();
-          Serial.println("[BLE Admin] Provisioning requested via BLE command 0x20");
-          Provisioning::runNfcProvisioning(); 
           break;
-        default: _info->setValue("UNKNOWN_CMD"); break;
+        case 0x02:
+          // Clear everything, including device keypair (equivalent to 'C')
+          ProvisioningPhase::clearAll();
+          _info->setValue("CLEARED_ALL");
+          _info->notify();
+          break;
+        case 0x10:
+          // Listing tags not supported in new provisioning module
+          _info->setValue("NOT_SUPPORTED");
+          _info->notify();
+          break;
+        case 0x20:
+          // Trigger NFC provisioning flow: our NFC loop auto-runs; we just inform the app
+          _info->setValue("NFC_TAP_TO_PROVISION");
+          _info->notify();
+          Serial.println("[BLE Admin] Notify: Tap phone at reader to provision.");
+          break;
+        case 0x30: // Persistent force ON
+          NfcSession::setPersistentForce(true);
+          _info->setValue("FORCE_PERSIST_ON");
+          _info->notify();
+          break;
+        case 0x31: // Persistent force OFF
+          NfcSession::setPersistentForce(false);
+          _info->setValue("FORCE_PERSIST_OFF");
+          _info->notify();
+          break;
+        case 0x32: // Arm one-shot force
+          NfcSession::armOneShotForce();
+          _info->setValue("FORCE_ONESHOT_ARMED");
+          _info->notify();
+          break;
+        case 0x33: { // Status query
+          bool prov = ProvisioningPhase::isProvisioned();
+          bool pf = NfcSession::getPersistentForce();
+          bool os = NfcSession::isOneShotArmed();
+          char buf[48];
+          snprintf(buf, sizeof(buf), "STATUS P=%s PF=%s OS=%s", prov?"YES":"NO", pf?"ON":"OFF", os?"ARMED":"NO");
+          _info->setValue(buf);
+          _info->notify();
+          Serial.printf("[BLE-Admin] %s\n", buf);
+          break; }
+        case 0x34: { // Validate cert vs pub
+          bool ok = ProvisioningPhase::validateStoredCertMatchesStoredPub();
+          _info->setValue(ok?"CERT_MATCH":"CERT_MISMATCH");
+          _info->notify();
+          Serial.printf("[BLE-Admin] Cert vs pub: %s\n", ok?"MATCH":"MISMATCH/NA");
+          break; }
+        case 0x35: { // Pub key presence
+          uint8_t pub[65]; size_t len = ProvisioningPhase::getPhonePubRaw(pub, sizeof(pub));
+          _info->setValue((len==65 && pub[0]==0x04)?"PUB_PRESENT":"PUB_NONE");
+          _info->notify();
+          Serial.printf("[BLE-Admin] Pub presence: %s\n", (len==65 && pub[0]==0x04)?"PRESENT":"NONE");
+          break; }
+        case 0x36: { // KeyId summary
+          String kid; bool haveKid = ProvisioningPhase::getKeyId(kid);
+          if (!haveKid) {
+            _info->setValue("KEYID_NONE");
+             Serial.printf("[BLE-Admin] KEYID_NONE\n");
+          }else {
+            char buf[40];
+            size_t copyLen = kid.length() < 24 ? kid.length() : 24; // truncate if long
+            snprintf(buf, sizeof(buf), "KEYID:%.*s", (int)copyLen, kid.c_str());
+            _info->setValue(buf);
+            Serial.printf("[BLE-Admin] %s\n", buf);
+          }
+          _info->notify();
+          break; }
+        default:
+          _info->setValue("UNSUPPORTED");
+          _info->notify();
+          Serial.printf("[BLE-Admin] Unsupported cmd: 0x%02X (len=%u)\n", cmd, (unsigned)v.size());
+          break;
       }
     }
   };
@@ -58,20 +152,10 @@ namespace {
    public:
     explicit AdminPhoneKeyCallbacks(NimBLECharacteristic* info): _info(info) {}
     void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
-      std::string v = c->getValue(); if (v.empty()) return;
-      // If a full PEM arrives in one write, store directly.
-      if (v.find("-----BEGIN PUBLIC KEY-----") != std::string::npos && v.find("-----END PUBLIC KEY-----") != std::string::npos) {
-        bool ok = Provisioning::setPhonePublicKey(v.c_str()); _info->setValue(ok ? "PHONEKEY_OK" : "PHONEKEY_FAIL"); if (ok) _info->notify(); _buf.clear(); return;
-      }
-      // Otherwise, accumulate and commit when END appears.
-      if (_buf.empty() && v.find("-----BEGIN PUBLIC KEY-----") == std::string::npos) { _info->setValue("PHONEKEY_WAIT_BEGIN"); return; }
-      _buf.append(v);
-      if (_buf.size() > 4096) { _buf.clear(); _info->setValue("PHONEKEY_TOO_LARGE"); return; }
-      if (_buf.find("-----END PUBLIC KEY-----") != std::string::npos) {
-        bool ok = Provisioning::setPhonePublicKey(_buf.c_str()); _info->setValue(ok ? "PHONEKEY_OK" : "PHONEKEY_FAIL"); if (ok) _info->notify(); _buf.clear();
-      } else {
-        _info->setValue("PHONEKEY_BUFFERING");
-      }
+      // New provisioning flow does not accept phone pubkey via BLE; instruct to use NFC provisioning.
+      (void)c; _buf.clear();
+      _info->setValue("UNSUPPORTED_USE_NFC");
+      _info->notify();
     }
   };
 }

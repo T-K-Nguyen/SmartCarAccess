@@ -392,7 +392,7 @@ namespace NfcSession {
 
         Serial.print("Configuring SAM...");
         samConfigured = ensureSAMConfig(5, 200);
-        Serial.println(samConfigured ? "OK" : "FAILED (will still attempt to poll)");
+        Serial.println(samConfigured ? "OK" : "SAM CONFIG FAILED (will still attempt to poll)");
 
         Serial.printf("[PhaseA] Provisioned=%s  Force(persist)=%s  OneShot=%s\n",
                                     ProvisioningPhase::isProvisioned() ? "YES" : "NO",
@@ -438,4 +438,16 @@ namespace NfcSession {
         // Keep flow smooth: wait briefly for removal only when SELECT succeeded
         postSessionCooldown(sw1 == 0x90 && sw2 == 0x00);
     }
+
+    // ---- Admin control API (exposed via header & used by BLE) ----
+    void setPersistentForce(bool on) {
+        forceProvisionPersistent = on;
+        Serial.printf("[NfcSession] Persistent force set %s\n", on ? "ON" : "OFF");
+    }
+    void armOneShotForce() {
+        forceProvisionOneShot = true;
+        Serial.println("[NfcSession] One-shot force ARMED");
+    }
+    bool getPersistentForce() { return forceProvisionPersistent; }
+    bool isOneShotArmed() { return forceProvisionOneShot; }
 }
