@@ -1,6 +1,6 @@
-// Minimal PN532 bring-up with simple polling (no provisioning)
+// PN532 bring-up with SPI communication for reliability
 #include <Arduino.h>
-#include <Wire.h>
+#include <SPI.h>
 #include <Adafruit_PN532.h>
 #include "../include/nfc.h"
 #include "../include/provisioning.h"
@@ -9,11 +9,16 @@
 #include <freertos/task.h>
 
 namespace {
-  const int I2C_SDA_PIN = 11;
-  const int I2C_SCL_PIN = 12;
-  const int PN532_IRQ_PIN = -1;        // IRQ not used in current implementation
-  const int PN532_RST_PIN = 10;       // GPIO 10 for hardware reset
-  Adafruit_PN532 nfc(PN532_IRQ_PIN, PN532_RST_PIN);
+  // SPI pin configuration for ESP32-S3
+  const int PN532_SCK_PIN = 18;       // SPI Clock (SCL equivalent)
+  const int PN532_MISO_PIN = 12;      // SPI MISO (data from PN532)
+  const int PN532_MOSI_PIN = 4;      // SPI MOSI (data to PN532)  
+  const int PN532_SS_PIN = 3;         // SPI Chip Select (CS)
+  const int PN532_RST_PIN = 10;       // GPIO 10 for hardware reset (unchanged)
+  
+  // Initialize PN532 with SPI interface - Use 2-parameter constructor for hardware SPI
+  // Adafruit_PN532(CS_pin, SPI_class_pointer) - this forces SPI mode instead of I2C default
+  Adafruit_PN532 nfc(PN532_SS_PIN, &SPI);
 
   bool s_nfcReady = false;
   // simple last-tag cache
@@ -26,19 +31,19 @@ namespace {
   static bool s_provHold = false; // when true, keep polling task suspended externally
   static SemaphoreHandle_t s_pn532Mutex = nullptr;
   
-  // I2C error handling
-  static volatile bool s_i2cError = false;
+  // SPI communication error handling
+  static volatile bool s_spiError = false;
   static uint32_t s_lastSuccessfulComm = 0;
   static uint32_t s_lastResetAttempt = 0;
-  static const uint32_t I2C_TIMEOUT_MS = 5000; // 5 second timeout
-  static const uint32_t I2C_RESET_COOLDOWN_MS = 2000; // 2 second cooldown between resets
+  static const uint32_t SPI_TIMEOUT_MS = 3000; // 3 second timeout (SPI is faster than I2C)
+  static const uint32_t SPI_RESET_COOLDOWN_MS = 1000; // 1 second cooldown between resets
   
   // Mutex safety tracking
   static TaskHandle_t s_mutexOwner = nullptr;
   static uint32_t s_mutexTakeTime = 0;
 
   // Forward declarations
-  void resetI2CBus();
+  void resetSPIBus();
   void hardwareResetPN532();
   
   // Safe mutex operations to prevent corruption
@@ -96,12 +101,23 @@ namespace {
     }
   }
 
-  // I2C error detection and recovery functions
+  // SPI initialization and communication functions
   bool initializeNFC() {
-    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-    Wire.setTimeOut(1000);
-    Wire.setClock(100000);
+    // Initialize SPI with custom pins
+    SPI.begin(PN532_SCK_PIN, PN532_MISO_PIN, PN532_MOSI_PIN, PN532_SS_PIN);
+    SPI.setFrequency(1000000); // 1MHz SPI clock for reliable PN532 communication
     delay(50);
+
+    // For SPI mode, we need to perform hardware reset manually before begin()
+    if (PN532_RST_PIN != -1) {
+      pinMode(PN532_RST_PIN, OUTPUT);
+      digitalWrite(PN532_RST_PIN, HIGH);
+      delay(10);
+      digitalWrite(PN532_RST_PIN, LOW);
+      delay(100);
+      digitalWrite(PN532_RST_PIN, HIGH);
+      delay(500);
+    }
 
     if (!nfc.begin()) {
       Serial.println("[NFC] PN532 nfc.begin() failed");
@@ -122,31 +138,30 @@ namespace {
     nfc.SAMConfig();
     
     s_nfcReady = true;
-    s_i2cError = false;
+    s_spiError = false;
     s_lastSuccessfulComm = millis();
     return true;
   }
 
-  bool checkI2CHealth() {
-    // Test I2C communication by trying to read PN532 version
-    Wire.beginTransmission(0x24); // PN532 I2C address
-    uint8_t error = Wire.endTransmission();
+  bool checkSPIHealth() {
+    // Test SPI communication by trying to read PN532 version
+    uint32_t versiondata = nfc.getFirmwareVersion();
     
-    if (error == 0) {
+    if (versiondata != 0) {
       s_lastSuccessfulComm = millis();
-      s_i2cError = false;
+      s_spiError = false;
       return true;
     } else {
-      s_i2cError = true;
-      Serial.printf("[NFC] I2C Error: %d (0=OK, 1=too long, 2=NACK addr, 3=NACK data, 4=other)\n", error);
+      s_spiError = true;
+      Serial.println("[NFC] SPI Error: PN532 not responding to getFirmwareVersion()");
       return false;
     }
   }
   
-  // Check I2C health and reset bus if necessary
-  bool ensureI2CHealth() {
-    if (!checkI2CHealth()) {
-      resetI2CBus();
+  // Check SPI health and reset bus if necessary
+  bool ensureSPIHealth() {
+    if (!checkSPIHealth()) {
+      resetSPIBus();
       return s_nfcReady; // Return true only if reset was successful
     }
     return true;
@@ -175,71 +190,54 @@ namespace {
     
     // Mark that we need to reinitialize
     s_nfcReady = false;
-    s_i2cError = false;  // Clear any previous I2C errors
+    s_spiError = false;  // Clear any previous SPI errors
   }
 
-  void resetI2CBus() {
+  void resetSPIBus() {
     uint32_t now = millis();
     
     // Prevent rapid consecutive resets
-    if (now - s_lastResetAttempt < I2C_RESET_COOLDOWN_MS) {
+    if (now - s_lastResetAttempt < SPI_RESET_COOLDOWN_MS) {
       Serial.printf("[NFC] Reset cooldown active, waiting %lu ms\n", 
-                    I2C_RESET_COOLDOWN_MS - (now - s_lastResetAttempt));
+                    SPI_RESET_COOLDOWN_MS - (now - s_lastResetAttempt));
       return;
     }
     
     s_lastResetAttempt = now;
-    Serial.println("[NFC] Resetting I2C bus due to communication failure...");
+    Serial.println("[NFC] Resetting SPI bus due to communication failure...");
     
-    // Mark I2C as problematic immediately to prevent concurrent access
-    s_i2cError = true;
+    // Mark SPI as problematic immediately to prevent concurrent access
+    s_spiError = true;
     s_nfcReady = false;
     
-    // Skip Wire.end() as it hangs when bus is corrupted
-    // Instead, directly manipulate GPIO to force bus reset
-    Serial.println("[NFC] Step 1: Direct GPIO bus recovery (bypassing Wire.end())...");
-    
-    // Force both lines high initially (release any stuck states)
-    pinMode(I2C_SDA_PIN, OUTPUT);
-    pinMode(I2C_SCL_PIN, OUTPUT);
-    digitalWrite(I2C_SDA_PIN, HIGH);
-    digitalWrite(I2C_SCL_PIN, HIGH);
+    Serial.println("[NFC] Step 1: Ending current SPI session...");
+    SPI.end();
     delay(100);
     
-    Serial.println("[NFC] Step 2: Manual bus line clearing with clock pulses...");
-    // Generate multiple clock cycles to force any stuck device to release SDA
-    pinMode(I2C_SDA_PIN, INPUT_PULLUP);  // Allow SDA to float/be controlled by devices
-    for (int i = 0; i < 18; i++) {  // More pulses for stubborn devices
-      digitalWrite(I2C_SCL_PIN, LOW);
-      delayMicroseconds(10);
-      digitalWrite(I2C_SCL_PIN, HIGH);
-      delayMicroseconds(10);
-    }
+    Serial.println("[NFC] Step 2: Resetting SPI pins to safe state...");
+    // Set all SPI pins to known safe states
+    pinMode(PN532_SCK_PIN, OUTPUT);
+    pinMode(PN532_MOSI_PIN, OUTPUT);
+    pinMode(PN532_MISO_PIN, INPUT);
+    pinMode(PN532_SS_PIN, OUTPUT);
     
-    // Generate I2C STOP condition to reset bus protocol state
-    Serial.println("[NFC] Step 3: Generating I2C STOP condition...");
-    pinMode(I2C_SDA_PIN, OUTPUT);
-    digitalWrite(I2C_SDA_PIN, LOW);   // SDA low
-    delayMicroseconds(10);
-    digitalWrite(I2C_SCL_PIN, HIGH);  // SCL high
-    delayMicroseconds(10);
-    digitalWrite(I2C_SDA_PIN, HIGH);  // SDA high (STOP condition)
-    delayMicroseconds(10);
+    digitalWrite(PN532_SCK_PIN, LOW);   // Clock idle low
+    digitalWrite(PN532_MOSI_PIN, LOW);  // MOSI idle low
+    digitalWrite(PN532_SS_PIN, HIGH);   // CS deselected (high)
+    delay(50);
     
-    Serial.println("[NFC] Step 4: Waiting for bus to stabilize...");
-    delay(500); // Long delay for complete bus recovery
+    Serial.println("[NFC] Step 3: Waiting for SPI bus to stabilize...");
+    delay(200); // Allow SPI bus to settle
     
-    Serial.println("[NFC] Step 5: Reinitializing Wire library...");
-    // Now reinitialize Wire library fresh
-    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-    Wire.setTimeOut(1000);
-    Wire.setClock(100000); // 100kHz for reliable operation
-    delay(100); // Additional settling time
+    Serial.println("[NFC] Step 4: Reinitializing SPI library...");
+    // Reinitialize SPI with our custom pins and settings
+    SPI.begin(PN532_SCK_PIN, PN532_MISO_PIN, PN532_MOSI_PIN, PN532_SS_PIN);
+    SPI.setFrequency(1000000); // 1MHz for reliable communication
+    delay(50);
     
-    Serial.println("[NFC] Step 6: I2C bus reset completed");
-    // Skip PN532 communication test to avoid Error 263 and stack overflow
-    // Let calling code handle PN532 communication validation if needed
-    Serial.println("[NFC] I2C reset procedure finished - bus ready for use");
+    Serial.println("[NFC] Step 5: SPI bus reset completed");
+    // Let calling code handle PN532 reinitialization if needed
+    Serial.println("[NFC] SPI reset procedure finished - bus ready for use");
   }
 
   void TaskNFC(void* pv) {
@@ -270,10 +268,10 @@ namespace {
         continue; 
       }
 
-      // Check I2C health periodically
-      if (millis() - s_lastSuccessfulComm > I2C_TIMEOUT_MS) {
-        if (!checkI2CHealth()) {
-          resetI2CBus();
+      // Check SPI health periodically
+      if (millis() - s_lastSuccessfulComm > SPI_TIMEOUT_MS) {
+        if (!checkSPIHealth()) {
+          resetSPIBus();
           vTaskDelay(pdMS_TO_TICKS(1000)); // Wait before retry
           continue;
         }
@@ -309,29 +307,33 @@ namespace {
       // Use safe mutex operations to prevent corruption
       if (safeMutexTake(5000)) {
         
-        // Set I2C timeout to prevent hangs
-        Wire.setTimeOut(2000);
+        // Double-check provisioning mode after acquiring mutex
+        if (s_provHold) {
+          Serial.println("[NFC] Provisioning mode activated after mutex acquired - releasing and suspending");
+          safeMutexGive();
+          continue; // Go back to provisioning hold check
+        }
+        
+        // Clear any previous SPI error flags
+        s_spiError = false;
         
         // Safely attempt PN532 communication with error handling
         try {
           found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLen);
-          commSuccess = !s_i2cError;
+          commSuccess = !s_spiError;
         } catch (...) {
           Serial.println("[NFC] Exception during tag read - recovering");
           commSuccess = false;
           found = false;
         }
         
-        // Restore normal I2C timeout
-        Wire.setTimeOut(1000);
-        
         // ALWAYS release mutex safely, even if PN532 failed
         safeMutexGive();
         
-        // Handle I2C communication failure
-        if (!commSuccess || s_i2cError) {
-          Serial.println("[NFC] I2C communication failed during tag read");
-          resetI2CBus();
+        // Handle SPI communication failure
+        if (!commSuccess || s_spiError) {
+          Serial.println("[NFC] SPI communication failed during tag read");
+          resetSPIBus();
           vTaskDelay(pdMS_TO_TICKS(1000));
           continue;
         }
@@ -342,6 +344,14 @@ namespace {
         continue;
       }
       if (found) {
+        // CRITICAL: Check if provisioning mode was activated while we were reading
+        // If so, don't process this tag - let provisioning handle it
+        if (s_provHold) {
+          Serial.println("[NFC] Tag found but provisioning mode active - ignoring tag in normal polling");
+          vTaskDelay(pdMS_TO_TICKS(100));
+          continue;
+        }
+        
         bool same = (uidLen == lastPrintLen) && (memcmp(uid, lastPrintUid, uidLen) == 0);
         bool cool = (millis() - lastPrintAt) >= cooldownMs;
         if (!same || cool) {
@@ -552,8 +562,8 @@ namespace NFCMod {
         continue; // Skip this iteration and try again
       }
       
-      // Clear I2C error flag before attempting read
-      s_i2cError = false;
+      // Clear SPI error flag before attempting read
+      s_spiError = false;
       
       // Try to activate ISO14443A target for HCE communication
       Serial.println("[Prov][NFC] Attempting ISO14443A target activation...");
@@ -566,16 +576,16 @@ namespace NFCMod {
         nfc.SAMConfig(); // Ensure SAM is properly configured for APDU exchange
       }
       
-      // Check if I2C error occurred during the read
-      if (s_i2cError) {
+      // Check if SPI error occurred during the read
+      if (s_spiError) {
         xSemaphoreGive(s_pn532Mutex);
-        Serial.println("[Prov][NFC] ERROR: I2C Error 263 detected in provisioning");
+        Serial.println("[Prov][NFC] ERROR: SPI communication error detected in provisioning");
         Serial.println("[Prov][NFC] Performing PN532 hardware reset via RST pin...");
         
         // Try hardware reset instead of ESP32 restart
         hardwareResetPN532();
         
-        // Reinitialize I2C and PN532 after hardware reset
+        // Reinitialize SPI and PN532 after hardware reset
         if (initializeNFC()) {
           Serial.println("[Prov][NFC] PN532 hardware reset successful - retrying provisioning");
           // Continue with next iteration of polling loop
@@ -642,9 +652,11 @@ namespace NFCMod {
         attempts++;
         Serial.printf("[Prov][NFC] SELECT AID attempt %d/%d...\n", attempts, maxAttempts);
         
-        // Progressive timeout increase: give HCE more time on later attempts
-        uint32_t timeout = 3000 + (attempts * 1000); // 3s, 4s, 5s, 6s, 7s
-        Wire.setTimeOut(timeout);
+        // Progressive delay for HCE service activation on later attempts
+        // SPI communication doesn't need timeout configuration like I2C
+        if (attempts > 1) {
+          delay(100 * attempts); // 100ms, 200ms, 300ms, 400ms, 500ms progressive delay
+        }
         
         if (!safeMutexTake(3000)) {
           Serial.println("[Prov][NFC] ERROR: Could not acquire mutex for SELECT AID exchange");
@@ -684,7 +696,7 @@ namespace NFCMod {
         }
       }
       
-      Wire.setTimeOut(1000); // Reset timeout
+      // SPI doesn't require timeout reset like I2C did
       
       // Allow BLE stack to run after APDU exchange
       vTaskDelay(pdMS_TO_TICKS(10));

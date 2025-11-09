@@ -17,9 +17,9 @@ import io.flutter.FlutterInjector
 class SmartCarApduService : HostApduService() {
     companion object {
         private const val TAG = "SmartCarApduService"
-        // AID (7 bytes) - must match ESP32 and apduservice.xml
+        // Use the standard AID that matches apduservice.xml and ESP32
         private val AID = byteArrayOf(
-            0xF0.toByte(), 0x01, 0x02, 0x03, 0x04, 0x05, 0x0F
+            0xA0.toByte(), 0x00, 0x00, 0x00, 0x04, 0x10, 0x10
         )
 
         private const val CHANNEL_NAME = "smartcar.hce"
@@ -36,17 +36,37 @@ class SmartCarApduService : HostApduService() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "=== HCE SERVICE CREATED ===")
-        Log.i(TAG, "SmartCarApduService is now active and listening")
-        Log.i(TAG, "Registered AID: ${AID.joinToString("") { String.format("%02X", it) }}")
-        Log.i(TAG, "Expected ESP32 SELECT: 00 A4 04 00 07 F0 01 02 03 04 05 0F")
-        Log.i(TAG, "Device unlock required: false (changed from true)")
-        Log.i(TAG, "Service category: other (non-payment)")
-        Log.i(TAG, "Ready to receive APDU commands from NFC readers")
         
-        // Also send debug message to system logs that can be seen in Flutter console
-        System.out.println("🔥 SmartCarApduService CREATED - HCE is ready!")
-        System.err.println("🔥 HCE AID: ${AID.joinToString(" ") { String.format("%02X", it) }}")
+        // EMERGENCY LOGGING - MUST BE VISIBLE
+        Log.e(TAG, "🔥🔥🔥 HCE SERVICE CREATED!!!")
+        Log.e(TAG, "SmartCarApduService is now active and listening")
+        Log.e(TAG, "Registered AID: ${AID.joinToString("") { String.format("%02X", it) }}")
+        Log.e(TAG, "Expected ESP32 SELECT: 00 A4 04 00 07 A0 00 00 00 04 10 10")
+        Log.e(TAG, "Device unlock required: false")
+        Log.e(TAG, "Service category: other (non-payment)")
+        Log.e(TAG, "Ready to receive APDU commands from NFC readers")
+        
+        // CRITICAL: Multiple output streams for maximum visibility
+        System.out.println("🔥🔥🔥 SmartCarApduService CREATED - HCE is ready!")
+        System.err.println("🔥🔥🔥 HCE AID: ${AID.joinToString(" ") { String.format("%02X", it) }}")
+        System.err.println("🔥🔥🔥 ESP32 should send: 00 A4 04 00 07 A0 00 00 00 04 10 10")
+        println("🔥🔥🔥 HCE SERVICE CREATED AND READY!")
+        
+        // Android 12 specific logging and checks
+        android.util.Log.wtf(TAG, "🔥🔥🔥 ANDROID 12 HCE SERVICE CREATED!")
+        
+        // Check Android 12 HCE registration
+        try {
+            val nfcAdapter = android.nfc.NfcAdapter.getDefaultAdapter(this)
+            if (nfcAdapter != null) {
+                val cardEmulation = android.nfc.cardemulation.CardEmulation.getInstance(nfcAdapter)
+                Log.e(TAG, "📱 Android 12 NFC Status: ${if (nfcAdapter.isEnabled) "ENABLED" else "DISABLED"}")
+                Log.e(TAG, "📱 HCE Available: ${cardEmulation != null}")
+                System.out.println("📱📱📱 Android 12 NFC: ${if (nfcAdapter.isEnabled) "ON" else "OFF"}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "📱 Android 12 NFC check failed: ${e.message}")
+        }
         
         // Force immediate method channel setup
         ensureEngine()
@@ -66,47 +86,62 @@ class SmartCarApduService : HostApduService() {
     }
 
     override fun processCommandApdu(commandApdu: ByteArray?, extras: Bundle?): ByteArray {
+        // IMMEDIATE EMERGENCY LOGGING - MUST BE VISIBLE
+        Log.e(TAG, "🚨🚨🚨 PROCESS COMMAND APDU CALLED!!!")
+        System.out.println("🚨🚨🚨 HCE processCommandApdu CALLED - ESP32 IS COMMUNICATING!")
+        System.err.println("🚨🚨🚨 HCE SERVICE ACTIVATED BY NFC READER!")
+        println("🚨🚨🚨 ANDROID HCE SERVICE IS RESPONDING!")
+        
         // Track activations
         val currentTime = System.currentTimeMillis()
-        
-        // ALWAYS log activation to system streams for immediate visibility
-        System.out.println("🚨🚨🚨 HCE processCommandApdu CALLED - ESP32 IS COMMUNICATING!")
-        System.err.println("🚨🚨🚨 TIMESTAMP: $currentTime THREAD: ${Thread.currentThread().name}")
         
         if (currentTime - lastActivation > 1000) { // New session if >1 second gap
             activationCount++
             lastActivation = currentTime
-            Log.i(TAG, "=== HCE SERVICE ACTIVATION #$activationCount ===")
-            Log.i(TAG, "🎯 NFC READER DETECTED! ESP32 is trying to communicate!")
+            Log.e(TAG, "=== HCE SERVICE ACTIVATION #$activationCount ===")
+            Log.e(TAG, "🎯 NFC READER DETECTED! ESP32 is trying to communicate!")
             
             // CRITICAL: Print to system streams for Flutter console visibility
             System.out.println("🎯🎯🎯 HCE ACTIVATION #$activationCount - ESP32 DETECTED!")
             System.err.println("🎯🎯🎯 NFC READER IS COMMUNICATING WITH PHONE!")
+            println("🎯🎯🎯 NEW HCE SESSION STARTED!")
         }
         
-        Log.i(TAG, "=== processCommandApdu called (activation #$activationCount) ===")
-        Log.i(TAG, "Timestamp: $currentTime")
-        Log.i(TAG, "Thread: ${Thread.currentThread().name}")
+        Log.e(TAG, "=== processCommandApdu called (activation #$activationCount) ===")
+        Log.e(TAG, "Timestamp: $currentTime")
+        Log.e(TAG, "Thread: ${Thread.currentThread().name}")
         
         // CRITICAL: Always print APDU reception to system streams with different markers
-        System.out.println("📨📨📨 HCE RECEIVED APDU!")
+        System.out.println("📨📨📨 HCE RECEIVED APDU FROM ESP32!")
+        System.err.println("📨📨📨 PROCESSING APDU COMMAND!")
         println("📨📨📨 HCE RECEIVED APDU!") // Also use println for Dart console
         
         if (commandApdu == null) {
-            Log.w(TAG, "❌ Received null APDU - returning error")
+            Log.e(TAG, "❌ Received null APDU - returning error")
             System.err.println("❌❌❌ NULL APDU RECEIVED!")
             println("❌❌❌ NULL APDU RECEIVED!")
             return SW_UNKNOWN
         }
         
         val apduHex = commandApdu.joinToString(" ") { String.format("%02X", it) }
-        Log.i(TAG, "📨 APDU IN (${commandApdu.size} bytes): $apduHex")
-        Log.i(TAG, "📋 Expected SELECT AID: 00 A4 04 00 07 F0 01 02 03 04 05 0F")
+        Log.e(TAG, "📨 APDU IN (${commandApdu.size} bytes): $apduHex")
+        Log.e(TAG, "📋 Expected SELECT AID: 00 A4 04 00 07 F0 01 02 03 04 05 0F")
         
         // CRITICAL: Print APDU details to system streams
-        System.out.println("📨📨📨 APDU (${commandApdu.size} bytes): $apduHex")
-        System.out.println("📋📋📋 Expected: 00 A4 04 00 07 F0 01 02 03 04 05 0F")
+        System.out.println("📨📨📨 APDU RECEIVED (${commandApdu.size} bytes): $apduHex")
+        System.err.println("📋📋📋 Expected ESP32 Command: 00 A4 04 00 07 F0 01 02 03 04 05 0F")
+        println("📨📨📨 APDU: $apduHex")
+        
+        // FOR DEBUGGING: ALWAYS RETURN SUCCESS FIRST
+        Log.e(TAG, "🧪 DEBUG MODE: Returning SUCCESS (90 00) for ANY APDU")
+        System.out.println("🧪🧪🧪 DEBUG: ALWAYS RETURNING SUCCESS!")
+        System.err.println("✅✅✅ SENDING 90 00 SUCCESS TO ESP32")
+        println("✅✅✅ RETURNING SUCCESS (90 00)")
+        return SW_SUCCESS
 
+        /*
+        // COMMENTED OUT FOR DEBUGGING - WILL RE-ENABLE AFTER BASIC COMMUNICATION WORKS
+        
         // Simple APDU decoding:
         // SELECT AID: 00 A4 04 00 Lc <AID>
         if (isSelectAid(commandApdu)) {
@@ -148,6 +183,7 @@ class SmartCarApduService : HostApduService() {
         }
 
         return SW_UNKNOWN
+        */
     }
 
     override fun onDeactivated(reason: Int) {

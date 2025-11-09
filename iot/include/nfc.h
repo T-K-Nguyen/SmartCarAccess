@@ -1,7 +1,7 @@
 #pragma once
 
 namespace NFCMod {
-  // Initialize PN532 and I2C bus
+  // Initialize PN532 and SPI bus
   void begin();
   // Start a FreeRTOS task that polls for tags and prints UIDs
   void startTask();
