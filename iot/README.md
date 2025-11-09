@@ -1,8 +1,3 @@
-Perfect — this is the right time to deeply understand **Phase A: Provisioning**.
-You already have the code working toward it, so let’s connect the dots clearly and human-readably.
-
----
-
 # 🚗 PHASE A — Provisioning Overview
 
 ### 🧩 Goal
