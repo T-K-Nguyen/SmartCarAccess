@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/desc_smartcar_hce"
-    android:requireDeviceUnlock="true"
-    android:apduServiceBanner="@mipmap/ic_launcher">
-    <aid-group android:category="other" android:description="@string/desc_smartcar_hce">
+    android:requireDeviceUnlock="false"
+    android:apduServiceBanner="@drawable/hce_service_banner">
+
+    <!-- Provisioning AID group: single custom AID F0 01 02 03 04 05 -->
+    <aid-group
+        android:category="other"
+        android:description="@string/desc_smartcar_group">
         <aid-filter android:name="F00102030405" />
     </aid-group>
 </host-apdu-service>

@@ -1,14 +1,11 @@
 buildscript {
-    ext.kotlin_version = '2.1.0'
-
     repositories {
         google()
         mavenCentral()
     }
 
     dependencies {
-        classpath "com.android.tools.build:gradle:7.4.2"
-        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+        // Only keep Google Services here; AGP/Kotlin are managed via settings.gradle.kts plugins {}
         classpath "com.google.gms:google-services:4.4.4"
     }
 }

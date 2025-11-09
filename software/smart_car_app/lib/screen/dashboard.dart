@@ -686,10 +686,10 @@ class _DashboardState extends State<Dashboard> {
   }
 
   void _showAddCarDialog() {
-    final _nameController = TextEditingController();
-    final _modelController = TextEditingController();
-    final _locationController = TextEditingController();
-    String _selectedColor = 'blue';
+    final nameController = TextEditingController();
+    final modelController = TextEditingController();
+    final locationController = TextEditingController();
+    String selectedColor = 'blue';
 
     showDialog(
       context: context,
@@ -706,7 +706,7 @@ class _DashboardState extends State<Dashboard> {
             mainAxisSize: MainAxisSize.min,
             children: [
               TextField(
-                controller: _nameController,
+                controller: nameController,
                 decoration: const InputDecoration(
                   labelText: 'Vehicle Name',
                   border: OutlineInputBorder(),
@@ -715,7 +715,7 @@ class _DashboardState extends State<Dashboard> {
               ),
               const SizedBox(height: 16),
               TextField(
-                controller: _modelController,
+                controller: modelController,
                 decoration: const InputDecoration(
                   labelText: 'Model/Year',
                   border: OutlineInputBorder(),
@@ -724,7 +724,7 @@ class _DashboardState extends State<Dashboard> {
               ),
               const SizedBox(height: 16),
               TextField(
-                controller: _locationController,
+                controller: locationController,
                 decoration: const InputDecoration(
                   labelText: 'Location',
                   border: OutlineInputBorder(),
@@ -733,7 +733,7 @@ class _DashboardState extends State<Dashboard> {
               ),
               const SizedBox(height: 16),
               DropdownButtonFormField<String>(
-                value: _selectedColor,
+                initialValue: selectedColor,
                 decoration: const InputDecoration(
                   labelText: 'Color Theme',
                   border: OutlineInputBorder(),
@@ -746,7 +746,7 @@ class _DashboardState extends State<Dashboard> {
                   DropdownMenuItem(value: 'green', child: Text('Green')),
                 ],
                 onChanged: (value) {
-                  _selectedColor = value!;
+                  selectedColor = value!;
                 },
               ),
             ],
@@ -759,9 +759,9 @@ class _DashboardState extends State<Dashboard> {
           ),
           ElevatedButton(
             onPressed: () async {
-              if (_nameController.text.isEmpty || 
-                  _modelController.text.isEmpty || 
-                  _locationController.text.isEmpty) {
+              if (nameController.text.isEmpty || 
+                  modelController.text.isEmpty || 
+                  locationController.text.isEmpty) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
                     content: Text('Please fill in all fields'),
@@ -773,10 +773,10 @@ class _DashboardState extends State<Dashboard> {
 
               try {
                 final carData = _carService.createDefaultCarData(
-                  name: _nameController.text,
-                  model: _modelController.text,
-                  location: _locationController.text,
-                  color: _selectedColor,
+                  name: nameController.text,
+                  model: modelController.text,
+                  location: locationController.text,
+                  color: selectedColor,
                 );
 
                 await _carService.addCar(carData);
