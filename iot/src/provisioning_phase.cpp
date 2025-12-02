@@ -297,4 +297,28 @@ bool runOnceWithHce(PN532& nfc, const uint8_t* aid, size_t aidLen, uint32_t wait
   return storeKeyIdHexIfEmpty(payload, idLen);
 }
 
+size_t getDevicePrivateKeyPEM(uint8_t* out, size_t maxLen) {
+  if (!out || maxLen == 0) return 0;
+  
+  prefs.begin(kNs, true); // read-only
+  String privPem = prefs.getString(kKeyPem, "");
+  prefs.end();
+  
+  if (privPem.length() == 0) {
+    Serial.println("[ProvisioningPhase] No device private key found");
+    return 0;
+  }
+  
+  // Return PEM with null terminator for mbedTLS parsing
+  size_t pemLen = privPem.length() + 1; // +1 for null terminator
+  if (pemLen > maxLen) {
+    Serial.printf("[ProvisioningPhase] Private key too large (%u > %u)\n", 
+                  (unsigned)pemLen, (unsigned)maxLen);
+    return 0;
+  }
+  
+  memcpy(out, privPem.c_str(), pemLen);
+  return pemLen;
+}
+
 } // namespace

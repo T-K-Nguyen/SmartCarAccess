@@ -47,4 +47,7 @@ namespace ProvisioningPhase {
   // Uses the SELECT payload or subsequent UID APDU payload as the persistent ID.
   // Returns true if a new keyId was stored.
   bool runOnceWithHce(PN532& nfc, const uint8_t* aid, size_t aidLen, uint32_t waitMs = 15000);
+  
+  // Get device private key in PEM format for signing (Phase B authentication)
+  size_t getDevicePrivateKeyPEM(uint8_t* out, size_t maxLen);
 }
