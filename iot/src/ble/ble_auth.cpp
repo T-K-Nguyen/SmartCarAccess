@@ -486,6 +486,22 @@ namespace {
       Serial.printf("[AUTH] Processing state: %d\n", s_authState);
       
       switch (s_authState) {
+        case AUTH_WAITING_FOR_PHONE:
+          // Sign ECU ephemeral and send handshake packet to phone
+          if (!sign_ephemeral_with_device_key()) {
+            s_authState = AUTH_FAILED;
+            if (g_cStatus) {
+              g_cStatus->setValue("SIGN_FAILED");
+              g_cStatus->notify();
+            }
+          } else {
+            // remain in AUTH_WAITING_FOR_PHONE; phone will write its handshake
+            if (g_cStatus) {
+              g_cStatus->setValue("ECU_HANDSHAKE_SENT");
+              g_cStatus->notify();
+            }
+          }
+          break;
         case AUTH_VERIFYING_PHONE:
           if (verify_phone_signature()) {
             if (!compute_shared_secret_and_session_keys()) {
@@ -541,18 +557,16 @@ namespace {
         return;
       }
 
-      // Sign and send our handshake
-      if (!sign_ephemeral_with_device_key()) {
-        Serial.println("[AUTH] ERROR: Failed to sign ephemeral key");
-        s_authState = AUTH_FAILED;
-        if (g_cStatus) {
-          g_cStatus->setValue("SIGN_FAILED");
-          g_cStatus->notify();
-        }
-        return;
+      // Defer signing and sending handshake to worker to avoid heavy crypto in NimBLE thread
+      s_authState = AUTH_WAITING_FOR_PHONE;
+      if (g_cStatus) {
+        g_cStatus->setValue("KEYGEN_OK");
+        g_cStatus->notify();
       }
-
-      Serial.println("[AUTH] ✓ ECU ready, waiting for phone handshake");
+      if (s_authWorkerTask) {
+        xTaskNotifyGive(s_authWorkerTask);
+      }
+      Serial.println("[AUTH] ✓ Ephemeral generated; worker will sign and send handshake");
     }
 
     void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
@@ -600,8 +614,8 @@ namespace BLEAuth {
     static AuthServerCallbacks serverCb;
     server->setCallbacks(&serverCb);
 
-    // Start worker task
-    xTaskCreate(auth_worker_task, "AuthWorker", 8192, nullptr, 5, &s_authWorkerTask);
+    // Start worker task (larger stack for mbedTLS operations)
+    xTaskCreate(auth_worker_task, "AuthWorker", 12288, nullptr, 5, &s_authWorkerTask);
 
     // Start service
     pAuth->start();
