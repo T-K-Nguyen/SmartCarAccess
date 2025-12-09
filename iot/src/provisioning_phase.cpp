@@ -13,9 +13,11 @@
 namespace {
   Preferences prefs;
   const char* kNs = "prov";
+  // Deprecated: device-side private key storage (when ECU generated keypair)
   const char* kKeyPem = "ec_priv";
   const char* kKeyId  = "key_id";
 
+  // Deprecated state for device-side keypair; no longer used
   mbedtls_pk_context keypair;
   mbedtls_entropy_context entropy;
   mbedtls_ctr_drbg_context drbg;
@@ -28,45 +30,16 @@ namespace {
     return s;
   }
 
-  bool ensureKeypair() {
-    prefs.begin(kNs, false);
-    String privPem = prefs.getString(kKeyPem, "");
-    prefs.end();
-
-    mbedtls_pk_init(&keypair);
-    mbedtls_entropy_init(&entropy);
-    mbedtls_ctr_drbg_init(&drbg);
-    const char *pers = "provA";
-    mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
-                          (const unsigned char*)pers, strlen(pers));
-
-    if (privPem.length() > 0) {
-      if (mbedtls_pk_parse_key(&keypair,
-            (const unsigned char*)privPem.c_str(), privPem.length()+1,
-            nullptr, 0) == 0) {
-        Serial.println("[PhaseA] Loaded existing ECC keypair");
-        return true;
-      }
-    }
-    if (mbedtls_pk_setup(&keypair, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY)) != 0) return false;
-    if (mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1, mbedtls_pk_ec(keypair), mbedtls_ctr_drbg_random, &drbg) != 0) return false;
-
-    static unsigned char buf[1600]; memset(buf, 0, sizeof(buf));
-    if (mbedtls_pk_write_key_pem(&keypair, buf, sizeof(buf)) == 0) {
-      prefs.begin(kNs, false);
-      prefs.putString(kKeyPem, (char*)buf);
-      prefs.end();
-      Serial.println("[PhaseA] Generated ECC keypair and saved to NVS");
-    }
-    return true;
-  }
+  // Device no longer generates/stores a signing keypair.
+  // Authentication relies on Android-keystore-held private key; ECU stores phone public key.
+  bool ensureKeypair() { return false; }
 }
 
 namespace ProvisioningPhase {
 
 void begin() {
-  keysReady = ensureKeypair();
-  if (!keysReady) Serial.println("[PhaseA] ECC init failed (continuing without keys)");
+  // No device-side keypair initialization needed.
+  Serial.println("[ProvisioningPhase] Using Android Keystore for signing; ECU stores phone pubkey only");
 }
 
 bool isProvisioned() {
@@ -153,6 +126,7 @@ bool verifySignatureP256(const uint8_t* pub65,
 
 void clearAll() {
   prefs.begin(kNs, false);
+  // Retain compatibility: remove legacy device key if present
   if (prefs.isKey(kKeyPem)) prefs.remove(kKeyPem);
   if (prefs.isKey(kKeyId)) prefs.remove(kKeyId);
   if (prefs.isKey("phone_pub_raw")) prefs.remove("phone_pub_raw");
@@ -298,27 +272,9 @@ bool runOnceWithHce(PN532& nfc, const uint8_t* aid, size_t aidLen, uint32_t wait
 }
 
 size_t getDevicePrivateKeyPEM(uint8_t* out, size_t maxLen) {
-  if (!out || maxLen == 0) return 0;
-  
-  prefs.begin(kNs, true); // read-only
-  String privPem = prefs.getString(kKeyPem, "");
-  prefs.end();
-  
-  if (privPem.length() == 0) {
-    Serial.println("[ProvisioningPhase] No device private key found");
-    return 0;
-  }
-  
-  // Return PEM with null terminator for mbedTLS parsing
-  size_t pemLen = privPem.length() + 1; // +1 for null terminator
-  if (pemLen > maxLen) {
-    Serial.printf("[ProvisioningPhase] Private key too large (%u > %u)\n", 
-                  (unsigned)pemLen, (unsigned)maxLen);
-    return 0;
-  }
-  
-  memcpy(out, privPem.c_str(), pemLen);
-  return pemLen;
+  // Deprecated: device does not hold a private key anymore.
+  (void)out; (void)maxLen;
+  return 0;
 }
 
 } // namespace

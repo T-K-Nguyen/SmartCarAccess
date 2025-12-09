@@ -4,7 +4,7 @@
 class PN532; // forward decl
 
 namespace ProvisioningPhase {
-  // Initialize provisioning (e.g., device keypair generation). Safe to call once at boot.
+  // Initialize provisioning. No device keypair is generated; Android Keystore holds private key.
   void begin();
 
   // True if a phone keyId has already been stored.

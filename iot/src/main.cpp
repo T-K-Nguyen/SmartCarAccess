@@ -12,7 +12,7 @@ void setup() {
   // Start BLE (admin/auth/echo services)
   BLEMod::begin();
   Serial.println("[BLE] Services started.");
-
+  Serial.println("Old code ============================================");
   // UART2 on ESP32-S3: RX=44, TX=43 for PN532 (HSU)
   NfcSession::begin(Serial2, 44, 43, 115200);
 }

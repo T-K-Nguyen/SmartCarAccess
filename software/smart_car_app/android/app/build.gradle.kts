@@ -41,7 +41,7 @@ flutter {
 
 dependencies {
     // 🔹 Import Firebase BoM (Bill of Materials)
-    implementation(platform("com.google.firebase:firebase-bom:34.4.0"))
+    implementation(platform("com.google.firebase:firebase-bom:34.6.0"))
 
     // 🔹 Thêm các SDK Firebase mà bạn muốn dùng
     // (không cần ghi version vì BoM đã quản lý giúp)

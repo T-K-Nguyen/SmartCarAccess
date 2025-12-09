@@ -64,34 +64,4 @@ object ProvisioningKeyManager {
     }
 }
 
-object ProvisioningResponseBuilder {
-    private const val TAG = "ProvisioningResponseBuilder"
-
-    fun buildBaseCredentialsPacket(context: Context): ByteArray {
-        val kp = ProvisioningKeyManager.loadOrGenerate(context)
-        val pub65 = ProvisioningKeyManager.publicKeyUncompressed(kp)
-        val keyId = ProvisioningKeyManager.computeKeyId(pub65)
-        val keyIdBytes = keyId.toByteArray(Charsets.UTF_8)
-        val certBytes = ByteArray(0) // No cert chain Phase A
-        val out = ArrayList<Byte>()
-        out.add(keyIdBytes.size.toByte())
-        keyIdBytes.forEach { out.add(it) }
-        pub65.forEach { out.add(it) }
-        // 2-byte cert length (little endian for consistency with earlier design)
-        out.add((certBytes.size and 0xFF).toByte())
-        out.add(((certBytes.size shr 8) and 0xFF).toByte())
-        // No cert data appended (empty)
-        return out.toByteArray()
-    }
-
-    fun buildSignaturePacket(context: Context, challenge: ByteArray): ByteArray {
-        val kp = ProvisioningKeyManager.loadOrGenerate(context)
-        val derSig = ProvisioningKeyManager.signChallenge(kp, challenge)
-        val out = ArrayList<Byte>()
-        // length prefix (2 bytes BIG-endian) then DER signature
-        out.add(((derSig.size shr 8) and 0xFF).toByte())
-        out.add((derSig.size and 0xFF).toByte())
-        derSig.forEach { out.add(it) }
-        return out.toByteArray()
-    }
-}
+// Legacy ProvisioningResponseBuilder removed - now using KeystoreBridge version
