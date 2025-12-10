@@ -3,6 +3,8 @@
 
 #include "nfc_session.h"
 #include "provisioning_phase.h"
+#include "fsm/fsm.h"
+#include "fsm/fsm_integration.h"
 #include <esp_system.h>
 #include <esp_log.h>
 #include <cstring>
@@ -12,10 +14,6 @@ namespace {
     PN532_HSU* hsu = nullptr;
     PN532* nfc = nullptr;
     bool samConfigured = false;
-
-    // Provisioning control flags
-    bool forceProvisionPersistent = false; // toggled with 'f' - stays until toggled off
-    bool forceProvisionOneShot = false;    // armed with 'F' - auto-clears after one success
 
     // Startup guard to ignore early serial noise
     uint32_t bootMillis = 0;
@@ -188,7 +186,7 @@ namespace {
     // Execute the two-step provisioning exchange when appropriate.
     void performProvisioningIfNeeded(uint8_t sw1, uint8_t sw2) {
         bool alreadyProvisioned = ProvisioningPhase::isProvisioned();
-        bool shouldForce = (forceProvisionPersistent || forceProvisionOneShot);
+        bool shouldForce = ProvisioningPhase::isForceProvisioning();
         bool shouldProvision = (shouldForce || !alreadyProvisioned) && (sw1 == 0x90 && sw2 == 0x00);
         if (!shouldProvision) return;
 
@@ -289,10 +287,10 @@ namespace {
         bool haveExisting = ProvisioningPhase::getKeyId(existingKeyId);
         bool sameKey = haveExisting && existingKeyId == info.keyId;
 
-        if (!alreadyProvisioned || forceProvisionPersistent || forceProvisionOneShot) {
+        if (!alreadyProvisioned || shouldForce) {
             // Store keyId according to force flags and whether it differs from stored value
             if (!sameKey) {
-                if (forceProvisionPersistent || forceProvisionOneShot) {
+                if (shouldForce) {
                     ProvisioningPhase::storeKeyIdAsciiForce(info.keyId.c_str());
                 } else {
                     ProvisioningPhase::storeKeyIdAsciiIfEmpty(info.keyId.c_str());
@@ -305,10 +303,10 @@ namespace {
             if (info.certLen > 0) ProvisioningPhase::storeCertChain(info.cert, info.certLen);
             Serial.println("[PhaseA] Provisioning data persisted (keyId/pub/cert as available)");
 
-            if (forceProvisionOneShot) {
-                forceProvisionOneShot = false; // consume the one-shot force
-                Serial.println("[PhaseA] One-shot force consumed; returning to normal mode");
-            }
+            // Trigger FSM provision success event
+            FSMIntegration::NFC::onCredentialsStored();
+            
+            // Note: One-shot force is auto-cleared by ProvisioningPhase::storeKeyIdAsciiIfEmpty()
         } else {
             Serial.println("[PhaseA] Already provisioned; skipping store (toggle 'f' to force)");
         }
@@ -334,25 +332,16 @@ namespace {
             lastCmd = c; lastCmdMs = now;
 
             if (c == 'p') {
-                String kid; bool haveKid = ProvisioningPhase::getKeyId(kid);
-                uint8_t pub[65]; size_t pubLen = ProvisioningPhase::getPhonePubRaw(pub, sizeof(pub));
-                size_t certLen = ProvisioningPhase::getCertChain(nullptr, 0);
-                Serial.println("[Admin] Stored provisioning state:");
-                Serial.printf("  keyId: %s\n", haveKid ? kid.c_str() : "<none>");
-                Serial.printf("  pubKey: %s (len=%u)\n", (pubLen == 65 && pub[0] == 0x04) ? "present" : "<none>", (unsigned)pubLen);
-                Serial.printf("  certLen: %u\n", (unsigned)certLen);
+                // Show FSM diagnostics
+                FSMIntegration::SerialCmd::printDiagnostics();
             } else if (c == 'f') {
-                forceProvisionPersistent = !forceProvisionPersistent;
-                Serial.printf("[Admin] Persistent force provisioning: %s\n", forceProvisionPersistent ? "ON" : "OFF");
+                FSMIntegration::SerialCmd::toggleForceProvision();
             } else if (c == 'F') {
-                forceProvisionOneShot = true;
-                Serial.println("[Admin] One-shot force provisioning ARMED (will auto-clear after success)");
+                FSMIntegration::SerialCmd::armOneShotForce();
             } else if (c == 'r') {
-                ProvisioningPhase::clearProvisionedOnly();
-                Serial.println("[Admin] Cleared phone provisioning (kept device keypair)");
+                FSMIntegration::SerialCmd::clearKeys();
             } else if (c == 'C') {
-                ProvisioningPhase::clearAll();
-                Serial.println("[Admin] CLEARED ALL");
+                FSMIntegration::SerialCmd::clearAll();
             } else if (c == 'v') {
                 bool ok = ProvisioningPhase::validateStoredCertMatchesStoredPub();
                 Serial.printf("[Admin] Cert vs pub match: %s\n", ok ? "YES" : "NO/UNAVAILABLE");
@@ -394,10 +383,9 @@ namespace NfcSession {
         samConfigured = ensureSAMConfig(5, 200);
         Serial.println(samConfigured ? "OK" : "SAM CONFIG FAILED (will still attempt to poll)");
 
-        Serial.printf("[PhaseA] Provisioned=%s  Force(persist)=%s  OneShot=%s\n",
+        Serial.printf("[PhaseA] Provisioned=%s  Force=%s\n",
                                     ProvisioningPhase::isProvisioned() ? "YES" : "NO",
-                                    forceProvisionPersistent ? "YES" : "NO",
-                                    forceProvisionOneShot ? "ARMED" : "NO");
+                                    ProvisioningPhase::isForceProvisioning() ? "ON" : "OFF");
 
         Serial.println("[PhaseA] Serial: p=print, f=toggle persistent force, F=one-shot force, r=reset phone, C=clear ALL, v=validate cert, x=dump pub, h=help");
     }
@@ -426,11 +414,10 @@ namespace NfcSession {
             return;
         }
 
-        Serial.printf("SELECT SW1SW2=%02X%02X payloadLen=%d  Provisioned=%s  Force(persist)=%s  OneShot=%s\n",
+        Serial.printf("SELECT SW1SW2=%02X%02X payloadLen=%d  Provisioned=%s  Force=%s\n",
                                     sw1, sw2, payloadLen,
                                     ProvisioningPhase::isProvisioned() ? "YES" : "NO",
-                                    forceProvisionPersistent ? "YES" : "NO",
-                                    forceProvisionOneShot ? "ARMED" : "NO");
+                                    ProvisioningPhase::isForceProvisioning() ? "ON" : "OFF");
 
         // Possibly perform provisioning sequence after a successful SELECT
         performProvisioningIfNeeded(sw1, sw2);
@@ -439,15 +426,17 @@ namespace NfcSession {
         postSessionCooldown(sw1 == 0x90 && sw2 == 0x00);
     }
 
-    // ---- Admin control API (exposed via header & used by BLE) ----
+    // ---- Admin control API (delegates to ProvisioningPhase) ----
     void setPersistentForce(bool on) {
-        forceProvisionPersistent = on;
-        Serial.printf("[NfcSession] Persistent force set %s\n", on ? "ON" : "OFF");
+        ProvisioningPhase::setForceProvisioningFlag(on);
     }
     void armOneShotForce() {
-        forceProvisionOneShot = true;
-        Serial.println("[NfcSession] One-shot force ARMED");
+        ProvisioningPhase::setOneShotForce(true);
     }
-    bool getPersistentForce() { return forceProvisionPersistent; }
-    bool isOneShotArmed() { return forceProvisionOneShot; }
+    bool getPersistentForce() { 
+        return ProvisioningPhase::isForceProvisioning(); 
+    }
+    bool isOneShotArmed() { 
+        return ProvisioningPhase::isForceProvisioning(); 
+    }
 }

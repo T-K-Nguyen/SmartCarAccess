@@ -16,6 +16,8 @@ namespace {
   // Deprecated: device-side private key storage (when ECU generated keypair)
   const char* kKeyPem = "ec_priv";
   const char* kKeyId  = "key_id";
+  const char* kForceProvFlag = "force_prov";
+  const char* kOneShotForce = "oneshot_force";
 
   // Deprecated state for device-side keypair; no longer used
   mbedtls_pk_context keypair;
@@ -51,22 +53,36 @@ bool isProvisioned() {
 
 bool storeKeyIdHexIfEmpty(const uint8_t* bytes, size_t len) {
   if (!bytes || len == 0) return false;
-  if (isProvisioned()) return false;
+  // Allow re-provisioning if force mode is active
+  bool forceMode = isForceProvisioning();
+  if (isProvisioned() && !forceMode) return false;
   String hex = toHex(bytes, len);
   prefs.begin(kNs, false);
   bool ok = prefs.putString(kKeyId, hex) > 0;
+  // Clear one-shot force flag after successful provisioning
+  if (ok && prefs.isKey(kOneShotForce)) {
+    prefs.remove(kOneShotForce);
+    Serial.println("[PhaseA] One-shot force cleared after provisioning");
+  }
   prefs.end();
-  if (ok) Serial.printf("[PhaseA] Stored phone keyId as hex: %s\n", hex.c_str());
+  if (ok) Serial.printf("[PhaseA] Stored phone keyId as hex: %s%s\n", hex.c_str(), forceMode ? " (FORCED)" : "");
   return ok;
 }
 
 bool storeKeyIdAsciiIfEmpty(const char* ascii) {
   if (!ascii || !*ascii) return false;
-  if (isProvisioned()) return false;
+  // Allow re-provisioning if force mode is active
+  bool forceMode = isForceProvisioning();
+  if (isProvisioned() && !forceMode) return false;
   prefs.begin(kNs, false);
   bool ok = prefs.putString(kKeyId, ascii) > 0;
+  // Clear one-shot force flag after successful provisioning
+  if (ok && prefs.isKey(kOneShotForce)) {
+    prefs.remove(kOneShotForce);
+    Serial.println("[PhaseA] One-shot force cleared after provisioning");
+  }
   prefs.end();
-  if (ok) Serial.printf("[PhaseA] Stored phone keyId (ascii): %s\n", ascii);
+  if (ok) Serial.printf("[PhaseA] Stored phone keyId (ascii): %s%s\n", ascii, forceMode ? " (FORCED)" : "");
   return ok;
 }
 
@@ -139,6 +155,41 @@ void clearProvisionedOnly() {
   if (prefs.isKey(kKeyId)) prefs.remove(kKeyId);
   if (prefs.isKey("phone_pub_raw")) prefs.remove("phone_pub_raw");
   if (prefs.isKey("phone_cert_chain")) prefs.remove("phone_cert_chain");
+  prefs.end();
+}
+
+void clearProvisionedData() {
+  // Alias for clearProvisionedOnly (for FSM compatibility)
+  clearProvisionedOnly();
+}
+
+bool setForceProvisioningFlag(bool enable) {
+  prefs.begin(kNs, false);
+  bool ok = prefs.putBool(kForceProvFlag, enable);
+  prefs.end();
+  if (ok) {
+    Serial.printf("[ProvisioningPhase] Force provisioning flag set to: %s\n", enable ? "ENABLED" : "DISABLED");
+  }
+  return ok;
+}
+
+bool isForceProvisioning() {
+  prefs.begin(kNs, true);
+  bool forced = prefs.getBool(kForceProvFlag, false);
+  bool oneShot = prefs.getBool(kOneShotForce, false);
+  prefs.end();
+  return forced || oneShot;
+}
+
+void setOneShotForce(bool enable) {
+  prefs.begin(kNs, false);
+  if (enable) {
+    prefs.putBool(kOneShotForce, true);
+    Serial.println("[ProvisioningPhase] One-shot force provisioning ARMED");
+  } else {
+    if (prefs.isKey(kOneShotForce)) prefs.remove(kOneShotForce);
+    Serial.println("[ProvisioningPhase] One-shot force provisioning CLEARED");
+  }
   prefs.end();
 }
 

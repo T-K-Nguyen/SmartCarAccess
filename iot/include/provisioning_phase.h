@@ -31,6 +31,13 @@ namespace ProvisioningPhase {
   void clearAll();
   // Clear only phone provisioning artifacts (keyId, phone pub, cert), keep device keypair
   void clearProvisionedOnly();
+  // Alias for clearProvisionedOnly (for FSM compatibility)
+  void clearProvisionedData();
+
+  // Force provisioning control (for testing and admin operations)
+  bool setForceProvisioningFlag(bool enable);  // Set persistent force provisioning flag
+  bool isForceProvisioning();                  // Check if force provisioning is enabled
+  void setOneShotForce(bool enable);           // Enable one-time force provisioning (cleared after use)
 
   // Read-back helpers for diagnostics
   bool getKeyId(String& out);

@@ -14,6 +14,8 @@
 
 #include "ble/ble_auth.h"
 #include "provisioning_phase.h"
+#include "fsm/fsm.h"
+#include "fsm/fsm_integration.h"
 
 namespace {
   // Phase B Authentication service
@@ -428,6 +430,9 @@ namespace {
     Serial.printf("[AUTH] Stats: Attempts=%u, Successes=%u, Failures=%u\n", 
                   s_auth_attempts, s_auth_successes, s_auth_failures);
 
+    // Trigger FSM auth success event
+    FSMIntegration::BLE::onAuthVerified();
+
     // Notify status
     if (g_cStatus) {
       g_cStatus->setValue("AUTH_SUCCESS");
@@ -510,6 +515,7 @@ namespace {
             }
           } else {
             s_authState = AUTH_FAILED;
+            FSMIntegration::BLE::onAuthFailed();
             if (g_cStatus) {
               g_cStatus->setValue("AUTH_FAILED");
               g_cStatus->notify();
@@ -522,6 +528,7 @@ namespace {
             s_authState = AUTH_SESSION_READY;
           } else {
             s_authState = AUTH_FAILED;
+            FSMIntegration::BLE::onAuthFailed();
             if (g_cStatus) { g_cStatus->setValue("AUTH_FAILED"); g_cStatus->notify(); }
           }
           break;
