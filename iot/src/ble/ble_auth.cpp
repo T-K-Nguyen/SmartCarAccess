@@ -17,6 +17,9 @@
 #include "fsm/fsm.h"
 #include "fsm/fsm_integration.h"
 
+// Uncomment to enable verbose debug logging (adds ~150-200ms overhead)
+// #define BLE_AUTH_VERBOSE_DEBUG
+
 namespace {
   // Phase B Authentication service
   const char* kAuthServiceUUID        = "0000aaaa-1234-5678-9abc-def012345678";
@@ -85,12 +88,16 @@ namespace {
   uint32_t s_auth_failures = 0;
 
   void print_hex(const char* label, const uint8_t* data, size_t len) {
+#ifdef BLE_AUTH_VERBOSE_DEBUG
     Serial.printf("[AUTH-DEBUG] %s (%u bytes): ", label, (unsigned)len);
     for (size_t i = 0; i < len; i++) {
       Serial.printf("%02X", data[i]);
       if (i < len - 1) Serial.print(" ");
     }
     Serial.println();
+#else
+    (void)label; (void)data; (void)len; // Suppress unused warnings
+#endif
   }
 
   void reset_auth_state() {
@@ -153,9 +160,8 @@ namespace {
       return false;
     }
 
-    print_hex("ECU Ephemeral Public Key", s_ecu_ephemeral_pub_bytes, 65);
-    
     s_ephemeral_generated = true;
+    print_hex("ECU Ephemeral Public Key", s_ecu_ephemeral_pub_bytes, 65);
     Serial.println("[AUTH] ✓ Ephemeral keypair generated successfully");
     return true;
   }
@@ -241,9 +247,8 @@ namespace {
       s_phone_sig_len = sig_len;
       s_phone_data_received = true;
 
-      Serial.printf("[AUTH] ✓ Parsed phone data: pubkey=65 bytes, signature=%u bytes\n", sig_len);
-      
       s_authState = AUTH_VERIFYING_PHONE;
+      Serial.printf("[AUTH] ✓ Parsed phone data: pubkey=65 bytes, signature=%u bytes\n", sig_len);
       
       // Notify worker task
       if (s_authWorkerTask) {
@@ -381,9 +386,8 @@ namespace {
       return false;
     }
 
-    print_hex("ECDH Shared Secret", s_shared_secret, 32);
-
     Serial.println("[AUTH] Step F: Deriving session keys with HKDF");
+    print_hex("ECDH Shared Secret", s_shared_secret, 32);
 
     // Derive encryption key: HKDF(shared_secret, "SmartCarv1|ENC" || ecu_pub || phone_pub)
     // Label is 14 bytes, pad to 16 with null bytes for alignment

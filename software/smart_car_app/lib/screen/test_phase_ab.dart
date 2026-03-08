@@ -63,7 +63,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
 
   void _addLog(String message) {
     setState(() {
-      _logs.add('[${DateTime.now().toString().substring(11, 19)}] $message');
+      _logs.add('[${DateTime.now().toString().substring(11, 23)}] $message');
     });
     
     // Auto scroll to bottom
@@ -252,93 +252,37 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
     _addLog('');
     
     try {
-      _addLog('📶 [Bước 1] Kết nối tới thiết bị BLE...');
+      // Measure total time
+      final stepStartTime = DateTime.now();
       
-      // Connect to device if not already connected
-      BluetoothDevice device;
-      if (_selectedDevice != null && _selectedDevice!.isConnected) {
-        device = _selectedDevice!;
-      } else {
-        final devices = FlutterBluePlus.connectedDevices;
-        device = devices.firstWhere(
-          (d) => d.remoteId.str.toUpperCase() == deviceAddress.toUpperCase(),
-          orElse: () {
-            _addLog('   Thiết bị chưa kết nối, đang kết nối...');
-            return _selectedDevice ?? BluetoothDevice.fromId(deviceAddress);
-          },
-        );
-        
-        if (device.isDisconnected) {
-          await device.connect(timeout: const Duration(seconds: 15));
-          await Future.delayed(const Duration(seconds: 2)); // Wait for connection to stabilize
-        }
-      }
+      // Run authentication with progress callback
+      final result = await _testService.testPhaseB(
+        deviceAddress: deviceAddress,
+        device: _selectedDevice,
+        onProgress: (step, message) {
+          // Format progress messages for UI
+          _addLog('[$step] $message');
+        },
+      );
       
-      _addLog('   ✓ Đã kết nối');
+      final stepDuration = DateTime.now().difference(stepStartTime);
       _addLog('');
-      
-      _addLog('🔍 [Bước 2] Khám phá dịch vụ BLE...');
-      final services = await device.discoverServices();
-      _addLog('   ✓ Tìm thấy ${services.length} dịch vụ');
-      _addLog('');
-      
-      _addLog('📡 [Bước 3] Đăng ký nhận thông báo...');
-      _addLog('   ✓ Đã đăng ký');
-      _addLog('');
-      
-      _addLog('⏳ [Bước 4] Chờ ECU handshake...');
-      await Future.delayed(const Duration(seconds: 1));
-      
-      _addLog('   ✓ Nhận được ECU ephemeral public key');
-      _addLog('   ⚠️  Bỏ qua xác minh chữ ký ECU (identity ở Android Keystore)');
-      _addLog('');
-      
-      _addLog('🔐 [Bước 5] Tạo phone ephemeral keypair...');
-      await Future.delayed(const Duration(milliseconds: 500));
-      _addLog('   ✓ Đã tạo keypair');
-      _addLog('');
-      
-      _addLog('✍️  [Bước 6] Ký phone ephemeral key...');
-      await Future.delayed(const Duration(milliseconds: 500));
-      _addLog('   ✓ Đã tạo chữ ký');
-      _addLog('');
-      
-      _addLog('📤 [Bước 7] Gửi phone handshake tới ECU...');
-      
-      // Run actual test
-      final result = await _testService.testPhaseB(deviceAddress: deviceAddress);
+      _addLog('⏱️  Tổng thời gian: ${stepDuration.inMilliseconds}ms');
       
       setState(() {
         _phaseBResult = result;
       });
       
       if (result.success) {
-        _addLog('   ✓ Đã gửi');
-        _addLog('');
-        _addLog('⏳ [Bước 8] Chờ trạng thái xác thực...');
-        _addLog('   ✓ Nhận được: AUTH_SUCCESS');
-        _addLog('');
-        _addLog('🔗 [Bước 9] Tính ECDH shared secret...');
-        _addLog('   ✓ Shared Secret: ${_formatBytes(result.sharedSecret!, 16)}...');
-        _addLog('');
-        _addLog('🔑 [Bước 10] Tạo session keys (HKDF-SHA256)...');
-        _addLog('   ✓ Encryption Key: ${_formatBytes(result.sessionEncKey!, 16)}...');
-        _addLog('   ✓ MAC Key: ${_formatBytes(result.sessionMacKey!, 16)}...');
-        _addLog('');
-        _addLog('🎯 [Bước 11] Chờ challenge từ ECU...');
-        _addLog('   ✓ Challenge: ${_formatBytes(result.challenge!, 24)}');
-        _addLog('');
-        _addLog('✍️  [Bước 12] Ký challenge và gửi lại...');
-        _addLog('   ✓ Đã gửi chữ ký');
         _addLog('');
         _addLog('═══════════════════════════════════');
         _addLog('✅ PHASE B HOÀN TẤT THÀNH CÔNG!');
         _addLog('═══════════════════════════════════');
         _addLog('📊 KẾT QUẢ:');
-        _addLog('   • Shared Secret: 32 bytes');
-        _addLog('   • Session Enc Key: 32 bytes (AES-256)');
-        _addLog('   • Session MAC Key: 32 bytes (HMAC)');
-        _addLog('   • Challenge verified: ✓');
+        _addLog('   🔗 Shared Secret: ${_formatBytes(result.sharedSecret!, 16)}...');
+        _addLog('   🔑 Encryption Key: ${_formatBytes(result.sessionEncKey!, 16)}...');
+        _addLog('   🔑 MAC Key: ${_formatBytes(result.sessionMacKey!, 16)}...');
+        _addLog('   🎯 Challenge: ${_formatBytes(result.challenge!, 24)}');
         _addLog('');
         _addLog('🔓 Sẵn sàng để mở khóa xe!');
       } else {
@@ -654,6 +598,25 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                               color: Colors.grey[500],
                               fontSize: 12,
                             ),
+                          ),
+                          const SizedBox(width: 8),
+                          IconButton(
+                            icon: const Icon(Icons.copy, size: 18),
+                            color: Colors.greenAccent,
+                            tooltip: 'Copy toàn bộ logs',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                            onPressed: _logs.isEmpty ? null : () {
+                              final allLogs = _logs.join('\n');
+                              Clipboard.setData(ClipboardData(text: allLogs));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('✓ Đã copy ${_logs.length} dòng logs vào clipboard'),
+                                  duration: const Duration(seconds: 2),
+                                  backgroundColor: Colors.green,
+                                ),
+                              );
+                            },
                           ),
                         ],
                       ),

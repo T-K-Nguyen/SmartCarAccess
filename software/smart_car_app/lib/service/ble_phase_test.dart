@@ -5,6 +5,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'dart:convert';
 
+/// Callback for reporting progress during authentication
+typedef ProgressCallback = void Function(String step, String message);
+
 /// BLE Phase Test Service
 /// 
 /// This service provides testing utilities for:
@@ -16,7 +19,10 @@ import 'dart:convert';
 /// Usage:
 /// ```dart
 /// final tester = BlePhaseTestService();
-/// await tester.testPhaseB(deviceAddress: "XX:XX:XX:XX:XX:XX");
+/// await tester.testPhaseB(
+///   deviceAddress: "XX:XX:XX:XX:XX:XX",
+///   onProgress: (step, msg) => print('$step: $msg'),
+/// );
 /// ```
 class BlePhaseTestService {
   // Method channels for Android Keystore integration
@@ -115,38 +121,60 @@ class BlePhaseTestService {
   /// 12. ECU verifies → AUTH_SUCCESS
   Future<PhaseB_Result> testPhaseB({
     required String deviceAddress,
+    BluetoothDevice? device,
     Duration timeout = const Duration(seconds: 30),
+    ProgressCallback? onProgress,
   }) async {
     debugPrint('=== Phase B: BLE Authentication Test ===');
     debugPrint('Target device: $deviceAddress');
     
+    void reportProgress(String step, String message) {
+      debugPrint('[$step] $message');
+      onProgress?.call(step, message);
+    }
+    
     try {
       // Step 1: Connect to device
       _stateBLE = PhaseB_State.PHONE_CONNECTING;
-      debugPrint('\n[Step 1] Connecting to BLE device...');
+      reportProgress('Step 1', 'Connecting to BLE device...');
       
-      final devices = await FlutterBluePlus.connectedDevices;
-      _device = devices.firstWhere(
-        (d) => d.remoteId.str.toUpperCase() == deviceAddress.toUpperCase(),
-        orElse: () => throw Exception('Device not found in connected devices'),
-      );
-      
-      if (_device!.isDisconnected) {
-        await _device!.connect(timeout: timeout);
+      if (device != null && device.isConnected) {
+        _device = device;
+        reportProgress('Step 1', '✓ Using existing connection');
+      } else {
+        final devices = await FlutterBluePlus.connectedDevices;
+        _device = devices.firstWhere(
+          (d) => d.remoteId.str.toUpperCase() == deviceAddress.toUpperCase(),
+          orElse: () => device ?? BluetoothDevice.fromId(deviceAddress),
+        );
+        
+        if (_device!.isDisconnected) {
+          await _device!.connect(timeout: timeout);
+          await Future.delayed(const Duration(milliseconds: 200));
+        }
+        reportProgress('Step 1', '✓ Connected to ${_device!.platformName}');
       }
       
-      debugPrint('✓ Connected to ${_device!.platformName}');
+      // Step 1.5: Request larger MTU for better throughput
+      reportProgress('Step 1.5', 'Requesting MTU increase...');
+      try {
+        final mtu = await _device!.requestMtu(512);
+        reportProgress('Step 1.5', '✓ MTU negotiated: $mtu bytes');
+      } catch (e) {
+        reportProgress('Step 1.5', '⚠ MTU request failed (using default)');
+      }
       
       // Step 2: Discover services
-      debugPrint('\n[Step 2] Discovering BLE services...');
+      reportProgress('Step 2', 'Discovering BLE services...');
       final services = await _device!.discoverServices();
+      reportProgress('Step 2', '✓ Found ${services.length} services');
       
       final authService = services.firstWhere(
         (s) => s.uuid.toString().toLowerCase() == authServiceUUID.toLowerCase(),
         orElse: () => throw Exception('Auth service not found'),
       );
       
-      debugPrint('✓ Found auth service: $authServiceUUID');
+      reportProgress('Step 2', '✓ Found auth service');
       
       // Get characteristics
       _cHandshakeRead = authService.characteristics.firstWhere(
@@ -165,10 +193,10 @@ class BlePhaseTestService {
         (c) => c.uuid.toString().toLowerCase() == charChallengeWriteUUID.toLowerCase(),
       );
       
-      debugPrint('✓ Found all required characteristics');
+      reportProgress('Step 2', '✓ All characteristics found');
       
       // Step 3: Subscribe to notifications
-      debugPrint('\n[Step 3] Subscribing to notifications...');
+      reportProgress('Step 3', 'Subscribing to notifications...');
       
       _stateBLE = PhaseB_State.PHONE_WAITING_FOR_ECU_HANDSHAKE;
       
@@ -207,21 +235,18 @@ class BlePhaseTestService {
       await _cStatus!.setNotifyValue(true);
       await _cChallengeRead!.setNotifyValue(true);
       
-      debugPrint('✓ Subscribed to notifications');
-      
-      // CRITICAL: Wait for notifications to be fully registered
-      // ESP32 may have already sent handshake during connection
-      await Future.delayed(const Duration(milliseconds: 500));
+      reportProgress('Step 3', '✓ Notifications enabled');
       
       // Check if handshake was already sent (cached value)
+      // ESP32 may have sent handshake during connection, before notifications enabled
       final cachedHandshake = await _cHandshakeRead!.read();
       if (cachedHandshake.isNotEmpty && !handshakeCompleter.isCompleted) {
-        debugPrint('[Cached] Found ECU handshake: ${cachedHandshake.length} bytes');
+        reportProgress('Step 3', '✓ Found cached handshake');
         handshakeCompleter.complete(Uint8List.fromList(cachedHandshake));
       }
       
       // Step 4: Wait for ECU handshake
-      debugPrint('\n[Step 4] Waiting for ECU handshake...');
+      reportProgress('Step 4', 'Waiting for ECU handshake...');
       final ecuHandshake = await handshakeCompleter.future
           .timeout(Duration(seconds: 10));
       
@@ -233,22 +258,21 @@ class BlePhaseTestService {
       _ecuEphemeralPublicKey = ecuHandshake.sublist(0, 65);
       final sigLen = ecuHandshake[65] | (ecuHandshake[66] << 8);
       
-      debugPrint('✓ ECU ephemeral public key: ${_bytesToHex(_ecuEphemeralPublicKey!)}');
-      debugPrint('  Signature length: $sigLen (skipping verification for now)');
+      reportProgress('Step 4', '✓ ECU handshake received ($sigLen byte signature)');
       
       // Step 5: Generate phone ephemeral keypair (via Android)
       _stateBLE = PhaseB_State.PHONE_EPHEMERAL_GENERATING;
-      debugPrint('\n[Step 5] Generating phone ephemeral keypair (Android Keystore)...');
+      reportProgress('Step 5', 'Generating phone ephemeral keypair...');
       
       final keypairResult = await _handshakeChannel.invokeMethod('generateEphemeralKeypair');
       _phoneEphemeralPublicKey = Uint8List.fromList(List<int>.from(keypairResult['publicKey']));
       _phoneEphemeralPrivateKey = Uint8List.fromList(List<int>.from(keypairResult['privateKey']));
       
-      debugPrint('✓ Phone ephemeral public key: ${_bytesToHex(_phoneEphemeralPublicKey!)}');
+      reportProgress('Step 5', '✓ Phone keypair generated');
       
       // Step 6: Sign ephemeral public key with phone identity key (Android Keystore)
       _stateBLE = PhaseB_State.PHONE_SIGNING_EPHEMERAL;
-      debugPrint('\n[Step 6] Signing phone ephemeral key with identity key (Android Keystore)...');
+      reportProgress('Step 6', 'Signing with identity key...');
       
       final signatureResult = await _handshakeChannel.invokeMethod(
         'signEphemeralWithIdentity',
@@ -256,11 +280,11 @@ class BlePhaseTestService {
       );
       final signature = Uint8List.fromList(List<int>.from(signatureResult));
       
-      debugPrint('✓ Signature generated: ${signature.length} bytes (DER)');
+      reportProgress('Step 6', '✓ Signature generated (${signature.length} bytes)');
       
       // Step 7: Send phone handshake to ECU
       _stateBLE = PhaseB_State.PHONE_SENT_HANDSHAKE;
-      debugPrint('\n[Step 7] Sending phone handshake to ECU...');
+      reportProgress('Step 7', 'Sending phone handshake...');
       
       // Build packet: [ephemeral_pub(65) + sig_len(2,LE) + signature]
       final handshakePacket = BytesBuilder();
@@ -270,11 +294,11 @@ class BlePhaseTestService {
       handshakePacket.add(signature);
       
       await _cHandshakeWrite!.write(handshakePacket.toBytes(), withoutResponse: false);
-      debugPrint('✓ Phone handshake sent: ${handshakePacket.length} bytes');
+      reportProgress('Step 7', '✓ Phone handshake sent');
       
       // Step 8: Wait for authentication status
       _stateBLE = PhaseB_State.PHONE_WAITING_FOR_STATUS;
-      debugPrint('\n[Step 8] Waiting for authentication status...');
+      reportProgress('Step 8', 'Waiting for ECU verification...');
       
       final status = await statusCompleter.future
           .timeout(Duration(seconds: 10));
@@ -283,10 +307,10 @@ class BlePhaseTestService {
         throw Exception('Authentication failed: $status');
       }
       
-      debugPrint('✓ Authentication status: $status');
+      reportProgress('Step 8', '✓ ECU verified phone');
       
       // Step 9: Compute ECDH shared secret (via Android)
-      debugPrint('\n[Step 9] Computing ECDH shared secret (Android native)...');
+      reportProgress('Step 9', 'Computing ECDH shared secret...');
       
       final sharedSecretResult = await _handshakeChannel.invokeMethod(
         'computeECDH',
@@ -294,10 +318,10 @@ class BlePhaseTestService {
       );
       _sharedSecret = Uint8List.fromList(List<int>.from(sharedSecretResult));
       
-      debugPrint('✓ Shared secret: ${_bytesToHex(_sharedSecret!)}');
+      reportProgress('Step 9', '✓ Shared secret computed');
       
       // Step 10: Derive session keys with HKDF-SHA256 (via Android)
-      debugPrint('\n[Step 10] Deriving session keys (HKDF-SHA256 on Android)...');
+      reportProgress('Step 10', 'Deriving session keys...');
       
       final keysResult = await _handshakeChannel.invokeMethod(
         'deriveSessionKeys',
@@ -311,11 +335,10 @@ class BlePhaseTestService {
       _sessionEncKey = Uint8List.fromList(List<int>.from(keysResult['encKey']));
       _sessionMacKey = Uint8List.fromList(List<int>.from(keysResult['macKey']));
       
-      debugPrint('✓ Session encryption key: ${_bytesToHex(_sessionEncKey!)}');
-      debugPrint('✓ Session MAC key: ${_bytesToHex(_sessionMacKey!)}');
+      reportProgress('Step 10', '✓ Session keys derived');
       
       // Step 11: Wait for challenge
-      debugPrint('\n[Step 11] Waiting for challenge...');
+      reportProgress('Step 11', 'Waiting for challenge...');
       
       _challenge = await challengeCompleter.future
           .timeout(Duration(seconds: 10));
@@ -327,12 +350,10 @@ class BlePhaseTestService {
       final vehicleId = _challenge!.sublist(0, 8);
       final nonce = _challenge!.sublist(8, 24);
       
-      debugPrint('✓ Challenge received:');
-      debugPrint('  Vehicle ID: ${_bytesToHex(vehicleId)}');
-      debugPrint('  Nonce: ${_bytesToHex(nonce)}');
+      reportProgress('Step 11', '✓ Challenge received');
       
       // Step 12: Sign challenge and send back (via Android Keystore)
-      debugPrint('\n[Step 12] Signing challenge with identity key (Android Keystore)...');
+      reportProgress('Step 12', 'Signing challenge...');
       
       final challengeSigResult = await _handshakeChannel.invokeMethod(
         'signChallenge',
@@ -341,13 +362,10 @@ class BlePhaseTestService {
       final challengeSignature = Uint8List.fromList(List<int>.from(challengeSigResult));
       
       await _cChallengeWrite!.write(challengeSignature, withoutResponse: false);
-      debugPrint('✓ Challenge signature sent: ${challengeSignature.length} bytes');
-      
-      // Wait a moment for final verification
-      await Future.delayed(Duration(seconds: 2));
+      reportProgress('Step 12', '✓ Challenge signature sent');
       
       _stateBLE = PhaseB_State.PHONE_AUTH_SUCCESS;
-      debugPrint('\n✓✓✓ Phase B Authentication Completed Successfully! ✓✓✓');
+      reportProgress('Complete', '✓✓✓ Authentication successful!');
       
       return PhaseB_Result(
         success: true,
@@ -359,8 +377,7 @@ class BlePhaseTestService {
       );
       
     } catch (e, stackTrace) {
-      debugPrint('\n✗✗✗ Phase B Authentication Failed ✗✗✗');
-      debugPrint('Error: $e');
+      reportProgress('Error', '✗ Authentication failed: $e');
       debugPrint('Stack trace: $stackTrace');
       
       _stateBLE = PhaseB_State.PHONE_AUTH_FAILED;

@@ -187,6 +187,13 @@ namespace {
     void performProvisioningIfNeeded(uint8_t sw1, uint8_t sw2) {
         bool alreadyProvisioned = ProvisioningPhase::isProvisioned();
         bool shouldForce = ProvisioningPhase::isForceProvisioning();
+        
+        // If already provisioned and force mode is OFF, reject provisioning attempt
+        if (alreadyProvisioned && !shouldForce) {
+            Serial.println("[PhaseA] ⚠️  Device already provisioned. Use 'f' or 'F' command to force re-provisioning.");
+            return;
+        }
+        
         bool shouldProvision = (shouldForce || !alreadyProvisioned) && (sw1 == 0x90 && sw2 == 0x00);
         if (!shouldProvision) return;
 
@@ -306,7 +313,14 @@ namespace {
             // Trigger FSM provision success event
             FSMIntegration::NFC::onCredentialsStored();
             
-            // Note: One-shot force is auto-cleared by ProvisioningPhase::storeKeyIdAsciiIfEmpty()
+            // Auto-disable force mode after successful provisioning to prevent automatic re-provisioning
+            if (shouldForce) {
+                ProvisioningPhase::setForceProvisioningFlag(false);
+                ProvisioningPhase::setOneShotForce(false);
+                Serial.println("[PhaseA] ✓ Force provisioning auto-disabled after successful provisioning");
+            }
+            
+            // Note: One-shot force is also auto-cleared by ProvisioningPhase::storeKeyIdAsciiIfEmpty()
         } else {
             Serial.println("[PhaseA] Already provisioned; skipping store (toggle 'f' to force)");
         }
