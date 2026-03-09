@@ -234,7 +234,13 @@ namespace {
         Serial.println("[PhaseA] Step2: Signature GET_CHALLENGE (Lc=24 challenge)");
         uint8_t vehicleId[8];
         uint8_t nonce[16];
-        for (int i = 0; i < 8; ++i) vehicleId[i] = (uint8_t)esp_random();
+        // Ensure globally unique vehicleId derived from ECU device key
+        ProvisioningPhase::ensureVehicleId();
+        bool haveVid = ProvisioningPhase::getVehicleId(vehicleId, sizeof(vehicleId));
+        if (!haveVid) {
+            // Fallback: random if derivation not yet available
+            for (int i = 0; i < 8; ++i) vehicleId[i] = (uint8_t)esp_random();
+        }
         for (int i = 0; i < 16; ++i) nonce[i] = (uint8_t)esp_random();
 
         uint8_t challenge[24];
@@ -341,6 +347,12 @@ namespace {
                 Serial.printf("  keyId: %s\n", haveKid ? kid.c_str() : "<none>");
                 Serial.printf("  pubKey: %s (len=%u)\n", (pubLen == 65 && pub[0] == 0x04) ? "present" : "<none>", (unsigned)pubLen);
                 Serial.printf("  certLen: %u\n", (unsigned)certLen);
+                uint8_t vid[8];
+                if (ProvisioningPhase::getVehicleId(vid, sizeof(vid))) {
+                    Serial.print("  vehicleId: "); printHex(vid, sizeof(vid));
+                } else {
+                    Serial.println("  vehicleId: <none>");
+                }
             } else if (c == 'f') {
                 forceProvisionPersistent = !forceProvisionPersistent;
                 Serial.printf("[Admin] Persistent force provisioning: %s\n", forceProvisionPersistent ? "ON" : "OFF");
@@ -380,6 +392,16 @@ namespace NfcSession {
 
         ProvisioningPhase::begin();
         esp_log_level_set("Preferences", ESP_LOG_NONE); // suppress noisy NVS NOT_FOUND logs
+
+        // Ensure and display vehicleId at startup for diagnostics
+        ProvisioningPhase::ensureVehicleId();
+        uint8_t vid[8];
+        if (ProvisioningPhase::getVehicleId(vid, sizeof(vid))) {
+            Serial.print("[PhaseA] vehicleId: ");
+            printHex(vid, sizeof(vid));
+        } else {
+            Serial.println("[PhaseA] vehicleId: <not available>");
+        }
 
         bootMillis = millis(); // mark startup time to guard serial noise
 

@@ -15,6 +15,7 @@ namespace {
   const char* kNs = "prov";
   const char* kKeyPem = "ec_priv";
   const char* kKeyId  = "key_id";
+  const char* kVehicleIdKey = "vehicle_id";
 
   mbedtls_pk_context keypair;
   mbedtls_entropy_context entropy;
@@ -236,6 +237,70 @@ bool validateStoredCertMatchesStoredPub() {
   bool ok = validateCertPublicKeyMatchesPub(buf, certLen, pub);
   free(buf);
   return ok;
+}
+
+bool ensureVehicleId() {
+  prefs.begin(kNs, false);
+  size_t len = prefs.getBytesLength(kVehicleIdKey);
+  if (len == 8) { prefs.end(); return true; }
+
+  // Derive vehicleId from ECU public key fingerprint (first 8 bytes of SHA-256(pub65))
+  static uint8_t pemBuf[1600];
+  size_t pemLen = prefs.getString(kKeyPem, "").length();
+  // If private key not yet ensured, call begin() earlier in app; here we try reading saved PEM
+  String privPem = "";
+  prefs.end();
+  prefs.begin(kNs, true);
+  privPem = prefs.getString(kKeyPem, "");
+  prefs.end();
+  if (privPem.length() == 0) return false;
+
+  memcpy(pemBuf, privPem.c_str(), privPem.length()+1);
+
+  mbedtls_pk_context pk; mbedtls_pk_init(&pk);
+  if (mbedtls_pk_parse_key(&pk, pemBuf, privPem.length()+1, nullptr, 0) != 0) {
+    mbedtls_pk_free(&pk); return false; }
+  if (!mbedtls_pk_can_do(&pk, MBEDTLS_PK_ECKEY)) {
+    mbedtls_pk_free(&pk); return false; }
+
+  mbedtls_ecp_keypair* eck = mbedtls_pk_ec(pk);
+  unsigned char pub65[65]; size_t olen = 0;
+  if (mbedtls_ecp_point_write_binary(&eck->grp, &eck->Q,
+        MBEDTLS_ECP_PF_UNCOMPRESSED, &olen, pub65, sizeof(pub65)) != 0 || olen != 65) {
+    mbedtls_pk_free(&pk); return false; }
+
+  unsigned char hash[32];
+  mbedtls_sha256_context sha; mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts(&sha, 0);
+  mbedtls_sha256_update(&sha, pub65, 65);
+  mbedtls_sha256_finish(&sha, hash);
+  mbedtls_sha256_free(&sha);
+  mbedtls_pk_free(&pk);
+
+  uint8_t vehicleId[8];
+  memcpy(vehicleId, hash, sizeof(vehicleId));
+  prefs.begin(kNs, false);
+  prefs.putBytes(kVehicleIdKey, vehicleId, sizeof(vehicleId));
+  prefs.end();
+  Serial.printf("[PhaseA] Derived and stored vehicleId: %02X%02X%02X%02X%02X%02X%02X%02X\n",
+    vehicleId[0],vehicleId[1],vehicleId[2],vehicleId[3],vehicleId[4],vehicleId[5],vehicleId[6],vehicleId[7]);
+  return true;
+}
+
+bool getVehicleId(uint8_t* out, size_t outLen) {
+  if (!out || outLen < 8) return false;
+  prefs.begin(kNs, true);
+  size_t len = prefs.getBytesLength(kVehicleIdKey);
+  if (len != 8) { prefs.end(); return false; }
+  prefs.getBytes(kVehicleIdKey, out, 8);
+  prefs.end();
+  return true;
+}
+
+void clearVehicleId() {
+  prefs.begin(kNs, false);
+  prefs.remove(kVehicleIdKey);
+  prefs.end();
 }
 
 // Minimal helper wrapping current working flow

@@ -34,6 +34,15 @@ namespace ProvisioningPhase {
 
   // Read-back helpers for diagnostics
   bool getKeyId(String& out);
+    // Ensure a stable 8-byte vehicleId exists (derived from ECU public key fingerprint).
+    // Returns true on success.
+    bool ensureVehicleId();
+
+    // Retrieve stored vehicleId (8 bytes). Returns true if available and copied to out.
+    bool getVehicleId(uint8_t* out, size_t outLen);
+
+    // Clear stored vehicleId (for testing/reset).
+    void clearVehicleId();
   // Returns number of bytes copied (0 if missing). Expects max>=65 for full key.
   size_t getPhonePubRaw(uint8_t* out, size_t max);
   // Returns cert chain length (0 if missing). If 'out' provided and max>=len, copies into out.

@@ -13,7 +13,7 @@
 
 namespace {
   // Device name and services
-  const char* kDeviceName = "ESP-Smart-Car-ECU";
+  const char* kDeviceName = "ESP-Smart-Car-ECU-2";
 
   bool s_bleStarted = false;
 }
