@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:smart_car_app/screen/profile.dart';
+import 'package:smart_car_app/screen/test_phase_ab.dart';
 import 'package:smart_car_app/widgets/car_dialogs.dart';
 import 'package:smart_car_app/widgets/dashboard_widgets.dart';
 import 'package:smart_car_app/service/car_service.dart';
@@ -158,6 +159,15 @@ class _DashboardState extends State<Dashboard> {
       elevation: 0,
       centerTitle: false,
       actions: [
+        IconButton(
+          icon: const Icon(Icons.science_outlined, color: Color(0xFF273671)),
+          tooltip: 'Test Phase A/B',
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const TestPhaseABScreen()),
+            );
+          },
+        ),
         IconButton(
           icon: const Icon(Icons.notifications_outlined, color: Color(0xFF273671)),
           onPressed: () {

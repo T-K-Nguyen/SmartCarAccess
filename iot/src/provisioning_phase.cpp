@@ -13,9 +13,13 @@
 namespace {
   Preferences prefs;
   const char* kNs = "prov";
+  // Deprecated: device-side private key storage (when ECU generated keypair)
   const char* kKeyPem = "ec_priv";
   const char* kKeyId  = "key_id";
+  const char* kForceProvFlag = "force_prov";
+  const char* kOneShotForce = "oneshot_force";
 
+  // Deprecated state for device-side keypair; no longer used
   mbedtls_pk_context keypair;
   mbedtls_entropy_context entropy;
   mbedtls_ctr_drbg_context drbg;
@@ -28,45 +32,16 @@ namespace {
     return s;
   }
 
-  bool ensureKeypair() {
-    prefs.begin(kNs, false);
-    String privPem = prefs.getString(kKeyPem, "");
-    prefs.end();
-
-    mbedtls_pk_init(&keypair);
-    mbedtls_entropy_init(&entropy);
-    mbedtls_ctr_drbg_init(&drbg);
-    const char *pers = "provA";
-    mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
-                          (const unsigned char*)pers, strlen(pers));
-
-    if (privPem.length() > 0) {
-      if (mbedtls_pk_parse_key(&keypair,
-            (const unsigned char*)privPem.c_str(), privPem.length()+1,
-            nullptr, 0) == 0) {
-        Serial.println("[PhaseA] Loaded existing ECC keypair");
-        return true;
-      }
-    }
-    if (mbedtls_pk_setup(&keypair, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY)) != 0) return false;
-    if (mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1, mbedtls_pk_ec(keypair), mbedtls_ctr_drbg_random, &drbg) != 0) return false;
-
-    static unsigned char buf[1600]; memset(buf, 0, sizeof(buf));
-    if (mbedtls_pk_write_key_pem(&keypair, buf, sizeof(buf)) == 0) {
-      prefs.begin(kNs, false);
-      prefs.putString(kKeyPem, (char*)buf);
-      prefs.end();
-      Serial.println("[PhaseA] Generated ECC keypair and saved to NVS");
-    }
-    return true;
-  }
+  // Device no longer generates/stores a signing keypair.
+  // Authentication relies on Android-keystore-held private key; ECU stores phone public key.
+  bool ensureKeypair() { return false; }
 }
 
 namespace ProvisioningPhase {
 
 void begin() {
-  keysReady = ensureKeypair();
-  if (!keysReady) Serial.println("[PhaseA] ECC init failed (continuing without keys)");
+  // No device-side keypair initialization needed.
+  Serial.println("[ProvisioningPhase] Using Android Keystore for signing; ECU stores phone pubkey only");
 }
 
 bool isProvisioned() {
@@ -78,22 +53,36 @@ bool isProvisioned() {
 
 bool storeKeyIdHexIfEmpty(const uint8_t* bytes, size_t len) {
   if (!bytes || len == 0) return false;
-  if (isProvisioned()) return false;
+  // Allow re-provisioning if force mode is active
+  bool forceMode = isForceProvisioning();
+  if (isProvisioned() && !forceMode) return false;
   String hex = toHex(bytes, len);
   prefs.begin(kNs, false);
   bool ok = prefs.putString(kKeyId, hex) > 0;
+  // Clear one-shot force flag after successful provisioning
+  if (ok && prefs.isKey(kOneShotForce)) {
+    prefs.remove(kOneShotForce);
+    Serial.println("[PhaseA] One-shot force cleared after provisioning");
+  }
   prefs.end();
-  if (ok) Serial.printf("[PhaseA] Stored phone keyId as hex: %s\n", hex.c_str());
+  if (ok) Serial.printf("[PhaseA] Stored phone keyId as hex: %s%s\n", hex.c_str(), forceMode ? " (FORCED)" : "");
   return ok;
 }
 
 bool storeKeyIdAsciiIfEmpty(const char* ascii) {
   if (!ascii || !*ascii) return false;
-  if (isProvisioned()) return false;
+  // Allow re-provisioning if force mode is active
+  bool forceMode = isForceProvisioning();
+  if (isProvisioned() && !forceMode) return false;
   prefs.begin(kNs, false);
   bool ok = prefs.putString(kKeyId, ascii) > 0;
+  // Clear one-shot force flag after successful provisioning
+  if (ok && prefs.isKey(kOneShotForce)) {
+    prefs.remove(kOneShotForce);
+    Serial.println("[PhaseA] One-shot force cleared after provisioning");
+  }
   prefs.end();
-  if (ok) Serial.printf("[PhaseA] Stored phone keyId (ascii): %s\n", ascii);
+  if (ok) Serial.printf("[PhaseA] Stored phone keyId (ascii): %s%s\n", ascii, forceMode ? " (FORCED)" : "");
   return ok;
 }
 
@@ -153,6 +142,7 @@ bool verifySignatureP256(const uint8_t* pub65,
 
 void clearAll() {
   prefs.begin(kNs, false);
+  // Retain compatibility: remove legacy device key if present
   if (prefs.isKey(kKeyPem)) prefs.remove(kKeyPem);
   if (prefs.isKey(kKeyId)) prefs.remove(kKeyId);
   if (prefs.isKey("phone_pub_raw")) prefs.remove("phone_pub_raw");
@@ -165,6 +155,41 @@ void clearProvisionedOnly() {
   if (prefs.isKey(kKeyId)) prefs.remove(kKeyId);
   if (prefs.isKey("phone_pub_raw")) prefs.remove("phone_pub_raw");
   if (prefs.isKey("phone_cert_chain")) prefs.remove("phone_cert_chain");
+  prefs.end();
+}
+
+void clearProvisionedData() {
+  // Alias for clearProvisionedOnly (for FSM compatibility)
+  clearProvisionedOnly();
+}
+
+bool setForceProvisioningFlag(bool enable) {
+  prefs.begin(kNs, false);
+  bool ok = prefs.putBool(kForceProvFlag, enable);
+  prefs.end();
+  if (ok) {
+    Serial.printf("[ProvisioningPhase] Force provisioning flag set to: %s\n", enable ? "ENABLED" : "DISABLED");
+  }
+  return ok;
+}
+
+bool isForceProvisioning() {
+  prefs.begin(kNs, true);
+  bool forced = prefs.getBool(kForceProvFlag, false);
+  bool oneShot = prefs.getBool(kOneShotForce, false);
+  prefs.end();
+  return forced || oneShot;
+}
+
+void setOneShotForce(bool enable) {
+  prefs.begin(kNs, false);
+  if (enable) {
+    prefs.putBool(kOneShotForce, true);
+    Serial.println("[ProvisioningPhase] One-shot force provisioning ARMED");
+  } else {
+    if (prefs.isKey(kOneShotForce)) prefs.remove(kOneShotForce);
+    Serial.println("[ProvisioningPhase] One-shot force provisioning CLEARED");
+  }
   prefs.end();
 }
 
@@ -298,27 +323,9 @@ bool runOnceWithHce(PN532& nfc, const uint8_t* aid, size_t aidLen, uint32_t wait
 }
 
 size_t getDevicePrivateKeyPEM(uint8_t* out, size_t maxLen) {
-  if (!out || maxLen == 0) return 0;
-  
-  prefs.begin(kNs, true); // read-only
-  String privPem = prefs.getString(kKeyPem, "");
-  prefs.end();
-  
-  if (privPem.length() == 0) {
-    Serial.println("[ProvisioningPhase] No device private key found");
-    return 0;
-  }
-  
-  // Return PEM with null terminator for mbedTLS parsing
-  size_t pemLen = privPem.length() + 1; // +1 for null terminator
-  if (pemLen > maxLen) {
-    Serial.printf("[ProvisioningPhase] Private key too large (%u > %u)\n", 
-                  (unsigned)pemLen, (unsigned)maxLen);
-    return 0;
-  }
-  
-  memcpy(out, privPem.c_str(), pemLen);
-  return pemLen;
+  // Deprecated: device does not hold a private key anymore.
+  (void)out; (void)maxLen;
+  return 0;
 }
 
 } // namespace

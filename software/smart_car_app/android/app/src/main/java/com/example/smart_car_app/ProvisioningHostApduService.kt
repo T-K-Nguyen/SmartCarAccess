@@ -76,6 +76,17 @@ class ProvisioningHostApduService : HostApduService() {
 
     private fun handleGetChallenge(lc: Int, data: ByteArray): ByteArray {
         if (!aidSelected) return SW_UNKNOWN
+        
+        // SECURITY: Require user to be logged in for ALL provisioning steps
+        // This ensures user must open app and authenticate before provisioning
+        if (!isUserLoggedIn()) {
+            if (!isTestBypassEnabled()) {
+                Log.w(TAG, "[PhaseA] SECURITY: User not logged in, provisioning denied")
+                return SW_SECURITY_STATUS_NOT_SATISFIED
+            }
+            Log.w(TAG, "[PhaseA] TEST BYPASS: proceeding while not logged in (DEBUG MODE ONLY)")
+        }
+        
         return if (lc == 0) {
             // Base credentials (keyId + pub + empty cert)
             val base = ProvisioningResponseBuilder.buildBaseCredentialsPacket(this)
@@ -83,11 +94,6 @@ class ProvisioningHostApduService : HostApduService() {
             base + SW_SUCCESS
         } else {
             // Signature-only: challenge = incoming data
-            if (!isUserLoggedIn()) {
-                // Still enforce login for the sensitive signature step unless test mode bypass
-                if (!isTestBypassEnabled()) return SW_SECURITY_STATUS_NOT_SATISFIED
-                Log.w(TAG, "[PhaseA] TEST BYPASS: proceeding with signature while not logged in")
-            }
             Log.i(TAG, "[PhaseA] challenge(${lc}): ${data.toHex()}")
             val pkt = ProvisioningResponseBuilder.buildSignaturePacket(this, data)
             // Validate length prefix (BIG-endian) vs actual DER length
@@ -129,12 +135,17 @@ class ProvisioningHostApduService : HostApduService() {
     }
 
     private fun isTestBypassEnabled(): Boolean {
-        // Allow bypass when either app is debuggable (ApplicationInfo.FLAG_DEBUGGABLE) or explicit test mode preference.
+        // PRODUCTION: Only allow bypass in debug builds (BuildConfig.DEBUG)
+        // Remove test_mode preference for production security
         return try {
-            val testPrefs = getSharedPreferences("smart_car_test", MODE_PRIVATE)
-            val prefBypass = testPrefs.getBoolean("test_mode", false)
             val isDebuggable = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
-            prefBypass || isDebuggable
+            if (!isDebuggable) {
+                // Production build - NO BYPASS
+                return false
+            }
+            // Debug build - allow explicit test mode preference
+            val testPrefs = getSharedPreferences("smart_car_test", MODE_PRIVATE)
+            testPrefs.getBoolean("test_mode", false) || isDebuggable
         } catch (e: Exception) { false }
     }
 

@@ -1,4 +1,4 @@
-import 'package:smart_car_app/screen/login.dart';
+import 'package:smart_car_app/screen/dashboard.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:smart_car_app/service/nfc_provisioning_service.dart';
@@ -50,7 +50,7 @@ class MyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
         useMaterial3: true,
       ),
-      home: LogIn()
+      home: Dashboard()
     );
   }
 }
