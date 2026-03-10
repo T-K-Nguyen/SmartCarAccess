@@ -86,7 +86,7 @@ class MainActivity : FlutterActivity() {
                         readerModeEnabled = false
                         if (isForeground) {
                             disableReaderMode()
-                            disableForegroundDispatch()
+                            enableForegroundDispatch()
                         }
                         result.success(true)
                     }
@@ -177,11 +177,11 @@ class MainActivity : FlutterActivity() {
             }
         }
 
-        // Suppress system NFC tag UI while app is foreground, unless HCE session is active
+        // Suppress system NFC tag UI while app is foreground
+        enableForegroundDispatch()
         if (!MasterCardSession.isActive()) {
             readerModeEnabled = true
             enableReaderMode()
-            enableForegroundDispatch()
         }
     }
     

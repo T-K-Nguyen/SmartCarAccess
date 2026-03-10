@@ -34,11 +34,13 @@ class MasterCardProvisioningService {
   static const MethodChannel _readerChannel = MethodChannel('smartcar/nfc_reader');
   static const String _pendingPrefix = 'pending_mastercard_';
   static final FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  Completer<MasterCardPayload>? _activeCompleter;
 
   Future<MasterCardPayload> readMasterCard({
     Duration timeout = const Duration(seconds: 30),
   }) async {
     final completer = Completer<MasterCardPayload>();
+    _activeCompleter = completer;
 
     // Enable reader mode to suppress system UI while scanning
     await _readerChannel.invokeMethod('enableReaderMode');
@@ -63,6 +65,7 @@ class MasterCardProvisioningService {
           completer.completeError(e);
         } finally {
           await NfcManager.instance.stopSession();
+          _activeCompleter = null;
         }
       },
       onError: (error) async {
@@ -70,13 +73,24 @@ class MasterCardProvisioningService {
           completer.completeError(error);
         }
         await NfcManager.instance.stopSession();
+        _activeCompleter = null;
       },
     );
 
     return completer.future.timeout(timeout, onTimeout: () async {
       await NfcManager.instance.stopSession();
+      _activeCompleter = null;
       throw TimeoutException('Timed out waiting for master card');
     });
+  }
+
+  Future<void> cancelReadMasterCard() async {
+    final completer = _activeCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.completeError(StateError('Master card scan cancelled'));
+    }
+    _activeCompleter = null;
+    await NfcManager.instance.stopSession();
   }
 
   Future<void> savePendingPayload(String carId, MasterCardPayload payload) async {

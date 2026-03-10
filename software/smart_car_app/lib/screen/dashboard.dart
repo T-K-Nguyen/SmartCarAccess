@@ -355,9 +355,9 @@ class _DashboardState extends State<Dashboard> {
                     children: [
                       VehicleStatusCard(
                         vehicle: car,
-                        onTap: () => _showCarControlDialog(car),
+                        onTap: () => _handleVehicleControlTap(car),
                         onLockToggle: () => _toggleLock(car),
-                        onControl: () => _showCarControlDialog(car),
+                        onControl: () => _handleVehicleControlTap(car),
                         onDelete: () => _confirmDeleteVehicle(car),
                         isProvisioned: provisioned,
                       ),
@@ -701,6 +701,19 @@ class _DashboardState extends State<Dashboard> {
     }
   }
 
+  void _handleVehicleControlTap(Map<String, dynamic> car) {
+    if (car['provisioned'] != true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Vehicle is not provisioned yet. Please provision it first.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+    _showCarControlDialog(car);
+  }
+
   Future<void> _confirmDeleteVehicle(Map<String, dynamic> car) async {
     final name = car['name']?.toString() ?? 'this vehicle';
     final confirmed = await showDialog<bool>(
@@ -852,9 +865,9 @@ class _DashboardState extends State<Dashboard> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const AlertDialog(
-        title: Text('Scan Master Card'),
-        content: SizedBox(
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Scan Master Card'),
+        content: const SizedBox(
           height: 140,
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -873,6 +886,24 @@ class _DashboardState extends State<Dashboard> {
             ],
           ),
         ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await _masterCardService.cancelReadMasterCard();
+              if (Navigator.of(dialogContext).canPop()) {
+                Navigator.of(dialogContext).pop();
+              }
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Master card scan cancelled.'),
+                  backgroundColor: Colors.orange,
+                ),
+              );
+            },
+            child: const Text('Cancel scan'),
+          ),
+        ],
       ),
     );
 
