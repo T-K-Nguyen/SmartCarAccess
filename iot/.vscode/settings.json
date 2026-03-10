@@ -8,5 +8,7 @@
         "platformio-ide.monitor.autoStart": false,
         // Prevent Python extension from auto-activating venv in new terminals,
         // which can inject a line like '& <venv>\\Scripts\\Activate.ps1' into stdin
-        "python.terminal.activateEnvironment": false
+        "python.terminal.activateEnvironment": false,
+        "idf.currentSetup": "c:\\Users\\thuan\\v5.5.1\\esp-idf",
+        "cmake.sourceDirectory": "C:/WORKS/Fourth_Year/Thesis/project/testing/YoloUNO_PlatformIO/iot/.pio/libdeps/yolo_uno/Unity"
 }
