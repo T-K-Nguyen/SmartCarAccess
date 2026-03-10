@@ -5,6 +5,8 @@ import android.util.Log
 import com.smartcaraccess.KeystoreBridge
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * ProvisioningResponseBuilder - Build APDU response packets for Phase A (NFC Provisioning)
@@ -98,6 +100,56 @@ object ProvisioningResponseBuilder {
         Log.d(TAG, "   Signature length (BE): ${signature.size}")
         Log.d(TAG, "   Signature: ${signature.toHex()}")
         
+        return packet
+    }
+
+    /**
+     * Build signature packet with HMAC for master-card provisioning.
+     * Format: [mac(32) + sigLen(2, big-endian) + DER_signature]
+     * MAC = HMAC_SHA256(masterSecret, challenge || phonePub65)
+     */
+    fun buildSignaturePacketWithMac(
+        context: Context,
+        challenge: ByteArray,
+        masterSecret: ByteArray
+    ): ByteArray {
+        Log.d(TAG, "Building signature+MAC packet for master-card provisioning")
+
+        // Ensure key exists in Keystore and fetch phone public key for binding
+        KeystoreBridge.ensurePhaseAKey()
+        val phonePub65 = KeystoreBridge.getPhaseAPublicKey65()
+        if (phonePub65 == null) {
+            Log.e(TAG, "Failed to get phone public key for MAC binding")
+            return ByteArray(0)
+        }
+
+        val signature = KeystoreBridge.signPhaseA(challenge)
+        if (signature == null) {
+            Log.e(TAG, "Failed to sign challenge")
+            return ByteArray(0)
+        }
+
+        val macInput = ByteArray(challenge.size + phonePub65.size)
+        System.arraycopy(challenge, 0, macInput, 0, challenge.size)
+        System.arraycopy(phonePub65, 0, macInput, challenge.size, phonePub65.size)
+
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(masterSecret, "HmacSHA256"))
+        val macOut = mac.doFinal(macInput)
+
+        val packet = ByteArray(32 + 2 + signature.size)
+        var offset = 0
+        System.arraycopy(macOut, 0, packet, offset, 32)
+        offset += 32
+
+        packet[offset++] = ((signature.size shr 8) and 0xFF).toByte()
+        packet[offset++] = (signature.size and 0xFF).toByte()
+        System.arraycopy(signature, 0, packet, offset, signature.size)
+
+        Log.i(TAG, "✓ Signature+MAC packet built: ${packet.size} bytes")
+        Log.d(TAG, "   MAC: ${macOut.toHex()}")
+        Log.d(TAG, "   Signature length (BE): ${signature.size}")
+
         return packet
     }
     

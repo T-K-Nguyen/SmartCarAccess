@@ -95,6 +95,29 @@ class ProvisioningHostApduService : HostApduService() {
         } else {
             // Signature-only: challenge = incoming data
             Log.i(TAG, "[PhaseA] challenge(${lc}): ${data.toHex()}")
+            // Master-card mode: include HMAC binding of challenge + phone pub
+            if (MasterCardSession.isActive()) {
+                val masterSecret = MasterCardSession.getMasterSecret()
+                val masterVid = MasterCardSession.getVehicleId()
+                if (masterSecret == null || masterVid == null) {
+                    Log.w(TAG, "[PhaseA] Master session inactive after check")
+                    return SW_SECURITY_STATUS_NOT_SATISFIED
+                }
+                if (data.size < 24) {
+                    Log.w(TAG, "[PhaseA] Challenge too short for master provisioning: ${data.size}")
+                    return SW_UNKNOWN
+                }
+                val challengeVid = data.copyOfRange(0, 8)
+                if (!challengeVid.contentEquals(masterVid)) {
+                    Log.w(TAG, "[PhaseA] VehicleId mismatch for master provisioning")
+                    return SW_SECURITY_STATUS_NOT_SATISFIED
+                }
+                val pkt = ProvisioningResponseBuilder.buildSignaturePacketWithMac(this, data, masterSecret)
+                Log.i(TAG, "[PhaseA] OUT Master pktLen=${pkt.size}")
+                return pkt + SW_SUCCESS
+            }
+
+            // Legacy signature-only response
             val pkt = ProvisioningResponseBuilder.buildSignaturePacket(this, data)
             // Validate length prefix (BIG-endian) vs actual DER length
             if (pkt.size >= 2) {

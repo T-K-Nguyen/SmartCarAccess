@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:smart_car_app/screen/profile.dart';
 import 'package:smart_car_app/screen/test_phase_ab.dart';
+import 'package:smart_car_app/screen/master_card_flow.dart';
 import 'package:smart_car_app/widgets/car_dialogs.dart';
 import 'package:smart_car_app/widgets/dashboard_widgets.dart';
 import 'package:smart_car_app/service/car_service.dart';
 import 'package:smart_car_app/service/initial_data_helper.dart';
+import 'package:smart_car_app/service/master_card_provisioning.dart';
+import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 class Dashboard extends StatefulWidget {
@@ -17,10 +20,12 @@ class Dashboard extends StatefulWidget {
 class _DashboardState extends State<Dashboard> {
   int _currentIndex = 0;
   final CarService _carService = CarService();
+  final MasterCardProvisioningService _masterCardService = MasterCardProvisioningService();
   
   List<Map<String, dynamic>> _cars = [];
   List<Map<String, dynamic>> _digitalKeys = [];
   bool _isLoading = true;
+  final Map<String, MasterCardPayload> _pendingVehicleProvision = {};
 
   @override
   void initState() {
@@ -40,31 +45,33 @@ class _DashboardState extends State<Dashboard> {
       (cars) {
         print('Loaded ${cars.length} cars: $cars'); // Debug log
         if (mounted) {
-          setState(() {
-            _cars = cars.map((car) {
-              // Convert color string to Color object if needed
-              if (car['color'] is String) {
-                switch (car['color']) {
-                  case 'blue':
-                    car['color'] = Colors.blue;
-                    break;
-                  case 'purple':
-                    car['color'] = Colors.purple;
-                    break;
-                  case 'orange':
-                    car['color'] = Colors.orange;
-                    break;
-                  case 'green':
-                    car['color'] = Colors.green;
-                    break;
-                  default:
-                    car['color'] = Colors.blue;
-                }
+          final normalizedCars = cars.map((car) {
+            // Convert color string to Color object if needed
+            if (car['color'] is String) {
+              switch (car['color']) {
+                case 'blue':
+                  car['color'] = Colors.blue;
+                  break;
+                case 'purple':
+                  car['color'] = Colors.purple;
+                  break;
+                case 'orange':
+                  car['color'] = Colors.orange;
+                  break;
+                case 'green':
+                  car['color'] = Colors.green;
+                  break;
+                default:
+                  car['color'] = Colors.blue;
               }
-              return car;
-            }).toList();
+            }
+            return car;
+          }).toList();
+          setState(() {
+            _cars = normalizedCars;
             _isLoading = false;
           });
+          _refreshPendingProvision(normalizedCars);
         }
       },
       onError: (error) {
@@ -337,11 +344,44 @@ class _DashboardState extends State<Dashboard> {
                 physics: const NeverScrollableScrollPhysics(),
                 itemCount: _cars.length,
                 itemBuilder: (context, index) {
-                  return VehicleStatusCard(
-                    vehicle: _cars[index],
-                    onTap: () => _showCarControlDialog(_cars[index]),
-                    onLockToggle: () => _toggleLock(_cars[index]),
-                    onControl: () => _showCarControlDialog(_cars[index]),
+                  final car = _cars[index];
+                  final carId = car['id'] as String?;
+                  final provisioned = car['provisioned'] == true;
+                  final pendingPayload = (carId != null)
+                      ? _pendingVehicleProvision[carId]
+                      : null;
+
+                  return Column(
+                    children: [
+                      VehicleStatusCard(
+                        vehicle: car,
+                        onTap: () => _showCarControlDialog(car),
+                        onLockToggle: () => _toggleLock(car),
+                        onControl: () => _showCarControlDialog(car),
+                        onDelete: () => _confirmDeleteVehicle(car),
+                        isProvisioned: provisioned,
+                      ),
+                      if (!provisioned && pendingPayload != null) ...[
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 16),
+                          child: SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton.icon(
+                              onPressed: () => _startProvisionForVehicle(car, pendingPayload),
+                              icon: const Icon(Icons.nfc),
+                              label: const Text('Provision for this vehicle'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF273671),
+                                foregroundColor: Colors.white,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
                   );
                 },
               ),
@@ -353,13 +393,31 @@ class _DashboardState extends State<Dashboard> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Digital Keys',
-          style: TextStyle(
-            fontSize: 20,
-            fontWeight: FontWeight.bold,
-            color: Color(0xFF273671),
-          ),
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'Digital Keys',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF273671),
+                ),
+              ),
+            ),
+            ElevatedButton.icon(
+              onPressed: _showAddDigitalKeyDialog,
+              icon: const Icon(Icons.add),
+              label: const Text('Add Key'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF273671),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 16),
         _digitalKeys.isEmpty
@@ -476,6 +534,12 @@ class _DashboardState extends State<Dashboard> {
                 ),
               ),
               _buildStatusChip(key['status']),
+              IconButton(
+                onPressed: () => _confirmDeleteDigitalKey(key),
+                icon: const Icon(Icons.delete_outline),
+                color: Colors.red[400],
+                tooltip: 'Delete key',
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -637,6 +701,100 @@ class _DashboardState extends State<Dashboard> {
     }
   }
 
+  Future<void> _confirmDeleteVehicle(Map<String, dynamic> car) async {
+    final name = car['name']?.toString() ?? 'this vehicle';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Vehicle'),
+        content: Text('Are you sure you want to delete $name? This will remove its digital keys too.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+    try {
+      await _carService.deleteCar(car['id']);
+      final carId = car['id']?.toString();
+      if (carId != null) {
+        await _masterCardService.clearPendingPayload(carId);
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Vehicle deleted.'),
+          backgroundColor: Color(0xFF273671),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to delete vehicle: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _confirmDeleteDigitalKey(Map<String, dynamic> key) async {
+    final name = key['name']?.toString() ?? 'this key';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Digital Key'),
+        content: Text('Are you sure you want to delete $name?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+    try {
+      await _carService.deleteDigitalKey(key['id']);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Digital key deleted.'),
+          backgroundColor: Color(0xFF273671),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to delete key: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
   void _showAddDigitalKeyDialog() async {
     if (_cars.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -655,6 +813,21 @@ class _DashboardState extends State<Dashboard> {
     
     if (result != null) {
       try {
+        final carId = result['carId']?.toString();
+        final selectedCar = _cars.firstWhere(
+          (c) => c['id'] == carId,
+          orElse: () => {},
+        );
+        if (selectedCar.isEmpty || selectedCar['provisioned'] != true) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Vehicle is not provisioned yet. Please provision it first.'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+          return;
+        }
+
         await _carService.addDigitalKey(result);
         
         ScaffoldMessenger.of(context).showSnackBar(
@@ -663,6 +836,7 @@ class _DashboardState extends State<Dashboard> {
             backgroundColor: Color(0xFF273671),
           ),
         );
+
       } catch (e) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -671,6 +845,91 @@ class _DashboardState extends State<Dashboard> {
           ),
         );
       }
+    }
+  }
+
+  Future<void> _scanMasterCardForVehicle(String carId, String carName) async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        title: Text('Scan Master Card'),
+        content: SizedBox(
+          height: 140,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text(
+                'Hold the master card flat against the back of your phone.',
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: 8),
+              Text(
+                'Keep it still until you feel a vibration.',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final payload = await _masterCardService.readMasterCard(
+        timeout: const Duration(seconds: 60),
+      );
+      await HapticFeedback.mediumImpact();
+      if (!mounted) return;
+      setState(() {
+        _pendingVehicleProvision[carId] = payload;
+      });
+      await _masterCardService.savePendingPayload(carId, payload);
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Master card scanned. Tap “Provision for this vehicle” to continue.'),
+          backgroundColor: const Color(0xFF273671),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Master card scan failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _startProvisionForVehicle(Map<String, dynamic> car, MasterCardPayload payload) async {
+    final carId = car['id']?.toString();
+    final carName = car['name']?.toString() ?? 'Vehicle';
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => MasterCardFlowScreen(
+          payload: payload,
+          targetName: carName,
+        ),
+      ),
+    );
+
+    if (result == true && carId != null) {
+      await _carService.updateCar(carId, {'provisioned': true});
+      await _masterCardService.clearPendingPayload(carId);
+      if (!mounted) return;
+      setState(() {
+        _pendingVehicleProvision.remove(carId);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Vehicle provisioned successfully.'),
+          backgroundColor: Color(0xFF273671),
+        ),
+      );
     }
   }
 
@@ -693,6 +952,36 @@ class _DashboardState extends State<Dashboard> {
     }
     
     return '${date.day}/${date.month}/${date.year}';
+  }
+
+  Future<void> _refreshPendingProvision(List<Map<String, dynamic>> cars) async {
+    final Map<String, bool> provisionedMap = {};
+    for (final car in cars) {
+      final carId = car['id']?.toString();
+      if (carId == null) continue;
+      provisionedMap[carId] = car['provisioned'] == true;
+    }
+
+    final Map<String, MasterCardPayload> nextPending = {};
+    for (final car in cars) {
+      final carId = car['id']?.toString();
+      if (carId == null) continue;
+      if (provisionedMap[carId] == true) {
+        await _masterCardService.clearPendingPayload(carId);
+        continue;
+      }
+      final stored = await _masterCardService.loadPendingPayload(carId);
+      if (stored != null) {
+        nextPending[carId] = stored;
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _pendingVehicleProvision
+        ..clear()
+        ..addAll(nextPending);
+    });
   }
 
   void _showAddCarDialog() {
@@ -798,6 +1087,15 @@ class _DashboardState extends State<Dashboard> {
                     backgroundColor: Color(0xFF273671),
                   ),
                 );
+
+                final cars = await _carService.getUserCars().first;
+                final created = cars.isNotEmpty ? cars.first : null;
+                if (created != null && created['id'] != null) {
+                  await _scanMasterCardForVehicle(
+                    created['id'].toString(),
+                    created['name']?.toString() ?? 'Vehicle',
+                  );
+                }
               } catch (e) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
