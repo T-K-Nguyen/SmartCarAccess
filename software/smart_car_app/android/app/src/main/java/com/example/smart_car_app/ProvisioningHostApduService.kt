@@ -15,6 +15,7 @@ class ProvisioningHostApduService : HostApduService() {
         private val SW_SECURITY_STATUS_NOT_SATISFIED = byteArrayOf(0x69.toByte(), 0x82.toByte()) // Not logged in
         private const val INS_GET_CHALLENGE = 0xCA.toByte()
         private const val INS_READ_BINARY = 0xB0.toByte()
+        private const val INS_PROVISION_RESULT = 0xDA.toByte()
     }
 
     // Track selection
@@ -48,6 +49,7 @@ class ProvisioningHostApduService : HostApduService() {
                 0xA4.toByte() -> handleSelect(commandApdu) // always allow SELECT
                 INS_GET_CHALLENGE -> handleGetChallenge(lc, commandData)
                 INS_READ_BINARY -> handleReadBinary(p1, p2)
+                INS_PROVISION_RESULT -> handleProvisionResult(lc, commandData)
                 else -> SW_INS_NOT_SUPPORTED
             }
         } catch (e: Exception) {
@@ -144,6 +146,19 @@ class ProvisioningHostApduService : HostApduService() {
         if (!aidSelected) return SW_UNKNOWN
         val uid = DataStoreUtil.getOrCreate4ByteUid(this)
         return uid + SW_SUCCESS
+    }
+
+    private fun handleProvisionResult(lc: Int, data: ByteArray): ByteArray {
+        if (!aidSelected) return SW_UNKNOWN
+        if (lc < 1) return SW_UNKNOWN
+        val success = data[0] == 0x01.toByte()
+        val prefs = getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
+        prefs.edit()
+            .putBoolean("flutter.provision_result", success)
+            .putLong("flutter.provision_ts", System.currentTimeMillis())
+            .apply()
+        Log.i(TAG, "[PhaseA] Provision result received: ${if (success) "OK" else "FAIL"}")
+        return SW_SUCCESS
     }
 
     private fun isUserLoggedIn(): Boolean {

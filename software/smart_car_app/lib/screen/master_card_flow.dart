@@ -2,6 +2,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:smart_car_app/service/master_card_provisioning.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 class MasterCardFlowScreen extends StatefulWidget {
   const MasterCardFlowScreen({
@@ -29,6 +31,7 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
   bool _isBusy = false;
   String? _errorMessage;
   bool _provisioningActive = false;
+  int? _provisionStartMs;
 
   Timer? _countdownTimer;
   int _secondsLeft = 60;
@@ -37,6 +40,7 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
   void dispose() {
     _countdownTimer?.cancel();
     _service.clearHceSession();
+    WakelockPlus.disable();
     super.dispose();
   }
 
@@ -49,6 +53,11 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
 
     try {
       await HapticFeedback.mediumImpact();
+      await WakelockPlus.enable();
+      final prefs = await SharedPreferences.getInstance();
+      _provisionStartMs = DateTime.now().millisecondsSinceEpoch;
+      await prefs.setBool('provision_result', false);
+      await prefs.setInt('provision_ts', _provisionStartMs!);
       await _service.activateHceSession(widget.payload, ttl: const Duration(seconds: 60));
       _startCountdown();
       setState(() {
@@ -76,6 +85,7 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
       setState(() {
         _secondsLeft -= 1;
       });
+      await _checkProvisionResult();
       if (_secondsLeft <= 0) {
         timer.cancel();
         await _service.clearHceSession();
@@ -89,8 +99,22 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
     });
   }
 
+  Future<void> _checkProvisionResult() async {
+    if (!_provisioningActive) return;
+    final startMs = _provisionStartMs;
+    if (startMs == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final ok = prefs.getBool('provision_result') ?? false;
+    final ts = prefs.getInt('provision_ts') ?? 0;
+    if (ok && ts >= startMs) {
+      await _finishFlow();
+    }
+  }
+
   Future<void> _finishFlow() async {
     await _service.clearHceSession();
+    await WakelockPlus.disable();
     if (!mounted) return;
     setState(() {
       _step = _FlowStep.success;
@@ -101,6 +125,7 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
   Future<void> _resetFlow() async {
     _countdownTimer?.cancel();
     await _service.clearHceSession();
+    await WakelockPlus.disable();
     if (!mounted) return;
     setState(() {
       _step = _FlowStep.tapCar;

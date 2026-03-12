@@ -86,7 +86,7 @@ class MainActivity : FlutterActivity() {
                         readerModeEnabled = false
                         if (isForeground) {
                             disableReaderMode()
-                            enableForegroundDispatch()
+                            disableForegroundDispatch()
                         }
                         result.success(true)
                     }
