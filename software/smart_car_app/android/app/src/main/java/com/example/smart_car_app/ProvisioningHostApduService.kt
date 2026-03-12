@@ -149,7 +149,9 @@ class ProvisioningHostApduService : HostApduService() {
     }
 
     private fun handleProvisionResult(lc: Int, data: ByteArray): ByteArray {
-        if (!aidSelected) return SW_UNKNOWN
+        if (!aidSelected) {
+            Log.w(TAG, "[PhaseA] Provision result received while AID not selected")
+        }
         if (lc < 1) return SW_UNKNOWN
         val success = data[0] == 0x01.toByte()
         val prefs = getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
