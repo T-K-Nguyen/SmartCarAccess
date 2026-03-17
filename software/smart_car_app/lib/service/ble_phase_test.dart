@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'dart:convert';
+import 'gps_service.dart';
 
 /// Callback for reporting progress during authentication
 typedef ProgressCallback = void Function(String step, String message);
@@ -35,6 +36,7 @@ class BlePhaseTestService {
   static const String charStatusUUID = "0000aaad-1234-5678-9abc-def012345678";
   static const String charChallengeReadUUID = "0000aaae-1234-5678-9abc-def012345678";
   static const String charChallengeWriteUUID = "0000aaaf-1234-5678-9abc-def012345678";
+  static const String charGpsDataUUID = "0000aab0-1234-5678-9abc-def012345678";
 
   // State machine for Phase B
   PhaseB_State _stateBLE = PhaseB_State.PHONE_IDLE;
@@ -55,10 +57,16 @@ class BlePhaseTestService {
   BluetoothCharacteristic? _cStatus;
   BluetoothCharacteristic? _cChallengeRead;
   BluetoothCharacteristic? _cChallengeWrite;
+  BluetoothCharacteristic? _cGpsData;
   
   StreamSubscription? _handshakeSubscription;
   StreamSubscription? _statusSubscription;
   StreamSubscription? _challengeSubscription;
+
+  bool get hasActiveSession =>
+      _sessionEncKey != null && _sessionMacKey != null && _device != null;
+  Uint8List? get sessionEncKey => _sessionEncKey;
+  Uint8List? get sessionMacKey => _sessionMacKey;
 
   /// Test Phase A: NFC Provisioning
   /// 
@@ -193,6 +201,16 @@ class BlePhaseTestService {
         (c) => c.uuid.toString().toLowerCase() == charChallengeWriteUUID.toLowerCase(),
       );
       
+      // GPS data characteristic (optional, may not be available on older firmware)
+      try {
+        _cGpsData = authService.characteristics.firstWhere(
+          (c) => c.uuid.toString().toLowerCase() == charGpsDataUUID.toLowerCase(),
+        );
+        reportProgress('Step 2', '✓ GPS data characteristic found');
+      } catch (e) {
+        reportProgress('Step 2', '⚠ GPS characteristic not available (older firmware)');
+      }
+
       reportProgress('Step 2', '✓ All characteristics found');
       
       // Step 3: Subscribe to notifications
@@ -412,6 +430,116 @@ class BlePhaseTestService {
     }
     
     _reset();
+  }
+
+  /// Send encrypted GPS location data to ESP32
+  /// 
+  /// This method:
+  /// 1. Gets current GPS location using GpsService
+  /// 2. Encrypts and authenticates the location data
+  /// 3. Sends encrypted packet via BLE to ESP32
+  /// 
+  /// Must be called after successful Phase B authentication (session keys ready)
+  Future<bool> sendGpsLocation() async {
+    debugPrint('\n=== Sending GPS Location ===');
+    
+    // Check if we have session keys
+    if (_sessionEncKey == null || _sessionMacKey == null) {
+      debugPrint('[GPS] ERROR: Session keys not available. Run Phase B authentication first.');
+      return false;
+    }
+    
+    // Check if GPS characteristic is available
+    if (_cGpsData == null) {
+      debugPrint('[GPS] ERROR: GPS characteristic not found. Discovering...');
+      
+      if (_device == null) {
+        debugPrint('[GPS] ERROR: No device connected');
+        return false;
+      }
+      
+      try {
+        final services = await _device!.discoverServices();
+        final authService = services.firstWhere(
+          (s) => s.uuid.toString().toLowerCase() == authServiceUUID.toLowerCase(),
+        );
+        
+        _cGpsData = authService.characteristics.firstWhere(
+          (c) => c.uuid.toString().toLowerCase() == charGpsDataUUID.toLowerCase(),
+        );
+        
+        debugPrint('[GPS] ✓ GPS characteristic found');
+      } catch (e) {
+        debugPrint('[GPS] ERROR: Failed to find GPS characteristic: $e');
+        return false;
+      }
+    }
+    
+    try {
+      // Import GPS service
+      final gpsService = GpsService();
+      
+      // Get encrypted location data
+      debugPrint('[GPS] Getting location data...');
+      final gpsPacket = await gpsService.getEncryptedLocationData(
+        _sessionEncKey!,
+        _sessionMacKey!,
+      );
+      
+      if (gpsPacket == null) {
+        debugPrint('[GPS] Failed to get location data');
+        return false;
+      }
+      
+      return sendGpsPacket(gpsPacket);
+      
+    } catch (e) {
+      debugPrint('[GPS] ERROR: $e');
+      return false;
+    }
+  }
+
+  Future<bool> sendGpsPacket(GpsDataPacket gpsPacket) async {
+    if (_sessionEncKey == null || _sessionMacKey == null) {
+      debugPrint('[GPS] ERROR: Session keys not available. Run Phase B authentication first.');
+      return false;
+    }
+
+    if (_cGpsData == null) {
+      debugPrint('[GPS] ERROR: GPS characteristic not found. Discovering...');
+
+      if (_device == null) {
+        debugPrint('[GPS] ERROR: No device connected');
+        return false;
+      }
+
+      try {
+        final services = await _device!.discoverServices();
+        final authService = services.firstWhere(
+          (s) => s.uuid.toString().toLowerCase() == authServiceUUID.toLowerCase(),
+        );
+
+        _cGpsData = authService.characteristics.firstWhere(
+          (c) => c.uuid.toString().toLowerCase() == charGpsDataUUID.toLowerCase(),
+        );
+
+        debugPrint('[GPS] ✓ GPS characteristic found');
+      } catch (e) {
+        debugPrint('[GPS] ERROR: Failed to find GPS characteristic: $e');
+        return false;
+      }
+    }
+
+    try {
+      debugPrint('[GPS] Location: ${gpsPacket.locationString}');
+      debugPrint('[GPS] Encrypted packet size: ${gpsPacket.encryptedData.length} bytes');
+      await _cGpsData!.write(gpsPacket.encryptedData.toList(), withoutResponse: false);
+      debugPrint('[GPS] ✓ GPS data sent successfully to ESP32');
+      return true;
+    } catch (e) {
+      debugPrint('[GPS] ERROR: $e');
+      return false;
+    }
   }
 
   void _reset() {
