@@ -1,7 +1,0 @@
-C:/WORKS/Fourth_Year/Thesis/project/testing/YoloUNO_PlatformIO/iot/build/CMakeFiles/unity.dir
-C:/WORKS/Fourth_Year/Thesis/project/testing/YoloUNO_PlatformIO/iot/build/CMakeFiles/edit_cache.dir
-C:/WORKS/Fourth_Year/Thesis/project/testing/YoloUNO_PlatformIO/iot/build/CMakeFiles/rebuild_cache.dir
-C:/WORKS/Fourth_Year/Thesis/project/testing/YoloUNO_PlatformIO/iot/build/CMakeFiles/list_install_components.dir
-C:/WORKS/Fourth_Year/Thesis/project/testing/YoloUNO_PlatformIO/iot/build/CMakeFiles/install.dir
-C:/WORKS/Fourth_Year/Thesis/project/testing/YoloUNO_PlatformIO/iot/build/CMakeFiles/install/local.dir
-C:/WORKS/Fourth_Year/Thesis/project/testing/YoloUNO_PlatformIO/iot/build/CMakeFiles/install/strip.dir

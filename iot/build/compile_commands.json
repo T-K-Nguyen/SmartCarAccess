@@ -1,8 +1,0 @@
-[
-{
-  "directory": "C:/WORKS/Fourth_Year/Thesis/project/testing/YoloUNO_PlatformIO/iot/build",
-  "command": "C:\\msys64\\ucrt64\\bin\\cc.exe -IC:/WORKS/Fourth_Year/Thesis/project/testing/YoloUNO_PlatformIO/iot/.pio/libdeps/yolo_uno/Unity/src -IC:/WORKS/Fourth_Year/Thesis/project/testing/YoloUNO_PlatformIO/iot/build -g -std=c11 -Waddress -Waggregate-return -Wformat-nonliteral -Wformat-security -Wformat -Winit-self -Wmissing-declarations -Wmissing-include-dirs -Wno-multichar -Wno-parentheses -Wno-type-limits -Wno-unused-parameter -Wunreachable-code -Wwrite-strings -Wpointer-arith -Werror -Wall -o CMakeFiles\\unity.dir\\src\\unity.c.obj -c C:\\WORKS\\Fourth_Year\\Thesis\\project\\testing\\YoloUNO_PlatformIO\\iot\\.pio\\libdeps\\yolo_uno\\Unity\\src\\unity.c",
-  "file": "C:\\WORKS\\Fourth_Year\\Thesis\\project\\testing\\YoloUNO_PlatformIO\\iot\\.pio\\libdeps\\yolo_uno\\Unity\\src\\unity.c",
-  "output": "CMakeFiles\\unity.dir\\src\\unity.c.obj"
-}
-]
