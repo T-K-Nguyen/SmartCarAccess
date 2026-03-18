@@ -17,7 +17,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
   final TextEditingController _deviceAddressController = TextEditingController();
   final ScrollController _logScrollController = ScrollController();
   
-  List<String> _logs = [];
+  final List<String> _logs = [];
   bool _isTestingPhaseA = false;
   bool _isTestingPhaseB = false;
   bool _isScanningDevices = false;
@@ -212,7 +212,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
         }
       } catch (e) {
         _addLog('❌ Lỗi kiểm tra Keystore: $e');
-        throw e;
+        rethrow;
       }
       
     } catch (e) {

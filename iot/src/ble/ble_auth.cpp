@@ -28,6 +28,7 @@ namespace {
   const char* kCharStatusUUID         = "0000aaad-1234-5678-9abc-def012345678"; // Notify: auth status
   const char* kCharChallengeReadUUID  = "0000aaae-1234-5678-9abc-def012345678"; // Read/Notify: ECU sends {vehicleId||nonce}
   const char* kCharChallengeWriteUUID = "0000aaaf-1234-5678-9abc-def012345678"; // Write: phone sends DER signature over challenge
+  const char* kCharGpsDataUUID        = "0000aab0-1234-5678-9abc-def012345678"; // Write: phone sends encrypted GPS data
 
   // GATT characteristic handles
   NimBLECharacteristic* g_cHandshakeRead = nullptr;
@@ -86,6 +87,9 @@ namespace {
   uint32_t s_auth_attempts = 0;
   uint32_t s_auth_successes = 0;
   uint32_t s_auth_failures = 0;
+
+  // GPS data callback
+  BLEAuth::GpsDataCallback s_gps_callback = nullptr;
 
   void print_hex(const char* label, const uint8_t* data, size_t len) {
 #ifdef BLE_AUTH_VERBOSE_DEBUG
@@ -485,6 +489,90 @@ namespace {
     }
   };
 
+  // GPS data callback - receives encrypted location data
+  class GpsDataCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
+      (void)connInfo;
+      std::string v = pCharacteristic->getValue();
+      Serial.printf("[GPS] Received GPS data packet (%u bytes)\n", (unsigned)v.length());
+      
+      // Check if session is ready
+      if (!s_session_keys_ready) {
+        Serial.println("[GPS] ERROR: Session not ready - cannot decrypt GPS data");
+        return;
+      }
+      
+      // Expected format: [encrypted_data(32) | hmac(32)] = 64 bytes total
+      if (v.length() != 64) {
+        Serial.printf("[GPS] ERROR: Invalid packet size. Expected 64 bytes, got %u\n", (unsigned)v.length());
+        return;
+      }
+      
+      const uint8_t* data = (uint8_t*)v.data();
+      const uint8_t* encrypted_data = data;
+      const uint8_t* received_hmac = data + 32;
+      
+      // Step 1: Verify HMAC
+      uint8_t computed_hmac[32];
+      if (!CryptoUtils::hmac_sha256(s_session_key_mac, sizeof(s_session_key_mac),
+                                     encrypted_data, 32, computed_hmac)) {
+        Serial.println("[GPS] ERROR: HMAC computation failed");
+        return;
+      }
+      
+      // Compare HMACs (constant-time comparison)
+      bool hmac_valid = true;
+      for (size_t i = 0; i < 32; i++) {
+        if (computed_hmac[i] != received_hmac[i]) {
+          hmac_valid = false;
+        }
+      }
+      
+      if (!hmac_valid) {
+        Serial.println("[GPS] ERROR: HMAC verification failed - data may be tampered");
+        print_hex("Expected HMAC", computed_hmac, 32);
+        print_hex("Received HMAC", received_hmac, 32);
+        if (s_gps_callback) {
+          s_gps_callback(nullptr, 0, false);
+        }
+        return;
+      }
+      
+      Serial.println("[GPS] ✓ HMAC verified successfully");
+      
+      // Step 2: Decrypt data (XOR with session key)
+      uint8_t decrypted_data[32];
+      for (size_t i = 0; i < 32; i++) {
+        decrypted_data[i] = encrypted_data[i] ^ s_session_key_enc[i % sizeof(s_session_key_enc)];
+      }
+      
+      // Step 3: Parse location data
+      // Format: [latitude(8) | longitude(8) | altitude(4) | accuracy(4) | timestamp(8)]
+      double latitude, longitude;
+      float altitude, accuracy;
+      int64_t timestamp;
+      
+      memcpy(&latitude, decrypted_data, 8);
+      memcpy(&longitude, decrypted_data + 8, 8);
+      memcpy(&altitude, decrypted_data + 16, 4);
+      memcpy(&accuracy, decrypted_data + 20, 4);
+      memcpy(&timestamp, decrypted_data + 24, 8);
+      
+      Serial.println("[GPS] === Decrypted GPS Data ===");
+      Serial.printf("  Latitude:  %.6f\n", latitude);
+      Serial.printf("  Longitude: %.6f\n", longitude);
+      Serial.printf("  Altitude:  %.2f m\n", altitude);
+      Serial.printf("  Accuracy:  %.2f m\n", accuracy);
+      Serial.printf("  Timestamp: %lld\n", timestamp);
+      Serial.println("[GPS] ============================");
+      
+      // Call user callback if registered
+      if (s_gps_callback) {
+        s_gps_callback(decrypted_data, 32, true);
+      }
+    }
+  };
+
   bool verify_challenge_signature_and_finalize() {
     Serial.println("[AUTH] Step H: Verifying challenge signature with stored phone pub");
     if (s_sig_len == 0) { Serial.println("[AUTH] ERROR: No signature"); return false; }
@@ -663,6 +751,14 @@ namespace BLEAuth {
     static ChallengeWriteCallbacks challengeWriteCb;
     cChallengeWrite->setCallbacks(&challengeWriteCb);
 
+    // GPS Data characteristic (phone sends encrypted GPS location)
+    NimBLECharacteristic* cGpsData = pAuth->createCharacteristic(
+      kCharGpsDataUUID,
+      NIMBLE_PROPERTY::WRITE
+    );
+    static GpsDataCallbacks gpsDataCb;
+    cGpsData->setCallbacks(&gpsDataCb);
+
     // Set server callbacks
     static AuthServerCallbacks serverCb;
     server->setCallbacks(&serverCb);
@@ -680,6 +776,7 @@ namespace BLEAuth {
     Serial.printf("[AUTH] Status: %s\n", kCharStatusUUID);
     Serial.printf("[AUTH] Challenge Read: %s\n", kCharChallengeReadUUID);
     Serial.printf("[AUTH] Challenge Write: %s\n", kCharChallengeWriteUUID);
+    Serial.printf("[AUTH] GPS Data: %s\n", kCharGpsDataUUID);
   }
 
   bool isSessionReady() { 
@@ -705,6 +802,11 @@ namespace BLEAuth {
   void resetSession() {
     Serial.println("[AUTH] Manual session reset requested");
     reset_auth_state();
+  }
+
+  void setGpsDataCallback(GpsDataCallback callback) {
+    s_gps_callback = callback;
+    Serial.println("[GPS] GPS data callback registered");
   }
 
   void printStats() {

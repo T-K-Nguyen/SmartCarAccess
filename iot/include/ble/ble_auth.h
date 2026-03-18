@@ -20,6 +20,11 @@ namespace BLEAuth {
   // Reset the current session state (keys, buffers) on disconnect.
   void resetSession();
   
+  // GPS location data callback
+  // Will be called when phone sends encrypted GPS data
+  typedef void (*GpsDataCallback)(const uint8_t* data, size_t len, bool verified);
+  void setGpsDataCallback(GpsDataCallback callback);
+  
   // Debug and statistics
   void printStats();
 }

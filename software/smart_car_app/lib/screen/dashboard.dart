@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:smart_car_app/screen/location.dart';
 import 'package:smart_car_app/screen/profile.dart';
 import 'package:smart_car_app/screen/test_phase_ab.dart';
 import 'package:smart_car_app/screen/master_card_flow.dart';
@@ -118,8 +119,10 @@ class _DashboardState extends State<Dashboard> {
       backgroundColor: Colors.grey[50],
       appBar: _buildAppBar(),
       body: SafeArea(
-        child: _currentIndex == 2 
-            ? const ProfileContent()
+        child: _currentIndex == 3
+          ? const ProfileContent()
+          : _currentIndex == 2
+            ? const LocationContent()
             : _buildDashboardContent(),
       ),
       bottomNavigationBar: _buildBottomNavigationBar(),
@@ -143,12 +146,15 @@ class _DashboardState extends State<Dashboard> {
     String title = '';
     switch (_currentIndex) {
       case 0:
-        title = 'Dashboard';
+        title = 'Home';
         break;
       case 1:
         title = 'Digital Keys';
         break;
       case 2:
+        title = 'Location';
+        break;
+      case 3:
         title = 'Profile';
         break;
     }
@@ -610,12 +616,16 @@ class _DashboardState extends State<Dashboard> {
       unselectedItemColor: Colors.grey,
       items: const [
         BottomNavigationBarItem(
-          icon: Icon(Icons.dashboard),
-          label: 'Dashboard',
+          icon: Icon(Icons.home_outlined),
+          label: 'Home',
         ),
         BottomNavigationBarItem(
           icon: Icon(Icons.vpn_key),
           label: 'Keys',
+        ),
+        BottomNavigationBarItem(
+          icon: Icon(Icons.map_outlined),
+          label: 'Location',
         ),
         BottomNavigationBarItem(
           icon: Icon(Icons.person),
