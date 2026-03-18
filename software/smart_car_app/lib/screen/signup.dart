@@ -58,8 +58,7 @@ class _SignUpState extends State<SignUp> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      body: SingleChildScrollView(
-        child: Column(
+      body: Column(
           children: [
             SizedBox(
                 width: MediaQuery.of(context).size.width,
@@ -235,7 +234,6 @@ class _SignUpState extends State<SignUp> {
             )
           ],
         ),
-      ),
     );
   }
 }

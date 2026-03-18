@@ -3,25 +3,34 @@
 
 #include "nfc_session.h"
 #include "provisioning_phase.h"
+#include "fsm/fsm.h"
+#include "fsm/fsm_integration.h"
 #include <esp_system.h>
 #include <esp_log.h>
 #include <cstring>
+#include <mbedtls/md.h>
 
 namespace {
+    const bool kDebugApdu = true;
     // PN532 objects and session state
     PN532_HSU* hsu = nullptr;
     PN532* nfc = nullptr;
     bool samConfigured = false;
-
-    // Provisioning control flags
-    bool forceProvisionPersistent = false; // toggled with 'f' - stays until toggled off
-    bool forceProvisionOneShot = false;    // armed with 'F' - auto-clears after one success
 
     // Startup guard to ignore early serial noise
     uint32_t bootMillis = 0;
 
     // HCE AID used when SELECTing the phone applet
     uint8_t aid[] = {0xF0,0x01,0x02,0x03,0x04,0x05};
+
+    // Master card binding (must match tag payload)
+    const uint8_t EXPECTED_VEHICLE_ID[8] = {0x56, 0x4E, 0x38, 0x38, 0x38, 0x38, 0x42, 0x4B};
+    const uint8_t MASTER_SECRET[32] = {
+        0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18,
+        0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18,
+        0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18,
+        0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18
+    };
 
     // Small utility: print hex bytes to Serial
     void printHex(const uint8_t* data, size_t len) {
@@ -32,13 +41,38 @@ namespace {
         Serial.println();
     }
 
+    bool hmacSha256(const uint8_t* key, size_t keyLen,
+                    const uint8_t* data, size_t dataLen,
+                    uint8_t* out32) {
+        if (!key || !data || !out32) return false;
+        mbedtls_md_context_t ctx;
+        mbedtls_md_init(&ctx);
+        const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+        if (!info) { mbedtls_md_free(&ctx); return false; }
+        if (mbedtls_md_setup(&ctx, info, 1) != 0) { mbedtls_md_free(&ctx); return false; }
+        int rc = mbedtls_md_hmac_starts(&ctx, key, keyLen);
+        if (rc == 0) rc = mbedtls_md_hmac_update(&ctx, data, dataLen);
+        if (rc == 0) rc = mbedtls_md_hmac_finish(&ctx, out32);
+        mbedtls_md_free(&ctx);
+        return rc == 0;
+    }
+
     // Repeatedly try an INDATAEXCHANGE (APDU) with retry/backoff
     bool apduRetry(const uint8_t* apdu, uint8_t apduLen, uint8_t* resp, uint8_t* respLen,
                                  uint8_t attempts = 3, uint16_t backoffMs = 60) {
         for (uint8_t attempt = 1; attempt <= attempts; ++attempt) {
             uint8_t len = *respLen;
             bool ok = nfc->inDataExchange((uint8_t*)apdu, apduLen, resp, &len);
-            if (ok) {
+            if (kDebugApdu) {
+                Serial.printf("[APDU] try=%u ok=%s len=%u\n", attempt, ok ? "YES" : "NO", len);
+                if (ok && len >= 2) {
+                    Serial.printf("[APDU] SW=%02X%02X\n", resp[len - 2], resp[len - 1]);
+                }
+                if (ok && len > 0 && len <= 40) {
+                    Serial.print("[APDU] resp: "); printHex(resp, len);
+                }
+            }
+            if (ok && len >= 2) {
                 *respLen = len;
                 return true;
             }
@@ -60,7 +94,11 @@ namespace {
     // This prevents the next poll from requiring a "priming" tap.
     bool releaseTarget() {
         // Some libraries return bool; ignore result if not supported.
-        return nfc->inRelease();
+        bool ok = nfc->inRelease();
+        if (kDebugApdu) {
+            Serial.printf("[PN532] inRelease=%s\n", ok ? "OK" : "FAIL");
+        }
+        return ok;
     }
 
     // Wait for a card to appear using adaptive polling. Returns true when stable detected.
@@ -114,6 +152,31 @@ namespace {
         }
     }
 
+    bool selectAid(uint8_t& sw1, uint8_t& sw2, int& payloadLen);
+
+    bool ensureSelected(uint32_t timeoutMs = 2500) {
+        // Fast path: try SELECT immediately in case target is already active.
+        uint8_t sw1 = 0, sw2 = 0; int payloadLen = 0;
+        if (selectAid(sw1, sw2, payloadLen) && sw1 == 0x90 && sw2 == 0x00) {
+            return true;
+        }
+
+        const uint32_t start = millis();
+        while (millis() - start < timeoutMs) {
+            if (!nfc->inListPassiveTarget()) {
+                delay(50);
+                continue;
+            }
+            sw1 = 0; sw2 = 0; payloadLen = 0;
+            if (selectAid(sw1, sw2, payloadLen) && sw1 == 0x90 && sw2 == 0x00) {
+                return true;
+            }
+            releaseTarget();
+            delay(80);
+        }
+        return false;
+    }
+
     // After a session (successful SELECT and optional provisioning), either wait briefly for removal
     // or continue to the next cycle to keep UX snappy. For failed SELECT, just short backoff.
     void postSessionCooldown(bool hadSelectSuccess) {
@@ -144,12 +207,38 @@ namespace {
 
         uint8_t resp[32];
         uint8_t rlen = sizeof(resp);
-        if (!apduRetry(sel, idx, resp, &rlen, 3, 80)) return false;
+        if (!apduRetry(sel, idx, resp, &rlen, 3, 80)) {
+            if (kDebugApdu) Serial.println("[APDU] SELECT failed (no response)");
+            return false;
+        }
 
         sw1 = (rlen >= 2) ? resp[rlen - 2] : 0x00;
         sw2 = (rlen >= 2) ? resp[rlen - 1] : 0x00;
         payloadLen = (rlen >= 2) ? (rlen - 2) : 0;
+        if (kDebugApdu) {
+            Serial.printf("[APDU] SELECT SW=%02X%02X payloadLen=%d\n", sw1, sw2, payloadLen);
+        }
         return true;
+    }
+
+    bool sendProvisionResult() {
+        // Notify phone HCE that provisioning succeeded: INS=0xDA, data=0x01
+        uint8_t sw1a = 0, sw2a = 0; int pla = 0;
+        if (!selectAid(sw1a, sw2a, pla) || sw1a != 0x90 || sw2a != 0x00) {
+            Serial.println("[PhaseA] SELECT before provision result failed");
+            return false;
+        }
+        delay(80);
+        uint8_t apdu[] = {0x00, 0xDA, 0x00, 0x00, 0x01, 0x01};
+        uint8_t resp[16];
+        uint8_t rlen = sizeof(resp);
+        bool ok = apduRetry(apdu, sizeof(apdu), resp, &rlen, 2, 80);
+        if (ok && rlen >= 2) {
+            Serial.printf("[PhaseA] Provision result ack SW=%02X%02X len=%u\n", resp[rlen - 2], resp[rlen - 1], rlen);
+        } else {
+            Serial.println("[PhaseA] Provision result ack failed");
+        }
+        return ok && rlen >= 2 && resp[rlen - 2] == 0x90 && resp[rlen - 1] == 0x00;
     }
 
     // Parse the "Base GET_CHALLENGE" response layout:
@@ -188,7 +277,14 @@ namespace {
     // Execute the two-step provisioning exchange when appropriate.
     void performProvisioningIfNeeded(uint8_t sw1, uint8_t sw2) {
         bool alreadyProvisioned = ProvisioningPhase::isProvisioned();
-        bool shouldForce = (forceProvisionPersistent || forceProvisionOneShot);
+        bool shouldForce = ProvisioningPhase::isForceProvisioning();
+        
+        // If already provisioned and force mode is OFF, reject provisioning attempt
+        if (alreadyProvisioned && !shouldForce) {
+            Serial.println("[PhaseA] ⚠️  Device already provisioned. Use 'f' or 'F' command to force re-provisioning.");
+            return;
+        }
+        
         bool shouldProvision = (shouldForce || !alreadyProvisioned) && (sw1 == 0x90 && sw2 == 0x00);
         if (!shouldProvision) return;
 
@@ -196,13 +292,44 @@ namespace {
         // Step 1: Base GET_CHALLENGE (Lc=0)
         // ------------------------------
         Serial.println("[PhaseA] Step1: Base GET_CHALLENGE (Lc=0)");
-        uint8_t baseApdu[] = {0x00, 0xCA, 0x00, 0x00, 0x00, 0x00};
+        if (!ensureSelected(2500)) {
+            Serial.println("[PhaseA] SELECT before base failed");
+            return;
+        }
+        uint8_t baseApduNoLe[] = {0x00, 0xCA, 0x00, 0x00};
+        uint8_t baseApduLe0[] = {0x00, 0xCA, 0x00, 0x00, 0x00};
         uint8_t baseResp[255]; uint8_t baseLen = sizeof(baseResp);
 
-        Serial.print("[PhaseA] OUT Base APDU: "); printHex(baseApdu, sizeof(baseApdu));
-        if (!(apduRetry(baseApdu, sizeof(baseApdu), baseResp, &baseLen, 5, 150)
-                    && baseLen >= 2 && baseResp[baseLen - 2] == 0x90 && baseResp[baseLen - 1] == 0x00)) {
+        Serial.print("[PhaseA] OUT Base APDU: "); printHex(baseApduNoLe, sizeof(baseApduNoLe));
+        delay(120);
+        bool baseOk = apduRetry(baseApduNoLe, sizeof(baseApduNoLe), baseResp, &baseLen, 5, 150)
+            && baseLen >= 2 && baseResp[baseLen - 2] == 0x90 && baseResp[baseLen - 1] == 0x00;
+        if (!baseOk) {
+            baseLen = sizeof(baseResp);
+            Serial.print("[PhaseA] OUT Base APDU (Le=0): "); printHex(baseApduLe0, sizeof(baseApduLe0));
+            delay(120);
+            baseOk = apduRetry(baseApduLe0, sizeof(baseApduLe0), baseResp, &baseLen, 5, 150)
+                && baseLen >= 2 && baseResp[baseLen - 2] == 0x90 && baseResp[baseLen - 1] == 0x00;
+        }
+        if (!baseOk) {
+            Serial.println("[PhaseA] Base GET_CHALLENGE failed (reselect + retry)");
+            if (ensureSelected(2500)) {
+                delay(160);
+                baseLen = sizeof(baseResp);
+                Serial.print("[PhaseA] OUT Base APDU (retry): "); printHex(baseApduNoLe, sizeof(baseApduNoLe));
+                baseOk = apduRetry(baseApduNoLe, sizeof(baseApduNoLe), baseResp, &baseLen, 5, 150)
+                    && baseLen >= 2 && baseResp[baseLen - 2] == 0x90 && baseResp[baseLen - 1] == 0x00;
+                if (!baseOk) {
+                    baseLen = sizeof(baseResp);
+                    Serial.print("[PhaseA] OUT Base APDU (retry Le=0): "); printHex(baseApduLe0, sizeof(baseApduLe0));
+                    baseOk = apduRetry(baseApduLe0, sizeof(baseApduLe0), baseResp, &baseLen, 5, 150)
+                        && baseLen >= 2 && baseResp[baseLen - 2] == 0x90 && baseResp[baseLen - 1] == 0x00;
+                }
+            }
+        }
+        if (!baseOk) {
             Serial.println("[PhaseA] Base GET_CHALLENGE failed");
+            Serial.print("[PhaseA] Last base resp: "); printHex(baseResp, baseLen);
             return;
         }
 
@@ -211,7 +338,8 @@ namespace {
         const uint8_t* payload = baseResp;
         BaseInfo info;
         if (!parseBaseResponse(payload, payloadLen, info)) {
-            Serial.println("[PhaseA] Base payload parse error");
+            Serial.printf("[PhaseA] Base payload parse error (len=%d)\n", payloadLen);
+            Serial.print("[PhaseA] Base payload: "); printHex(payload, payloadLen);
             return;
         }
 
@@ -231,33 +359,50 @@ namespace {
         // ------------------------------
         // Step 2: Signature GET_CHALLENGE (Lc=24)
         // ------------------------------
+        // Some phones deselect the AID after the base response; reselect to stabilize the link.
+        if (!ensureSelected(2500)) {
+            Serial.println("[PhaseA] SELECT before signature failed");
+            return;
+        }
+        delay(120);
         Serial.println("[PhaseA] Step2: Signature GET_CHALLENGE (Lc=24 challenge)");
-        uint8_t vehicleId[8];
         uint8_t nonce[16];
-        for (int i = 0; i < 8; ++i) vehicleId[i] = (uint8_t)esp_random();
         for (int i = 0; i < 16; ++i) nonce[i] = (uint8_t)esp_random();
 
         uint8_t challenge[24];
-        memcpy(challenge, vehicleId, 8);
+        memcpy(challenge, EXPECTED_VEHICLE_ID, 8);
         memcpy(challenge + 8, nonce, 16);
 
-        Serial.print("[PhaseA] vehicleId: "); printHex(vehicleId, 8);
+        Serial.print("[PhaseA] vehicleId: "); printHex(EXPECTED_VEHICLE_ID, 8);
         Serial.print("[PhaseA] nonce: "); printHex(nonce, 16);
         Serial.print("[PhaseA] challenge(24): "); printHex(challenge, 24);
 
-        // Build signature APDU: CLA INS P1 P2 Lc [challenge] Le
-        uint8_t sigApdu[5 + sizeof(challenge) + 1];
+        // Build signature APDU: CLA INS P1 P2 Lc [challenge]
+        uint8_t sigApdu[5 + sizeof(challenge)];
         uint8_t sIdx = 0;
         sigApdu[sIdx++] = 0x00; sigApdu[sIdx++] = 0xCA; sigApdu[sIdx++] = 0x00; sigApdu[sIdx++] = 0x00;
         sigApdu[sIdx++] = sizeof(challenge);
         memcpy(sigApdu + sIdx, challenge, sizeof(challenge)); sIdx += sizeof(challenge);
-        sigApdu[sIdx++] = 0x00; // Le
 
         Serial.print("[PhaseA] OUT Sig APDU: "); printHex(sigApdu, sIdx);
         uint8_t sigResp[255]; uint8_t sigTotalLen = sizeof(sigResp);
-        if (!(apduRetry(sigApdu, sIdx, sigResp, &sigTotalLen, 5, 150)
-                    && sigTotalLen >= 2 && sigResp[sigTotalLen - 2] == 0x90 && sigResp[sigTotalLen - 1] == 0x00)) {
+        bool sigOk = apduRetry(sigApdu, sIdx, sigResp, &sigTotalLen, 5, 150)
+            && sigTotalLen >= 2 && sigResp[sigTotalLen - 2] == 0x90 && sigResp[sigTotalLen - 1] == 0x00;
+        if (!sigOk) {
+            Serial.println("[PhaseA] Signature GET_CHALLENGE failed (reselect + retry)");
+            uint8_t sw1c = 0, sw2c = 0; int plc = 0;
+            releaseTarget();
+            delay(80);
+            if (selectAid(sw1c, sw2c, plc) && sw1c == 0x90 && sw2c == 0x00) {
+                delay(160);
+                sigTotalLen = sizeof(sigResp);
+                sigOk = apduRetry(sigApdu, sIdx, sigResp, &sigTotalLen, 5, 150)
+                    && sigTotalLen >= 2 && sigResp[sigTotalLen - 2] == 0x90 && sigResp[sigTotalLen - 1] == 0x00;
+            }
+        }
+        if (!sigOk) {
             Serial.println("[PhaseA] Signature GET_CHALLENGE failed");
+            Serial.print("[PhaseA] Last sig resp: "); printHex(sigResp, sigTotalLen);
             return;
         }
 
@@ -265,15 +410,49 @@ namespace {
         int sigPayloadLen = sigTotalLen - 2;
         if (sigPayloadLen < 2) { Serial.println("[PhaseA] Signature payload too short"); return; }
 
-        uint16_t sigLen = (uint16_t)(sigResp[0] << 8 | sigResp[1]);
-        if (2 + sigLen > sigPayloadLen) { Serial.println("[PhaseA] sigLen OOB"); return; }
-        const uint8_t* sigDer = sigResp + 2;
+        const uint8_t* sigDer = nullptr;
+        uint16_t sigLen = 0;
+        bool hasMac = false;
+        bool macOk = false;
+
+        if (sigPayloadLen >= 34) {
+            // Master-card format: [mac32][sigLen2][sig]
+            const uint8_t* mac = sigResp;
+            uint16_t declaredLen = (uint16_t)(sigResp[32] << 8 | sigResp[33]);
+            if (34 + declaredLen <= sigPayloadLen) {
+                hasMac = true;
+                sigLen = declaredLen;
+                sigDer = sigResp + 34;
+
+                if (info.hasPub) {
+                    uint8_t macInput[24 + 65];
+                    memcpy(macInput, challenge, 24);
+                    memcpy(macInput + 24, info.pubKey65, 65);
+                    uint8_t macExpect[32];
+                    if (hmacSha256(MASTER_SECRET, sizeof(MASTER_SECRET), macInput, sizeof(macInput), macExpect)) {
+                        macOk = (memcmp(mac, macExpect, 32) == 0);
+                    }
+                }
+            }
+        }
+
+        if (!hasMac) {
+            // Legacy format: [sigLen2][sig]
+            sigLen = (uint16_t)(sigResp[0] << 8 | sigResp[1]);
+            if (2 + sigLen > sigPayloadLen) { Serial.println("[PhaseA] sigLen OOB"); return; }
+            sigDer = sigResp + 2;
+        }
 
         Serial.print("[PhaseA] sigDer (first up to 32 bytes): ");
         size_t showSig = sigLen < 32 ? sigLen : 32;
         printHex(sigDer, showSig);
 
         // Verify signature if we have the public key. Fallback: accept empty signature (sigLen==0)
+        if (hasMac) {
+            Serial.printf("[PhaseA] MAC verify=%s\n", macOk ? "OK" : "FAIL");
+            if (!macOk) { Serial.println("[PhaseA] Credentials NOT stored (MAC failure)"); return; }
+        }
+
         bool sigOK = false;
         if (sigLen > 0 && info.hasPub) {
             sigOK = ProvisioningPhase::verifySignatureP256(info.pubKey65, challenge, sizeof(challenge), sigDer, sigLen);
@@ -289,10 +468,10 @@ namespace {
         bool haveExisting = ProvisioningPhase::getKeyId(existingKeyId);
         bool sameKey = haveExisting && existingKeyId == info.keyId;
 
-        if (!alreadyProvisioned || forceProvisionPersistent || forceProvisionOneShot) {
+        if (!alreadyProvisioned || shouldForce) {
             // Store keyId according to force flags and whether it differs from stored value
             if (!sameKey) {
-                if (forceProvisionPersistent || forceProvisionOneShot) {
+                if (shouldForce) {
                     ProvisioningPhase::storeKeyIdAsciiForce(info.keyId.c_str());
                 } else {
                     ProvisioningPhase::storeKeyIdAsciiIfEmpty(info.keyId.c_str());
@@ -305,10 +484,21 @@ namespace {
             if (info.certLen > 0) ProvisioningPhase::storeCertChain(info.cert, info.certLen);
             Serial.println("[PhaseA] Provisioning data persisted (keyId/pub/cert as available)");
 
-            if (forceProvisionOneShot) {
-                forceProvisionOneShot = false; // consume the one-shot force
-                Serial.println("[PhaseA] One-shot force consumed; returning to normal mode");
+            if (!sendProvisionResult()) {
+                Serial.println("[PhaseA] Warning: failed to notify phone of provisioning result");
             }
+
+            // Trigger FSM provision success event
+            FSMIntegration::NFC::onCredentialsStored();
+            
+            // Auto-disable force mode after successful provisioning to prevent automatic re-provisioning
+            if (shouldForce) {
+                ProvisioningPhase::setForceProvisioningFlag(false);
+                ProvisioningPhase::setOneShotForce(false);
+                Serial.println("[PhaseA] ✓ Force provisioning auto-disabled after successful provisioning");
+            }
+            
+            // Note: One-shot force is also auto-cleared by ProvisioningPhase::storeKeyIdAsciiIfEmpty()
         } else {
             Serial.println("[PhaseA] Already provisioned; skipping store (toggle 'f' to force)");
         }
@@ -334,25 +524,16 @@ namespace {
             lastCmd = c; lastCmdMs = now;
 
             if (c == 'p') {
-                String kid; bool haveKid = ProvisioningPhase::getKeyId(kid);
-                uint8_t pub[65]; size_t pubLen = ProvisioningPhase::getPhonePubRaw(pub, sizeof(pub));
-                size_t certLen = ProvisioningPhase::getCertChain(nullptr, 0);
-                Serial.println("[Admin] Stored provisioning state:");
-                Serial.printf("  keyId: %s\n", haveKid ? kid.c_str() : "<none>");
-                Serial.printf("  pubKey: %s (len=%u)\n", (pubLen == 65 && pub[0] == 0x04) ? "present" : "<none>", (unsigned)pubLen);
-                Serial.printf("  certLen: %u\n", (unsigned)certLen);
+                // Show FSM diagnostics
+                FSMIntegration::SerialCmd::printDiagnostics();
             } else if (c == 'f') {
-                forceProvisionPersistent = !forceProvisionPersistent;
-                Serial.printf("[Admin] Persistent force provisioning: %s\n", forceProvisionPersistent ? "ON" : "OFF");
+                FSMIntegration::SerialCmd::toggleForceProvision();
             } else if (c == 'F') {
-                forceProvisionOneShot = true;
-                Serial.println("[Admin] One-shot force provisioning ARMED (will auto-clear after success)");
+                FSMIntegration::SerialCmd::armOneShotForce();
             } else if (c == 'r') {
-                ProvisioningPhase::clearProvisionedOnly();
-                Serial.println("[Admin] Cleared phone provisioning (kept device keypair)");
+                FSMIntegration::SerialCmd::clearKeys();
             } else if (c == 'C') {
-                ProvisioningPhase::clearAll();
-                Serial.println("[Admin] CLEARED ALL");
+                FSMIntegration::SerialCmd::clearAll();
             } else if (c == 'v') {
                 bool ok = ProvisioningPhase::validateStoredCertMatchesStoredPub();
                 Serial.printf("[Admin] Cert vs pub match: %s\n", ok ? "YES" : "NO/UNAVAILABLE");
@@ -394,10 +575,9 @@ namespace NfcSession {
         samConfigured = ensureSAMConfig(5, 200);
         Serial.println(samConfigured ? "OK" : "SAM CONFIG FAILED (will still attempt to poll)");
 
-        Serial.printf("[PhaseA] Provisioned=%s  Force(persist)=%s  OneShot=%s\n",
+        Serial.printf("[PhaseA] Provisioned=%s  Force=%s\n",
                                     ProvisioningPhase::isProvisioned() ? "YES" : "NO",
-                                    forceProvisionPersistent ? "YES" : "NO",
-                                    forceProvisionOneShot ? "ARMED" : "NO");
+                                    ProvisioningPhase::isForceProvisioning() ? "ON" : "OFF");
 
         Serial.println("[PhaseA] Serial: p=print, f=toggle persistent force, F=one-shot force, r=reset phone, C=clear ALL, v=validate cert, x=dump pub, h=help");
     }
@@ -426,11 +606,10 @@ namespace NfcSession {
             return;
         }
 
-        Serial.printf("SELECT SW1SW2=%02X%02X payloadLen=%d  Provisioned=%s  Force(persist)=%s  OneShot=%s\n",
+        Serial.printf("SELECT SW1SW2=%02X%02X payloadLen=%d  Provisioned=%s  Force=%s\n",
                                     sw1, sw2, payloadLen,
                                     ProvisioningPhase::isProvisioned() ? "YES" : "NO",
-                                    forceProvisionPersistent ? "YES" : "NO",
-                                    forceProvisionOneShot ? "ARMED" : "NO");
+                                    ProvisioningPhase::isForceProvisioning() ? "ON" : "OFF");
 
         // Possibly perform provisioning sequence after a successful SELECT
         performProvisioningIfNeeded(sw1, sw2);
@@ -439,15 +618,17 @@ namespace NfcSession {
         postSessionCooldown(sw1 == 0x90 && sw2 == 0x00);
     }
 
-    // ---- Admin control API (exposed via header & used by BLE) ----
+    // ---- Admin control API (delegates to ProvisioningPhase) ----
     void setPersistentForce(bool on) {
-        forceProvisionPersistent = on;
-        Serial.printf("[NfcSession] Persistent force set %s\n", on ? "ON" : "OFF");
+        ProvisioningPhase::setForceProvisioningFlag(on);
     }
     void armOneShotForce() {
-        forceProvisionOneShot = true;
-        Serial.println("[NfcSession] One-shot force ARMED");
+        ProvisioningPhase::setOneShotForce(true);
     }
-    bool getPersistentForce() { return forceProvisionPersistent; }
-    bool isOneShotArmed() { return forceProvisionOneShot; }
+    bool getPersistentForce() { 
+        return ProvisioningPhase::isForceProvisioning(); 
+    }
+    bool isOneShotArmed() { 
+        return ProvisioningPhase::isForceProvisioning(); 
+    }
 }

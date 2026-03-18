@@ -22,7 +22,7 @@ namespace BLEMod {
   void begin() {
     NimBLEDevice::init(kDeviceName);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-    NimBLEDevice::setMTU(185);
+    NimBLEDevice::setMTU(512);  // Increased from 185 to reduce packet count for certificate chain
 
     // Init RNG for ephemeral keys and nonces
     static mbedtls_entropy_context s_entropy;
@@ -36,14 +36,24 @@ namespace BLEMod {
     NimBLEServer *pServer = NimBLEDevice::createServer();
     // Keep advertising after connects and restart after disconnects
     class ServerCallbacks : public NimBLEServerCallbacks {
-      void onConnect(NimBLEServer* /*pServer*/, NimBLEConnInfo& /*connInfo*/) override {
+      void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
         Serial.println("[BLE] Central connected. Keeping advertising active.");
+        
+        // Update connection parameters for lower latency
+        // Interval: 15ms (12 * 1.25ms), Latency: 0, Timeout: 2000ms (200 * 10ms)
+        pServer->updateConnParams(connInfo.getConnHandle(), 12, 12, 0, 200);
+        Serial.println("[BLE] Requested connection params: interval=15ms, latency=0, timeout=2000ms");
+        
         NimBLEDevice::startAdvertising();
       }
       void onDisconnect(NimBLEServer* /*pServer*/, NimBLEConnInfo& /*connInfo*/, int reason) override {
         Serial.printf("[BLE] Central disconnected (reason=%d). Restarting advertising and resetting session.\n", reason);
         BLEAuth::resetSession();
         NimBLEDevice::startAdvertising();
+      }
+      
+      void onMTUChange(uint16_t MTU, NimBLEConnInfo& connInfo) override {
+        Serial.printf("[BLE] MTU negotiated: %u bytes (conn_handle=%u)\n", MTU, connInfo.getConnHandle());
       }
     };
     static ServerCallbacks s_serverCbs;

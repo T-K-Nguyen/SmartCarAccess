@@ -24,6 +24,13 @@ subprojects {
     def newSubprojectBuildDir = newBuildDir.dir(project.name)
     project.layout.buildDirectory.set(newSubprojectBuildDir)
     project.evaluationDependsOn(":app")
+
+    // Ensure deprecation warnings in plugins do not fail the build
+    tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+        kotlinOptions {
+            allWarningsAsErrors = false
+        }
+    }
 }
 
 tasks.register("clean", Delete) {

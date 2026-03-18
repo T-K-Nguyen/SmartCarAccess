@@ -15,6 +15,7 @@ class ProvisioningHostApduService : HostApduService() {
         private val SW_SECURITY_STATUS_NOT_SATISFIED = byteArrayOf(0x69.toByte(), 0x82.toByte()) // Not logged in
         private const val INS_GET_CHALLENGE = 0xCA.toByte()
         private const val INS_READ_BINARY = 0xB0.toByte()
+        private const val INS_PROVISION_RESULT = 0xDA.toByte()
     }
 
     // Track selection
@@ -48,6 +49,7 @@ class ProvisioningHostApduService : HostApduService() {
                 0xA4.toByte() -> handleSelect(commandApdu) // always allow SELECT
                 INS_GET_CHALLENGE -> handleGetChallenge(lc, commandData)
                 INS_READ_BINARY -> handleReadBinary(p1, p2)
+                INS_PROVISION_RESULT -> handleProvisionResult(lc, commandData)
                 else -> SW_INS_NOT_SUPPORTED
             }
         } catch (e: Exception) {
@@ -76,6 +78,17 @@ class ProvisioningHostApduService : HostApduService() {
 
     private fun handleGetChallenge(lc: Int, data: ByteArray): ByteArray {
         if (!aidSelected) return SW_UNKNOWN
+        
+        // SECURITY: Require user to be logged in for ALL provisioning steps
+        // This ensures user must open app and authenticate before provisioning
+        if (!isUserLoggedIn()) {
+            if (!isTestBypassEnabled()) {
+                Log.w(TAG, "[PhaseA] SECURITY: User not logged in, provisioning denied")
+                return SW_SECURITY_STATUS_NOT_SATISFIED
+            }
+            Log.w(TAG, "[PhaseA] TEST BYPASS: proceeding while not logged in (DEBUG MODE ONLY)")
+        }
+        
         return if (lc == 0) {
             // Base credentials (keyId + pub + empty cert)
             val base = ProvisioningResponseBuilder.buildBaseCredentialsPacket(this)
@@ -83,12 +96,30 @@ class ProvisioningHostApduService : HostApduService() {
             base + SW_SUCCESS
         } else {
             // Signature-only: challenge = incoming data
-            if (!isUserLoggedIn()) {
-                // Still enforce login for the sensitive signature step unless test mode bypass
-                if (!isTestBypassEnabled()) return SW_SECURITY_STATUS_NOT_SATISFIED
-                Log.w(TAG, "[PhaseA] TEST BYPASS: proceeding with signature while not logged in")
-            }
             Log.i(TAG, "[PhaseA] challenge(${lc}): ${data.toHex()}")
+            // Master-card mode: include HMAC binding of challenge + phone pub
+            if (MasterCardSession.isActive()) {
+                val masterSecret = MasterCardSession.getMasterSecret()
+                val masterVid = MasterCardSession.getVehicleId()
+                if (masterSecret == null || masterVid == null) {
+                    Log.w(TAG, "[PhaseA] Master session inactive after check")
+                    return SW_SECURITY_STATUS_NOT_SATISFIED
+                }
+                if (data.size < 24) {
+                    Log.w(TAG, "[PhaseA] Challenge too short for master provisioning: ${data.size}")
+                    return SW_UNKNOWN
+                }
+                val challengeVid = data.copyOfRange(0, 8)
+                if (!challengeVid.contentEquals(masterVid)) {
+                    Log.w(TAG, "[PhaseA] VehicleId mismatch for master provisioning")
+                    return SW_SECURITY_STATUS_NOT_SATISFIED
+                }
+                val pkt = ProvisioningResponseBuilder.buildSignaturePacketWithMac(this, data, masterSecret)
+                Log.i(TAG, "[PhaseA] OUT Master pktLen=${pkt.size}")
+                return pkt + SW_SUCCESS
+            }
+
+            // Legacy signature-only response
             val pkt = ProvisioningResponseBuilder.buildSignaturePacket(this, data)
             // Validate length prefix (BIG-endian) vs actual DER length
             if (pkt.size >= 2) {
@@ -117,6 +148,21 @@ class ProvisioningHostApduService : HostApduService() {
         return uid + SW_SUCCESS
     }
 
+    private fun handleProvisionResult(lc: Int, data: ByteArray): ByteArray {
+        if (!aidSelected) {
+            Log.w(TAG, "[PhaseA] Provision result received while AID not selected")
+        }
+        if (lc < 1) return SW_UNKNOWN
+        val success = data[0] == 0x01.toByte()
+        val prefs = getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
+        prefs.edit()
+            .putBoolean("flutter.provision_result", success)
+            .putLong("flutter.provision_ts", System.currentTimeMillis())
+            .apply()
+        Log.i(TAG, "[PhaseA] Provision result received: ${if (success) "OK" else "FAIL"}")
+        return SW_SUCCESS
+    }
+
     private fun isUserLoggedIn(): Boolean {
         // Check Flutter's shared_preferences (FlutterSharedPreferences, key flutter.is_logged_in)
         val flutterPrefs = getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
@@ -129,12 +175,17 @@ class ProvisioningHostApduService : HostApduService() {
     }
 
     private fun isTestBypassEnabled(): Boolean {
-        // Allow bypass when either app is debuggable (ApplicationInfo.FLAG_DEBUGGABLE) or explicit test mode preference.
+        // PRODUCTION: Only allow bypass in debug builds (BuildConfig.DEBUG)
+        // Remove test_mode preference for production security
         return try {
-            val testPrefs = getSharedPreferences("smart_car_test", MODE_PRIVATE)
-            val prefBypass = testPrefs.getBoolean("test_mode", false)
             val isDebuggable = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
-            prefBypass || isDebuggable
+            if (!isDebuggable) {
+                // Production build - NO BYPASS
+                return false
+            }
+            // Debug build - allow explicit test mode preference
+            val testPrefs = getSharedPreferences("smart_car_test", MODE_PRIVATE)
+            testPrefs.getBoolean("test_mode", false) || isDebuggable
         } catch (e: Exception) { false }
     }
 

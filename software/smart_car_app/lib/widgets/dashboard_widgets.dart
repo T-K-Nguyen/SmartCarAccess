@@ -158,6 +158,8 @@ class VehicleStatusCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback? onLockToggle;
   final VoidCallback? onControl;
+  final VoidCallback? onDelete;
+  final bool isProvisioned;
 
   const VehicleStatusCard({
     super.key,
@@ -165,6 +167,8 @@ class VehicleStatusCard extends StatelessWidget {
     required this.onTap,
     this.onLockToggle,
     this.onControl,
+    this.onDelete,
+    this.isProvisioned = false,
   });
 
   @override
@@ -229,6 +233,22 @@ class VehicleStatusCard extends StatelessWidget {
                   ),
                 ),
                 _buildStatusChip(vehicle['keyStatus']),
+                if (onDelete != null)
+                  IconButton(
+                    onPressed: onDelete,
+                    icon: const Icon(Icons.delete_outline),
+                    color: Colors.red[400],
+                    tooltip: 'Delete vehicle',
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                if (isProvisioned)
+                  _buildProvisionedBadge()
+                else
+                  _buildNotProvisionedBadge(),
               ],
             ),
             const SizedBox(height: 20),
@@ -261,45 +281,86 @@ class VehicleStatusCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 20),
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: onLockToggle,
-                    icon: Icon(
-                      vehicle['isLocked'] ? Icons.lock_open : Icons.lock,
-                      size: 18,
-                    ),
-                    label: Text(vehicle['isLocked'] ? 'Unlock' : 'Lock'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF41a5de),
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+            if (isProvisioned)
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: onLockToggle,
+                      icon: Icon(
+                        vehicle['isLocked'] ? Icons.lock_open : Icons.lock,
+                        size: 18,
                       ),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      label: Text(vehicle['isLocked'] ? 'Unlock' : 'Lock'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF41a5de),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: onControl,
-                    icon: const Icon(Icons.settings, size: 18),
-                    label: const Text('Control'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: const Color(0xFF273671),
-                      side: const BorderSide(color: Color(0xFF273671)),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: onControl,
+                      icon: const Icon(Icons.settings, size: 18),
+                      label: const Text('Control'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFF273671),
+                        side: const BorderSide(color: Color(0xFF273671)),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
                       ),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
                     ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProvisionedBadge() {
+    return Container(
+      margin: const EdgeInsets.only(left: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.green.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.green.withOpacity(0.4)),
+      ),
+      child: const Text(
+        'Provisioned',
+        style: TextStyle(
+          color: Colors.green,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNotProvisionedBadge() {
+    return Container(
+      margin: const EdgeInsets.only(left: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.orange.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange.withOpacity(0.4)),
+      ),
+      child: const Text(
+        'Not provisioned',
+        style: TextStyle(
+          color: Colors.orange,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
         ),
       ),
     );

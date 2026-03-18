@@ -5,6 +5,7 @@
 #include "../../include/ble/ble_admin.h"
 #include "provisioning_phase.h"
 #include "../../include/nfc_session.h"
+#include "../../include/ble/ble_auth.h"
 
 
 namespace {
@@ -137,6 +138,29 @@ namespace {
           }
           _info->notify();
           break; }
+        case 0x40: // Start Phase B authentication test
+          _info->setValue("AUTH_TEST_READY");
+          _info->notify();
+          Serial.println("[BLE-Admin] Phase B authentication test mode activated");
+          break;
+        case 0x41: { // Check authentication status
+          if (BLEAuth::isSessionReady()) {
+            _info->setValue("AUTH_SESSION_READY");
+          } else {
+            _info->setValue("AUTH_SESSION_NOT_READY");
+          }
+          _info->notify();
+          break; }
+        case 0x42: // Reset authentication session
+          BLEAuth::resetSession();
+          _info->setValue("AUTH_SESSION_RESET");
+          _info->notify();
+          break;
+        case 0x43: // Print auth statistics
+          BLEAuth::printStats();
+          _info->setValue("AUTH_STATS_PRINTED");
+          _info->notify();
+          break;
         default:
           _info->setValue("UNSUPPORTED");
           _info->notify();

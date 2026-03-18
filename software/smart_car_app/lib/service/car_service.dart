@@ -88,14 +88,15 @@ class CarService {
   }
 
   // Digital Keys Management
-  Future<void> addDigitalKey(Map<String, dynamic> keyData) async {
+  Future<String> addDigitalKey(Map<String, dynamic> keyData) async {
     if (_currentUserId == null) throw Exception('User not authenticated');
     
     keyData['ownerId'] = _currentUserId;
     keyData['createdAt'] = FieldValue.serverTimestamp();
     keyData['updatedAt'] = FieldValue.serverTimestamp();
     
-    await _digitalKeysCollection.add(keyData);
+    final doc = await _digitalKeysCollection.add(keyData);
+    return doc.id;
   }
 
   Future<void> updateDigitalKey(String keyId, Map<String, dynamic> updates) async {
@@ -220,6 +221,7 @@ class CarService {
       'isLocked': isLocked,
       'engineStatus': engineStatus,
       'keyStatus': keyStatus,
+      'provisioned': false,
       'lastAction': null,
       'lastActionTime': null,
       'lastUsed': FieldValue.serverTimestamp(),
