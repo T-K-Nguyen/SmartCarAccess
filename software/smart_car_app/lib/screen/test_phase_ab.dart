@@ -46,18 +46,18 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
     try {
       final isSupported = await FlutterBluePlus.isSupported;
       if (!isSupported) {
-        _addLog('❌ Bluetooth không được hỗ trợ trên thiết bị này');
+        _addLog('❌ Bluetooth is not supported on this device');
         return;
       }
       
       final adapterState = await FlutterBluePlus.adapterState.first;
       if (adapterState != BluetoothAdapterState.on) {
-        _addLog('⚠️ Vui lòng bật Bluetooth');
+        _addLog('⚠️ Please enable Bluetooth');
       } else {
-        _addLog('✓ Bluetooth sẵn sàng');
+        _addLog('✓ Bluetooth is ready');
       }
     } catch (e) {
-      _addLog('❌ Lỗi kiểm tra Bluetooth: $e');
+      _addLog('❌ Bluetooth check failed: $e');
     }
   }
 
@@ -92,7 +92,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
       _scanResults.clear();
     });
     
-    _addLog('🔍 Đang quét thiết bị BLE...');
+    _addLog('🔍 Scanning for BLE devices...');
     
     try {
       await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
@@ -109,10 +109,10 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
       await FlutterBluePlus.stopScan();
       subscription.cancel();
       
-      _addLog('✓ Tìm thấy ${_scanResults.length} thiết bị');
+      _addLog('✓ Found ${_scanResults.length} devices');
       
     } catch (e) {
-      _addLog('❌ Lỗi quét: $e');
+      _addLog('❌ Scan failed: $e');
     } finally {
       setState(() {
         _isScanningDevices = false;
@@ -127,26 +127,26 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
     });
     
     _addLog('═══════════════════════════════════');
-    _addLog('🔷 BẮT ĐẦU TEST PHASE A (NFC Provisioning)');
+    _addLog('🔷 STARTING PHASE A TEST (NFC Provisioning)');
     _addLog('═══════════════════════════════════');
     
     try {
       _addLog('');
-      _addLog('📱 Kiểm tra Android Keystore...');
+      _addLog('📱 Checking Android Keystore...');
       
       // 1. Check if Phase A key exists in Keystore
       try {
         final keystoreChannel = const MethodChannel('smartcar/keystore');
         
         // Ensure key exists
-        _addLog('   Đảm bảo identity key tồn tại...');
+        _addLog('   Ensuring identity key exists...');
         final keyExists = await keystoreChannel.invokeMethod('ensurePhaseAKey');
         
         if (keyExists) {
-          _addLog('   ✓ Identity key đã sẵn sàng trong Android Keystore');
+          _addLog('   ✓ Identity key ready in Android Keystore');
           
           // Get public key
-          _addLog('   Đọc public key...');
+          _addLog('   Reading public key...');
           final publicKey = await keystoreChannel.invokeMethod('getPhaseAPublicKey65');
           
           if (publicKey != null && publicKey.length == 65) {
@@ -154,53 +154,53 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
             _addLog('');
             
             // Show Phase A information
-            _addLog('📋 THÔNG TIN PHASE A:');
+            _addLog('📋 PHASE A INFO:');
             _addLog('   Service: ProvisioningHostApduService (HCE)');
             _addLog('   AID: F0:01:02:03:04:05');
             _addLog('   Identity Key: Android Keystore (hardware-backed)');
             _addLog('   Public Key: 65 bytes (uncompressed P-256)');
             _addLog('');
-            _addLog('📝 QUÁ TRÌNH PROVISIONING:');
-            _addLog('   1. ECU gửi: SELECT AID (00 A4 04 00 06 F0010203040500)');
-            _addLog('      ← Phone trả: UID(4 bytes) + 90 00');
+            _addLog('📝 PROVISIONING FLOW:');
+            _addLog('   1. ECU sends: SELECT AID (00 A4 04 00 06 F0010203040500)');
+            _addLog('      ← Phone returns: UID(4 bytes) + 90 00');
             _addLog('');
-            _addLog('   2. ECU gửi: GET_CHALLENGE Lc=0 (00 CA 00 00 00 00)');
-            _addLog('      ← Phone trả: [keyId(1) + phonePub(65) + certLen(2)] + 90 00');
-            _addLog('      → Public key từ Android Keystore');
+            _addLog('   2. ECU sends: GET_CHALLENGE Lc=0 (00 CA 00 00 00 00)');
+            _addLog('      ← Phone returns: [keyId(1) + phonePub(65) + certLen(2)] + 90 00');
+            _addLog('      → Public key from Android Keystore');
             _addLog('');
-            _addLog('   3. ECU tạo challenge: vehicleId(8) || nonce(16)');
-            _addLog('      ECU gửi: GET_CHALLENGE Lc=24 + [challenge]');
-            _addLog('      ← Phone ký challenge bằng private key (Keystore)');
-            _addLog('      ← Phone trả: [sigLen(2,BE) + DER_signature] + 90 00');
+            _addLog('   3. ECU builds challenge: vehicleId(8) || nonce(16)');
+            _addLog('      ECU sends: GET_CHALLENGE Lc=24 + [challenge]');
+            _addLog('      ← Phone signs challenge with private key (Keystore)');
+            _addLog('      ← Phone returns: [sigLen(2,BE) + DER_signature] + 90 00');
             _addLog('');
-            _addLog('   4. ECU verify signature → lưu public key vào NVS');
+            _addLog('   4. ECU verifies signature → stores public key in NVS');
             _addLog('');
-            _addLog('🔐 BẢO MẬT:');
-            _addLog('   • Private key: KHÔNG BAO GIỜ rời khỏi Keystore');
-            _addLog('   • Public key: Được verify trước khi lưu');
+            _addLog('🔐 SECURITY:');
+            _addLog('   • Private key: NEVER leaves Keystore');
+            _addLog('   • Public key: Verified before storage');
             _addLog('   • Signature: DER-encoded ECDSA-SHA256');
             _addLog('   • Storage: ESP32 NVS (namespace "prov")');
             _addLog('');
-            _addLog('📍 TRẠNG THÁI HCE:');
-            _addLog('   ✓ HCE service đang hoạt động (kiểm tra manifest)');
-            _addLog('   ✓ App có thể foreground hoặc background');
-            _addLog('   ✓ Tap phone vào PN532 để bắt đầu provisioning');
+            _addLog('📍 HCE STATUS:');
+            _addLog('   ✓ HCE service is active (manifest verified)');
+            _addLog('   ✓ App can be foreground or background');
+            _addLog('   ✓ Tap phone on PN532 to start provisioning');
             _addLog('');
             _addLog('═══════════════════════════════════');
-            _addLog('✅ PHASE A SẴN SÀNG');
+            _addLog('✅ PHASE A READY');
             _addLog('═══════════════════════════════════');
             _addLog('');
-            _addLog('💡 HƯỚNG DẪN:');
-            _addLog('   1. Đảm bảo ESP32 đang chạy và PN532 hoạt động');
-            _addLog('   2. Gửi lệnh serial "f" hoặc "F" để force provisioning');
-            _addLog('   3. Tap phone vào PN532 reader');
-            _addLog('   4. Kiểm tra logs trên ESP32 Serial Monitor');
-            _addLog('   5. Gửi lệnh "p" để xem trạng thái provisioning');
+            _addLog('💡 GUIDANCE:');
+            _addLog('   1. Ensure ESP32 is running and PN532 is active');
+            _addLog('   2. Send serial command "f" or "F" to force provisioning');
+            _addLog('   3. Tap phone on the PN532 reader');
+            _addLog('   4. Check logs in ESP32 Serial Monitor');
+            _addLog('   5. Send "p" to view provisioning status');
             
             setState(() {
               _phaseAResult = PhaseA_Result(
                 success: true,
-                message: 'HCE service sẵn sàng, identity key trong Keystore',
+                message: 'HCE service ready; identity key in Keystore',
                 phonePublicKeyStored: true,
               );
             });
@@ -211,13 +211,13 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
           throw Exception('Failed to ensure identity key in Keystore');
         }
       } catch (e) {
-        _addLog('❌ Lỗi kiểm tra Keystore: $e');
+        _addLog('❌ Keystore check failed: $e');
         rethrow;
       }
       
     } catch (e) {
       _addLog('');
-      _addLog('❌ LỖI: $e');
+      _addLog('❌ ERROR: $e');
       setState(() {
         _phaseAResult = PhaseA_Result(
           success: false,
@@ -234,7 +234,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
 
   Future<void> _testPhaseB() async {
     if (_selectedDevice == null && _deviceAddressController.text.isEmpty) {
-      _addLog('❌ Vui lòng chọn thiết bị hoặc nhập địa chỉ MAC');
+      _addLog('❌ Please select a device or enter a MAC address');
       return;
     }
     
@@ -246,9 +246,9 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
     });
     
     _addLog('═══════════════════════════════════');
-    _addLog('🔷 BẮT ĐẦU TEST PHASE B (BLE Authentication)');
+    _addLog('🔷 STARTING PHASE B TEST (BLE Authentication)');
     _addLog('═══════════════════════════════════');
-    _addLog('Thiết bị: $deviceAddress');
+    _addLog('Device: $deviceAddress');
     _addLog('');
     
     try {
@@ -267,7 +267,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
       
       final stepDuration = DateTime.now().difference(stepStartTime);
       _addLog('');
-      _addLog('⏱️  Tổng thời gian: ${stepDuration.inMilliseconds}ms');
+      _addLog('⏱️  Total time: ${stepDuration.inMilliseconds}ms');
       
       setState(() {
         _phaseBResult = result;
@@ -276,26 +276,26 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
       if (result.success) {
         _addLog('');
         _addLog('═══════════════════════════════════');
-        _addLog('✅ PHASE B HOÀN TẤT THÀNH CÔNG!');
+        _addLog('✅ PHASE B COMPLETED SUCCESSFULLY!');
         _addLog('═══════════════════════════════════');
-        _addLog('📊 KẾT QUẢ:');
+        _addLog('📊 RESULTS:');
         _addLog('   🔗 Shared Secret: ${_formatBytes(result.sharedSecret!, 16)}...');
         _addLog('   🔑 Encryption Key: ${_formatBytes(result.sessionEncKey!, 16)}...');
         _addLog('   🔑 MAC Key: ${_formatBytes(result.sessionMacKey!, 16)}...');
         _addLog('   🎯 Challenge: ${_formatBytes(result.challenge!, 24)}');
         _addLog('');
-        _addLog('🔓 Sẵn sàng để mở khóa xe!');
+        _addLog('🔓 Ready to unlock the vehicle!');
       } else {
         _addLog('');
         _addLog('═══════════════════════════════════');
-        _addLog('❌ PHASE B THẤT BẠI');
+        _addLog('❌ PHASE B FAILED');
         _addLog('═══════════════════════════════════');
-        _addLog('Lỗi: ${result.message}');
+        _addLog('Error: ${result.message}');
       }
       
     } catch (e, stackTrace) {
       _addLog('');
-      _addLog('❌ LỖI NGHIÊM TRỌNG: $e');
+      _addLog('❌ CRITICAL ERROR: $e');
       _addLog('Stack trace: ${stackTrace.toString().substring(0, 200)}...');
       
       setState(() {
@@ -334,7 +334,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.delete_outline),
-            tooltip: 'Xóa logs',
+            tooltip: 'Clear logs',
             onPressed: _clearLogs,
           ),
         ],
@@ -392,7 +392,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                 Row(
                   children: [
                     const Text(
-                      'Chọn thiết bị BLE:',
+                      'Select BLE device:',
                       style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
@@ -409,7 +409,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.refresh),
-                      label: Text(_isScanningDevices ? 'Đang quét...' : 'Quét'),
+                      label: Text(_isScanningDevices ? 'Scanning...' : 'Scan'),
                     ),
                   ],
                 ),
@@ -468,7 +468,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                               _selectedDevice = result.device;
                               _deviceAddressController.text = result.device.remoteId.str;
                             });
-                            _addLog('✓ Đã chọn: ${result.device.platformName} (${result.device.remoteId.str})');
+                            _addLog('✓ Selected: ${result.device.platformName} (${result.device.remoteId.str})');
                           },
                         );
                       },
@@ -478,7 +478,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                   TextField(
                     controller: _deviceAddressController,
                     decoration: InputDecoration(
-                      hintText: 'Hoặc nhập địa chỉ MAC (XX:XX:XX:XX:XX:XX)',
+                      hintText: 'Or enter MAC address (XX:XX:XX:XX:XX:XX)',
                       filled: true,
                       fillColor: Colors.white,
                       border: OutlineInputBorder(
@@ -593,7 +593,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                           ),
                           const Spacer(),
                           Text(
-                            '${_logs.length} dòng',
+                            '${_logs.length} lines',
                             style: TextStyle(
                               color: Colors.grey[500],
                               fontSize: 12,
@@ -603,7 +603,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                           IconButton(
                             icon: const Icon(Icons.copy, size: 18),
                             color: Colors.greenAccent,
-                            tooltip: 'Copy toàn bộ logs',
+                            tooltip: 'Copy all logs',
                             padding: EdgeInsets.zero,
                             constraints: const BoxConstraints(),
                             onPressed: _logs.isEmpty ? null : () {
@@ -611,7 +611,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                               Clipboard.setData(ClipboardData(text: allLogs));
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
-                                  content: Text('✓ Đã copy ${_logs.length} dòng logs vào clipboard'),
+                                  content: Text('✓ Copied ${_logs.length} log lines to clipboard'),
                                   duration: const Duration(seconds: 2),
                                   backgroundColor: Colors.green,
                                 ),
@@ -626,7 +626,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                       child: _logs.isEmpty
                           ? Center(
                               child: Text(
-                                'Chưa có logs. Nhấn nút test để bắt đầu.',
+                                'No logs yet. Tap a test button to begin.',
                                 style: TextStyle(
                                   color: Colors.grey[600],
                                   fontSize: 14,
@@ -649,7 +649,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                                   logColor = Colors.orangeAccent;
                                 } else if (log.contains('🔷') || log.contains('═══')) {
                                   logColor = Colors.cyanAccent;
-                                } else if (log.contains('[Bước')) {
+                                } else if (log.contains('[Step')) {
                                   logColor = Colors.yellowAccent;
                                 }
                                 

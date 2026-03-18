@@ -92,7 +92,7 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
         if (mounted) {
           setState(() {
             _step = _FlowStep.error;
-            _errorMessage = 'Hết thời gian. Vui lòng thử lại.';
+            _errorMessage = 'Timed out. Please try again.';
           });
         }
       }
@@ -167,8 +167,8 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
 
   Widget _buildTapCar(BuildContext context) {
     return _buildCard(
-      title: 'Bước 2: Chạm vào xe',
-      description: 'Xe: ${widget.targetName}. Nhấn Provision để bật HCE, sau đó chạm điện thoại vào tay nắm cửa xe trong ${_secondsLeft}s.',
+      title: 'Step 2: Tap the vehicle',
+      description: 'Vehicle: ${widget.targetName}. Tap Provision to enable HCE, then hold your phone to the door handle within ${_secondsLeft}s.',
       icon: Icons.directions_car,
       actions: [
         ElevatedButton(
@@ -190,7 +190,7 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           ),
-          child: const Text('Hủy'),
+          child: const Text('Cancel'),
         ),
       ],
       footer: _provisioningActive ? _buildCountdownIndicator() : null,
@@ -199,8 +199,8 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
 
   Widget _buildSuccess(BuildContext context) {
     return _buildCard(
-      title: 'Hoàn tất',
-      description: 'Đã kích hoạt phiên HCE. Bạn có thể tiếp tục bước cấu hình tiếp theo.',
+      title: 'Complete',
+      description: 'HCE session activated. You can continue to the next setup step.',
       icon: Icons.check_circle,
       iconColor: Colors.green,
       actions: [
@@ -212,7 +212,7 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           ),
-          child: const Text('Đóng'),
+          child: const Text('Close'),
         ),
       ],
     );
@@ -220,8 +220,8 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
 
   Widget _buildError(BuildContext context) {
     return _buildCard(
-      title: 'Có lỗi xảy ra',
-      description: _errorMessage ?? 'Không thể hoàn tất quy trình. Vui lòng thử lại.',
+      title: 'Something went wrong',
+      description: _errorMessage ?? 'Could not complete the flow. Please try again.',
       icon: Icons.error_outline,
       iconColor: Colors.red,
       actions: [
@@ -233,7 +233,7 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           ),
-          child: const Text('Thử lại'),
+          child: const Text('Try again'),
         ),
       ],
     );
@@ -252,7 +252,7 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
         ),
         const SizedBox(height: 8),
         Text(
-          'Còn $_secondsLeft giây',
+          '${_secondsLeft}s remaining',
           style: TextStyle(color: Colors.grey[600]),
         ),
       ],

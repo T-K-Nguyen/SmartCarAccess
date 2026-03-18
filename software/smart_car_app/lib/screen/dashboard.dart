@@ -184,13 +184,13 @@ class _DashboardState extends State<Dashboard> {
         IconButton(
           icon: const Icon(Icons.notifications_outlined, color: Color(0xFF273671)),
           onPressed: () {
-            // Xử lý thông báo
+            // Handle notifications
           },
         ),
         IconButton(
           icon: const Icon(Icons.settings_outlined, color: Color(0xFF273671)),
           onPressed: () {
-            // Xử lý cài đặt
+            // Handle settings
           },
         ),
       ],
@@ -930,7 +930,7 @@ class _DashboardState extends State<Dashboard> {
       Navigator.of(context).pop();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Master card scanned. Tap “Provision for this vehicle” to continue.'),
+          content: Text('Master card scanned. Tap "Provision for this vehicle" to continue.'),
           backgroundColor: const Color(0xFF273671),
         ),
       );

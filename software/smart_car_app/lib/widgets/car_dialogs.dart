@@ -51,7 +51,7 @@ class _CarControlDialogState extends State<CarControlDialog> {
                     icon: widget.car['isLocked'] ? Icons.lock_open : Icons.lock,
                     label: widget.car['isLocked'] ? 'Unlock' : 'Lock',
                     onPressed: () {
-                      // Xử lý khóa/mở khóa
+                      // Handle lock/unlock
                       Navigator.pop(context, 'lock_toggle');
                     },
                   ),
@@ -62,7 +62,7 @@ class _CarControlDialogState extends State<CarControlDialog> {
                     icon: Icons.flash_on,
                     label: 'Lights',
                     onPressed: () {
-                      // Xử lý đèn
+                      // Handle lights
                       Navigator.pop(context, 'lights');
                     },
                   ),
@@ -77,7 +77,7 @@ class _CarControlDialogState extends State<CarControlDialog> {
                     icon: Icons.directions_car,
                     label: 'Start Engine',
                     onPressed: () {
-                      // Xử lý khởi động
+                      // Handle engine start
                       Navigator.pop(context, 'start_engine');
                     },
                   ),
@@ -88,7 +88,7 @@ class _CarControlDialogState extends State<CarControlDialog> {
                     icon: Icons.luggage,
                     label: 'Trunk',
                     onPressed: () {
-                      // Xử lý cốp xe
+                      // Handle trunk
                       Navigator.pop(context, 'trunk');
                     },
                   ),
