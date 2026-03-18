@@ -43,3 +43,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Android/Gradle local and generated files (including nested packages/examples)
+**/.gradle/
+**/.kotlin/
+**/.cxx/
+**/local.properties
