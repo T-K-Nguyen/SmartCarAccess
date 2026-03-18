@@ -15,6 +15,11 @@ void hmac_sha256_label(const uint8_t* key, size_t keyLen,
                        const uint8_t* b, size_t bLen,
                        uint8_t out[32]);
 
+// HMAC-SHA256 over raw data buffer; writes 32-byte tag
+bool hmac_sha256(const uint8_t* key, size_t keyLen,
+                 const uint8_t* data, size_t dataLen,
+                 uint8_t out[32]);
+
 // AES-256-GCM primitives (key must be 32 bytes, nonce 12 bytes, tag 16 bytes)
 bool aes_gcm_encrypt(const uint8_t key[32],
                      const uint8_t nonce[12],

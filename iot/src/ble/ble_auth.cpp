@@ -514,8 +514,8 @@ namespace {
       
       // Step 1: Verify HMAC
       uint8_t computed_hmac[32];
-      if (!CryptoUtils::hmac_sha256(s_session_key_mac, sizeof(s_session_key_mac),
-                                     encrypted_data, 32, computed_hmac)) {
+      if (!hmac_sha256(s_session_key_mac, sizeof(s_session_key_mac),
+               encrypted_data, 32, computed_hmac)) {
         Serial.println("[GPS] ERROR: HMAC computation failed");
         return;
       }

@@ -51,6 +51,25 @@ void hmac_sha256_label(const uint8_t* key, size_t keyLen,
   mbedtls_md_free(&ctx);
 }
 
+bool hmac_sha256(const uint8_t* key, size_t keyLen,
+                 const uint8_t* data, size_t dataLen,
+                 uint8_t out[32]) {
+  if (!key || !data || !out) return false;
+  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!md) return false;
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  if (mbedtls_md_setup(&ctx, md, 1) != 0) {
+    mbedtls_md_free(&ctx);
+    return false;
+  }
+  mbedtls_md_hmac_starts(&ctx, key, keyLen);
+  mbedtls_md_hmac_update(&ctx, data, dataLen);
+  mbedtls_md_hmac_finish(&ctx, out);
+  mbedtls_md_free(&ctx);
+  return true;
+}
+
 bool aes_gcm_encrypt(const uint8_t key[32],
                      const uint8_t nonce[12],
                      const uint8_t* aad, size_t aadLen,
