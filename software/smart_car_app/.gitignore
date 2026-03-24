@@ -49,6 +49,13 @@ app.*.map.json
 **/.kotlin/
 **/.cxx/
 **/local.properties
+packages/**/build/
+packages/**/.dart_tool/
+
+# Local Android wrapper/tooling files generated under vendored package
+packages/nfc_manager/android/gradle/
+packages/nfc_manager/android/gradlew
+packages/nfc_manager/android/gradlew.bat
 
 # Flutter desktop generated plugin files
 /linux/flutter/generated_plugin_registrant.cc
