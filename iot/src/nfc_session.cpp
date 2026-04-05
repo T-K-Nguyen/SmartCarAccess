@@ -5,6 +5,7 @@
 #include "provisioning_phase.h"
 #include "fsm/fsm.h"
 #include "fsm/fsm_integration.h"
+#include "ccc_mailbox.h"
 #include <esp_system.h>
 #include <esp_log.h>
 #include <cstring>
@@ -20,10 +21,10 @@ namespace {
     // Startup guard to ignore early serial noise
     uint32_t bootMillis = 0;
 
-    // HCE AID used when SELECTing the phone applet
-    uint8_t aid[] = {0xF0,0x01,0x02,0x03,0x04,0x05};
+    // HCE AID used when SELECTing the phone applet (CCC Release 3)
+    uint8_t aid[] = {0xA0,0x00,0x00,0x08,0x09,0x43,0x43,0x43,0x44,0x4B,0x46,0x76,0x31};
 
-    // Master card binding (must match tag payload)
+    // Master card binding fallback (used only if CCC mailbox vehicleId is missing)
     const uint8_t EXPECTED_VEHICLE_ID[8] = {0x56, 0x4E, 0x38, 0x38, 0x38, 0x38, 0x42, 0x4B};
     const uint8_t MASTER_SECRET[32] = {
         0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18,
@@ -31,6 +32,12 @@ namespace {
         0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18,
         0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18
     };
+
+    const uint8_t kInsSpake2Request = 0x30;
+    const uint8_t kInsSpake2Verify = 0x32;
+    const uint8_t kInsOpControl = 0x3C;
+    const uint8_t kTlvTagChallenge = 0x50;
+    const uint8_t kTlvTagMac = 0x58;
 
     // Small utility: print hex bytes to Serial
     void printHex(const uint8_t* data, size_t len) {
@@ -55,6 +62,132 @@ namespace {
         if (rc == 0) rc = mbedtls_md_hmac_finish(&ctx, out32);
         mbedtls_md_free(&ctx);
         return rc == 0;
+    }
+
+    bool apduRetry(const uint8_t* apdu, uint8_t apduLen, uint8_t* resp, uint8_t* respLen,
+                                 uint8_t attempts, uint16_t backoffMs);
+    bool ensureSelected(uint32_t timeoutMs);
+
+    bool unwrap7F24(const uint8_t* payload, int payloadLen, const uint8_t** out, int* outLen) {
+        if (!payload || payloadLen < 3 || !out || !outLen) return false;
+        if (payload[0] != 0x7F || payload[1] != 0x24) return false;
+        int idx = 2;
+        if (idx >= payloadLen) return false;
+        uint8_t lenByte = payload[idx++];
+        int len = 0;
+        if (lenByte == 0x81) {
+            if (idx >= payloadLen) return false;
+            len = payload[idx++];
+        } else if (lenByte <= 0x7F) {
+            len = lenByte;
+        } else {
+            return false;
+        }
+        if (idx + len > payloadLen) return false;
+        *out = payload + idx;
+        *outLen = len;
+        return true;
+    }
+
+    bool extractTlv(uint8_t tag, const uint8_t* buf, int len, const uint8_t** value, int* valueLen) {
+        if (!buf || len < 2 || !value || !valueLen) return false;
+        int idx = 0;
+        while (idx + 2 <= len) {
+            uint8_t t = buf[idx++];
+            uint8_t l = buf[idx++];
+            if (idx + l > len) return false;
+            if (t == tag) {
+                *value = buf + idx;
+                *valueLen = l;
+                return true;
+            }
+            idx += l;
+        }
+        return false;
+    }
+
+    bool sendSpake2Mastercard(const uint8_t* challenge, size_t challengeLen) {
+        if (!challenge || challengeLen == 0 || challengeLen > 32) return false;
+
+        // SPAKE2+ REQUEST (INS 0x30) with TLV tag 0x50 carrying the challenge
+        if (!ensureSelected(2500)) {
+            Serial.println("[PhaseA] SELECT before SPAKE2+ request failed");
+            return false;
+        }
+        uint8_t reqApdu[5 + 2 + 32 + 1];
+        uint8_t idx = 0;
+        uint8_t tlvLen = (uint8_t)(2 + challengeLen);
+        reqApdu[idx++] = 0x00; reqApdu[idx++] = kInsSpake2Request; reqApdu[idx++] = 0x00; reqApdu[idx++] = 0x00;
+        reqApdu[idx++] = tlvLen;
+        reqApdu[idx++] = kTlvTagChallenge;
+        reqApdu[idx++] = (uint8_t)challengeLen;
+        memcpy(reqApdu + idx, challenge, challengeLen); idx += (uint8_t)challengeLen;
+        reqApdu[idx++] = 0x00; // Le
+
+        uint8_t reqResp[64]; uint8_t reqLen = sizeof(reqResp);
+        bool reqOk = apduRetry(reqApdu, idx, reqResp, &reqLen, 3, 120)
+            && reqLen >= 2 && reqResp[reqLen - 2] == 0x90 && reqResp[reqLen - 1] == 0x00;
+        if (!reqOk) {
+            Serial.println("[PhaseA] SPAKE2+ REQUEST failed");
+            return false;
+        }
+
+        // SPAKE2+ VERIFY (INS 0x32) expects TLV tag 0x58 with MAC
+        if (!ensureSelected(2500)) {
+            Serial.println("[PhaseA] SELECT before SPAKE2+ verify failed");
+            return false;
+        }
+        uint8_t verApdu[] = {0x00, kInsSpake2Verify, 0x00, 0x00, 0x00};
+        uint8_t verResp[96]; uint8_t verLen = sizeof(verResp);
+        bool verOk = apduRetry(verApdu, sizeof(verApdu), verResp, &verLen, 3, 120)
+            && verLen >= 2 && verResp[verLen - 2] == 0x90 && verResp[verLen - 1] == 0x00;
+        if (!verOk) {
+            Serial.println("[PhaseA] SPAKE2+ VERIFY failed");
+            return false;
+        }
+
+        int payloadLen = verLen - 2;
+        const uint8_t* payload = verResp;
+        const uint8_t* mac = nullptr;
+        int macLen = 0;
+        if (!extractTlv(kTlvTagMac, payload, payloadLen, &mac, &macLen) || macLen != 32) {
+            Serial.println("[PhaseA] SPAKE2+ VERIFY missing MAC tag 0x58");
+            return false;
+        }
+
+        uint8_t macExpect[32];
+        if (!hmacSha256(MASTER_SECRET, sizeof(MASTER_SECRET), challenge, challengeLen, macExpect)) {
+            Serial.println("[PhaseA] SPAKE2+ HMAC compute failed");
+            return false;
+        }
+        bool macOk = (memcmp(mac, macExpect, 32) == 0);
+        Serial.printf("[PhaseA] SPAKE2+ MAC verify=%s\n", macOk ? "OK" : "FAIL");
+        return macOk;
+    }
+
+    bool sendOpControlFlowSuccess() {
+        if (!ensureSelected(1500)) {
+            Serial.println("[PhaseA] SELECT before OP CONTROL FLOW failed");
+            return false;
+        }
+        uint8_t apdu[] = {0x00, kInsOpControl, 0x11, 0x00, 0x00};
+        uint8_t resp[16]; uint8_t rlen = sizeof(resp);
+        bool ok = apduRetry(apdu, sizeof(apdu), resp, &rlen, 2, 80)
+            && rlen >= 2 && resp[rlen - 2] == 0x90 && resp[rlen - 1] == 0x00;
+        if (!ok) {
+            Serial.println("[PhaseA] OP CONTROL FLOW failed");
+        }
+        return ok;
+    }
+
+    bool getVehicleIdBytes(uint8_t out[8]) {
+        const char* vid = CCCMailbox::vehicleId();
+        if (vid && strlen(vid) == 8) {
+            memcpy(out, vid, 8);
+            return true;
+        }
+        memcpy(out, EXPECTED_VEHICLE_ID, 8);
+        return false;
     }
 
     // Repeatedly try an INDATAEXCHANGE (APDU) with retry/backoff
@@ -198,14 +331,14 @@ namespace {
 
     // Build and send SELECT AID APDU; returns SW1, SW2 and payload length
     bool selectAid(uint8_t& sw1, uint8_t& sw2, int& payloadLen) {
-        uint8_t sel[16];
+        uint8_t sel[32];
         uint8_t idx = 0;
         sel[idx++] = 0x00; sel[idx++] = 0xA4; sel[idx++] = 0x04; sel[idx++] = 0x00;
         sel[idx++] = sizeof(aid);
         for (size_t i = 0; i < sizeof(aid); ++i) sel[idx++] = aid[i];
         sel[idx++] = 0x00; // Le
 
-        uint8_t resp[32];
+        uint8_t resp[64];
         uint8_t rlen = sizeof(resp);
         if (!apduRetry(sel, idx, resp, &rlen, 3, 80)) {
             if (kDebugApdu) Serial.println("[APDU] SELECT failed (no response)");
@@ -241,10 +374,10 @@ namespace {
         return ok && rlen >= 2 && resp[rlen - 2] == 0x90 && resp[rlen - 1] == 0x00;
     }
 
-    // Parse the "Base GET_CHALLENGE" response layout:
+    // Parse the "Base GET_CHALLENGE" response layout (keyId is ignored in CCC flow):
     // [keyIdLen][keyId..][pubKey65..][certLen(2)][cert..]
     struct BaseInfo {
-        String keyId;
+        uint8_t keyIdLen = 0;
         const uint8_t* pubKey65 = nullptr;
         uint16_t certLen = 0;
         const uint8_t* cert = nullptr;
@@ -256,9 +389,7 @@ namespace {
         int idx = 0;
         uint8_t keyIdLen = data[idx++];
         if (keyIdLen > dataLen - idx) return false;
-        String keyId;
-        for (uint8_t k = 0; k < keyIdLen; ++k) keyId += (char)data[idx + k];
-        idx += keyIdLen;
+        idx += keyIdLen; // keyId is ignored in CCC flow
 
         if (idx + 65 + 2 > dataLen) return false;
         const uint8_t* pubKey65 = data + idx; idx += 65;
@@ -266,7 +397,7 @@ namespace {
         if (idx + certLen > dataLen) return false;
         const uint8_t* cert = data + idx;
 
-        out.keyId = keyId;
+        out.keyIdLen = keyIdLen;
         out.pubKey65 = pubKey65;
         out.certLen = certLen;
         out.cert = cert;
@@ -289,9 +420,9 @@ namespace {
         if (!shouldProvision) return;
 
         // ------------------------------
-        // Step 1: Base GET_CHALLENGE (Lc=0)
+        // Step 1: Base GET DATA (Lc=0)
         // ------------------------------
-        Serial.println("[PhaseA] Step1: Base GET_CHALLENGE (Lc=0)");
+        Serial.println("[PhaseA] Step1: Base GET DATA (Lc=0)");
         if (!ensureSelected(2500)) {
             Serial.println("[PhaseA] SELECT before base failed");
             return;
@@ -312,7 +443,7 @@ namespace {
                 && baseLen >= 2 && baseResp[baseLen - 2] == 0x90 && baseResp[baseLen - 1] == 0x00;
         }
         if (!baseOk) {
-            Serial.println("[PhaseA] Base GET_CHALLENGE failed (reselect + retry)");
+            Serial.println("[PhaseA] Base GET DATA failed (reselect + retry)");
             if (ensureSelected(2500)) {
                 delay(160);
                 baseLen = sizeof(baseResp);
@@ -328,7 +459,7 @@ namespace {
             }
         }
         if (!baseOk) {
-            Serial.println("[PhaseA] Base GET_CHALLENGE failed");
+            Serial.println("[PhaseA] Base GET DATA failed");
             Serial.print("[PhaseA] Last base resp: "); printHex(baseResp, baseLen);
             return;
         }
@@ -336,15 +467,29 @@ namespace {
         Serial.printf("[PhaseA] IN Base Resp len=%u SW=%02X%02X\n", baseLen, baseResp[baseLen - 2], baseResp[baseLen - 1]);
         int payloadLen = baseLen - 2;
         const uint8_t* payload = baseResp;
+        const uint8_t* basePayload = payload;
+        int basePayloadLen = payloadLen;
+        if (payloadLen >= 2 && payload[0] == 0x7F && payload[1] == 0x24) {
+            const uint8_t* inner = nullptr;
+            int innerLen = 0;
+            if (!unwrap7F24(payload, payloadLen, &inner, &innerLen)) {
+                Serial.println("[PhaseA] GET DATA 7F24 parse failed");
+                return;
+            }
+            basePayload = inner;
+            basePayloadLen = innerLen;
+            Serial.printf("[PhaseA] GET DATA 7F24 unwrapped len=%d\n", basePayloadLen);
+        }
+
         BaseInfo info;
-        if (!parseBaseResponse(payload, payloadLen, info)) {
-            Serial.printf("[PhaseA] Base payload parse error (len=%d)\n", payloadLen);
-            Serial.print("[PhaseA] Base payload: "); printHex(payload, payloadLen);
+        if (!parseBaseResponse(basePayload, basePayloadLen, info)) {
+            Serial.printf("[PhaseA] Base payload parse error (len=%d)\n", basePayloadLen);
+            Serial.print("[PhaseA] Base payload: "); printHex(basePayload, basePayloadLen);
             return;
         }
 
-        Serial.printf("[PhaseA] Parsed Base: keyId='%s' pubKeyFirst=%02X certLen=%u\n",
-                                    info.keyId.c_str(), info.pubKey65 ? info.pubKey65[0] : 0, info.certLen);
+        Serial.printf("[PhaseA] Parsed Base: keyIdLen=%u pubKeyFirst=%02X certLen=%u\n",
+                        info.keyIdLen, info.pubKey65 ? info.pubKey65[0] : 0, info.certLen);
         if (info.hasPub) {
             Serial.print("[PhaseA] pubKey65: "); printHex(info.pubKey65, 65);
         }
@@ -357,7 +502,7 @@ namespace {
         }
 
         // ------------------------------
-        // Step 2: Signature GET_CHALLENGE (Lc=24)
+        // Step 2: Signature GET DATA (Lc=24)
         // ------------------------------
         // Some phones deselect the AID after the base response; reselect to stabilize the link.
         if (!ensureSelected(2500)) {
@@ -365,15 +510,20 @@ namespace {
             return;
         }
         delay(120);
-        Serial.println("[PhaseA] Step2: Signature GET_CHALLENGE (Lc=24 challenge)");
+        Serial.println("[PhaseA] Step2: Signature GET DATA (Lc=24 challenge)");
         uint8_t nonce[16];
         for (int i = 0; i < 16; ++i) nonce[i] = (uint8_t)esp_random();
 
         uint8_t challenge[24];
-        memcpy(challenge, EXPECTED_VEHICLE_ID, 8);
+        uint8_t vehicleId[8];
+        bool vidOk = getVehicleIdBytes(vehicleId);
+        memcpy(challenge, vehicleId, 8);
         memcpy(challenge + 8, nonce, 16);
 
-        Serial.print("[PhaseA] vehicleId: "); printHex(EXPECTED_VEHICLE_ID, 8);
+        if (!vidOk) {
+            Serial.println("[PhaseA] WARNING: CCC vehicleId missing; using fallback");
+        }
+        Serial.print("[PhaseA] vehicleId: "); printHex(vehicleId, 8);
         Serial.print("[PhaseA] nonce: "); printHex(nonce, 16);
         Serial.print("[PhaseA] challenge(24): "); printHex(challenge, 24);
 
@@ -389,7 +539,7 @@ namespace {
         bool sigOk = apduRetry(sigApdu, sIdx, sigResp, &sigTotalLen, 5, 150)
             && sigTotalLen >= 2 && sigResp[sigTotalLen - 2] == 0x90 && sigResp[sigTotalLen - 1] == 0x00;
         if (!sigOk) {
-            Serial.println("[PhaseA] Signature GET_CHALLENGE failed (reselect + retry)");
+            Serial.println("[PhaseA] Signature GET DATA failed (reselect + retry)");
             uint8_t sw1c = 0, sw2c = 0; int plc = 0;
             releaseTarget();
             delay(80);
@@ -401,7 +551,7 @@ namespace {
             }
         }
         if (!sigOk) {
-            Serial.println("[PhaseA] Signature GET_CHALLENGE failed");
+            Serial.println("[PhaseA] Signature GET DATA failed");
             Serial.print("[PhaseA] Last sig resp: "); printHex(sigResp, sigTotalLen);
             return;
         }
@@ -412,46 +562,13 @@ namespace {
 
         const uint8_t* sigDer = nullptr;
         uint16_t sigLen = 0;
-        bool hasMac = false;
-        bool macOk = false;
-
-        if (sigPayloadLen >= 34) {
-            // Master-card format: [mac32][sigLen2][sig]
-            const uint8_t* mac = sigResp;
-            uint16_t declaredLen = (uint16_t)(sigResp[32] << 8 | sigResp[33]);
-            if (34 + declaredLen <= sigPayloadLen) {
-                hasMac = true;
-                sigLen = declaredLen;
-                sigDer = sigResp + 34;
-
-                if (info.hasPub) {
-                    uint8_t macInput[24 + 65];
-                    memcpy(macInput, challenge, 24);
-                    memcpy(macInput + 24, info.pubKey65, 65);
-                    uint8_t macExpect[32];
-                    if (hmacSha256(MASTER_SECRET, sizeof(MASTER_SECRET), macInput, sizeof(macInput), macExpect)) {
-                        macOk = (memcmp(mac, macExpect, 32) == 0);
-                    }
-                }
-            }
-        }
-
-        if (!hasMac) {
-            // Legacy format: [sigLen2][sig]
-            sigLen = (uint16_t)(sigResp[0] << 8 | sigResp[1]);
-            if (2 + sigLen > sigPayloadLen) { Serial.println("[PhaseA] sigLen OOB"); return; }
-            sigDer = sigResp + 2;
-        }
+        sigLen = (uint16_t)(sigResp[0] << 8 | sigResp[1]);
+        if (2 + sigLen > sigPayloadLen) { Serial.println("[PhaseA] sigLen OOB"); return; }
+        sigDer = sigResp + 2;
 
         Serial.print("[PhaseA] sigDer (first up to 32 bytes): ");
         size_t showSig = sigLen < 32 ? sigLen : 32;
         printHex(sigDer, showSig);
-
-        // Verify signature if we have the public key. Fallback: accept empty signature (sigLen==0)
-        if (hasMac) {
-            Serial.printf("[PhaseA] MAC verify=%s\n", macOk ? "OK" : "FAIL");
-            if (!macOk) { Serial.println("[PhaseA] Credentials NOT stored (MAC failure)"); return; }
-        }
 
         bool sigOK = false;
         if (sigLen > 0 && info.hasPub) {
@@ -463,44 +580,37 @@ namespace {
         Serial.printf("[PhaseA] sigLen=%u verify=%s\n", sigLen, sigOK ? "OK" : "FAIL");
         if (!sigOK) { Serial.println("[PhaseA] Credentials NOT stored (signature failure)"); return; }
 
+        if (!sendSpake2Mastercard(challenge, sizeof(challenge))) {
+            Serial.println("[PhaseA] MasterCard SPAKE2+ verify failed");
+            return;
+        }
+
         // Decide whether to store provisioning data
-        String existingKeyId;
-        bool haveExisting = ProvisioningPhase::getKeyId(existingKeyId);
-        bool sameKey = haveExisting && existingKeyId == info.keyId;
+        if (!info.hasPub) {
+            Serial.println("[PhaseA] Missing endpoint public key; provisioning rejected");
+            return;
+        }
 
-        if (!alreadyProvisioned || shouldForce) {
-            // Store keyId according to force flags and whether it differs from stored value
-            if (!sameKey) {
-                if (shouldForce) {
-                    ProvisioningPhase::storeKeyIdAsciiForce(info.keyId.c_str());
-                } else {
-                    ProvisioningPhase::storeKeyIdAsciiIfEmpty(info.keyId.c_str());
-                }
-            } else {
-                Serial.println("[PhaseA] Same keyId as stored; skipping keyId re-store");
-            }
+        if (!ProvisioningPhase::setOwnerProvisioned(info.pubKey65, shouldForce)) {
+            Serial.println("[PhaseA] Owner provisioning rejected (already provisioned?)");
+            return;
+        }
+        if (info.certLen > 0) ProvisioningPhase::storeCertChain(info.cert, info.certLen);
+        Serial.println("[PhaseA] Provisioning data persisted (CCC mailbox owner slot)");
 
-            if (info.hasPub) ProvisioningPhase::storePhonePubRaw(info.pubKey65);
-            if (info.certLen > 0) ProvisioningPhase::storeCertChain(info.cert, info.certLen);
-            Serial.println("[PhaseA] Provisioning data persisted (keyId/pub/cert as available)");
+        if (!sendProvisionResult()) {
+            Serial.println("[PhaseA] Warning: failed to notify phone of provisioning result");
+        }
+        sendOpControlFlowSuccess();
 
-            if (!sendProvisionResult()) {
-                Serial.println("[PhaseA] Warning: failed to notify phone of provisioning result");
-            }
+        // Trigger FSM provision success event
+        FSMIntegration::NFC::onCredentialsStored();
 
-            // Trigger FSM provision success event
-            FSMIntegration::NFC::onCredentialsStored();
-            
-            // Auto-disable force mode after successful provisioning to prevent automatic re-provisioning
-            if (shouldForce) {
-                ProvisioningPhase::setForceProvisioningFlag(false);
-                ProvisioningPhase::setOneShotForce(false);
-                Serial.println("[PhaseA] ✓ Force provisioning auto-disabled after successful provisioning");
-            }
-            
-            // Note: One-shot force is also auto-cleared by ProvisioningPhase::storeKeyIdAsciiIfEmpty()
-        } else {
-            Serial.println("[PhaseA] Already provisioned; skipping store (toggle 'f' to force)");
+        // Auto-disable force mode after successful provisioning to prevent automatic re-provisioning
+        if (shouldForce) {
+            ProvisioningPhase::setForceProvisioningFlag(false);
+            ProvisioningPhase::setOneShotForce(false);
+            Serial.println("[PhaseA] ✓ Force provisioning auto-disabled after successful provisioning");
         }
     }
 

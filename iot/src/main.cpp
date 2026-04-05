@@ -1,6 +1,7 @@
 ﻿// Main with FSM integration for smart car access control
 #include <Arduino.h>
 #include "nfc_session.h"
+#include "ccc_mailbox.h"
 #include "ble/ble.h"
 #include "fsm/fsm.h"
 #include "fsm/fsm_integration.h"
@@ -17,6 +18,11 @@ void setup() {
   Serial.println("║        Smart Car Access - FSM Integrated                 ║");
   Serial.println("╚═══════════════════════════════════════════════════════════╝");
   
+  // Initialize CCC mailbox before FSM and BLE
+  if (!CCCMailbox::begin()) {
+    Serial.println("[CCC] Mailbox init failed");
+  }
+
   // Initialize FSM (must be first to set up state machine)
   FSM::begin();
   Serial.println("[FSM] State machine initialized");

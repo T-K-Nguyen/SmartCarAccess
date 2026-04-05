@@ -3,23 +3,34 @@ package com.example.smart_car_app
 import android.nfc.cardemulation.HostApduService
 import android.os.Bundle
 import android.util.Log
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 class ProvisioningHostApduService : HostApduService() {
     companion object {
         private const val TAG = "ProvisioningHostApduService"
-        private val AID = byteArrayOf(0xF0.toByte(),0x01,0x02,0x03,0x04,0x05) // F0 01 02 03 04 05
+        private const val AID_HEX = "A000000809434343444B467631"
+        private val AID = ByteArrayHexUtil.hexToBytes(AID_HEX)
         private val SW_SUCCESS = byteArrayOf(0x90.toByte(), 0x00)
         private val SW_INS_NOT_SUPPORTED = byteArrayOf(0x6D.toByte(), 0x00)
         private val SW_CLA_NOT_SUPPORTED = byteArrayOf(0x6E.toByte(), 0x00)
         private val SW_UNKNOWN = byteArrayOf(0x6F.toByte(), 0x00)
         private val SW_SECURITY_STATUS_NOT_SATISFIED = byteArrayOf(0x69.toByte(), 0x82.toByte()) // Not logged in
-        private const val INS_GET_CHALLENGE = 0xCA.toByte()
+        private const val INS_GET_DATA = 0xCA.toByte()
+        private const val INS_SPAKE2_REQUEST = 0x30.toByte()
+        private const val INS_SPAKE2_VERIFY = 0x32.toByte()
+        private const val INS_OP_CONTROL = 0x3C.toByte()
         private const val INS_READ_BINARY = 0xB0.toByte()
         private const val INS_PROVISION_RESULT = 0xDA.toByte()
+        private val SELECT_OK = byteArrayOf(
+            0x5A.toByte(), 0x03.toByte(), 0x02.toByte(), 0x00.toByte(), 0x00.toByte(),
+            0x5C.toByte(), 0x04.toByte(), 0x01.toByte(), 0x00.toByte(), 0x01.toByte(), 0x00.toByte()
+        )
     }
 
     // Track selection
     private var aidSelected = false
+    private var spake2Challenge: ByteArray? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -47,7 +58,10 @@ class ProvisioningHostApduService : HostApduService() {
         return try {
             when (ins) {
                 0xA4.toByte() -> handleSelect(commandApdu) // always allow SELECT
-                INS_GET_CHALLENGE -> handleGetChallenge(lc, commandData)
+                INS_GET_DATA -> handleGetData(lc, commandData)
+                INS_SPAKE2_REQUEST -> handleSpake2Request(lc, commandData)
+                INS_SPAKE2_VERIFY -> handleSpake2Verify()
+                INS_OP_CONTROL -> handleOpControl(p1)
                 INS_READ_BINARY -> handleReadBinary(p1, p2)
                 INS_PROVISION_RESULT -> handleProvisionResult(lc, commandData)
                 else -> SW_INS_NOT_SUPPORTED
@@ -68,15 +82,14 @@ class ProvisioningHostApduService : HostApduService() {
         val aidBytes = apdu.copyOfRange(start, end)
         aidSelected = aidBytes.contentEquals(AID)
         return if (aidSelected) {
-            // Return 4-byte UID + 9000
-            val uid = DataStoreUtil.getOrCreate4ByteUid(this)
-            uid + SW_SUCCESS
+            // CCC SELECT response: return supported version tags + 9000
+            SELECT_OK + SW_SUCCESS
         } else {
             SW_INS_NOT_SUPPORTED
         }
     }
 
-    private fun handleGetChallenge(lc: Int, data: ByteArray): ByteArray {
+    private fun handleGetData(lc: Int, data: ByteArray): ByteArray {
         if (!aidSelected) return SW_UNKNOWN
         
         // SECURITY: Require user to be logged in for ALL provisioning steps
@@ -90,36 +103,13 @@ class ProvisioningHostApduService : HostApduService() {
         }
         
         return if (lc == 0) {
-            // Base credentials (keyId + pub + empty cert)
-            val base = ProvisioningResponseBuilder.buildBaseCredentialsPacket(this)
-            Log.i(TAG, "[PhaseA] OUT Base len=${base.size} last2=${String.format("%02X%02X", SW_SUCCESS[0], SW_SUCCESS[1])}")
+            // Base credentials (wrapped in 7F24)
+            val base = ProvisioningResponseBuilder.buildCccGetDataPacket(this)
+            Log.i(TAG, "[PhaseA] OUT GET DATA len=${base.size} last2=${String.format("%02X%02X", SW_SUCCESS[0], SW_SUCCESS[1])}")
             base + SW_SUCCESS
         } else {
             // Signature-only: challenge = incoming data
             Log.i(TAG, "[PhaseA] challenge(${lc}): ${data.toHex()}")
-            // Master-card mode: include HMAC binding of challenge + phone pub
-            if (MasterCardSession.isActive()) {
-                val masterSecret = MasterCardSession.getMasterSecret()
-                val masterVid = MasterCardSession.getVehicleId()
-                if (masterSecret == null || masterVid == null) {
-                    Log.w(TAG, "[PhaseA] Master session inactive after check")
-                    return SW_SECURITY_STATUS_NOT_SATISFIED
-                }
-                if (data.size < 24) {
-                    Log.w(TAG, "[PhaseA] Challenge too short for master provisioning: ${data.size}")
-                    return SW_UNKNOWN
-                }
-                val challengeVid = data.copyOfRange(0, 8)
-                if (!challengeVid.contentEquals(masterVid)) {
-                    Log.w(TAG, "[PhaseA] VehicleId mismatch for master provisioning")
-                    return SW_SECURITY_STATUS_NOT_SATISFIED
-                }
-                val pkt = ProvisioningResponseBuilder.buildSignaturePacketWithMac(this, data, masterSecret)
-                Log.i(TAG, "[PhaseA] OUT Master pktLen=${pkt.size}")
-                return pkt + SW_SUCCESS
-            }
-
-            // Legacy signature-only response
             val pkt = ProvisioningResponseBuilder.buildSignaturePacket(this, data)
             // Validate length prefix (BIG-endian) vs actual DER length
             if (pkt.size >= 2) {
@@ -140,6 +130,40 @@ class ProvisioningHostApduService : HostApduService() {
             }
             pkt + SW_SUCCESS
         }
+    }
+
+    private fun handleSpake2Request(lc: Int, data: ByteArray): ByteArray {
+        if (!aidSelected) return SW_UNKNOWN
+        if (lc < 2 || data.isEmpty()) return SW_UNKNOWN
+        val challenge = extractTlv(0x50.toByte(), data)
+        if (challenge == null || challenge.isEmpty()) {
+            Log.w(TAG, "[PhaseA] SPAKE2+ request missing tag 0x50")
+            return SW_UNKNOWN
+        }
+        spake2Challenge = challenge
+        Log.i(TAG, "[PhaseA] SPAKE2+ request stored challenge len=${challenge.size}")
+        return SW_SUCCESS
+    }
+
+    private fun handleSpake2Verify(): ByteArray {
+        if (!aidSelected) return SW_UNKNOWN
+        val challenge = spake2Challenge ?: return SW_SECURITY_STATUS_NOT_SATISFIED
+        if (!MasterCardSession.isActive()) return SW_SECURITY_STATUS_NOT_SATISFIED
+        val masterSecret = MasterCardSession.getMasterSecret() ?: return SW_SECURITY_STATUS_NOT_SATISFIED
+
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(masterSecret, "HmacSHA256"))
+        val macOut = mac.doFinal(challenge)
+        val tlv = buildTlv(0x58.toByte(), macOut)
+        spake2Challenge = null
+        Log.i(TAG, "[PhaseA] SPAKE2+ verify returning MAC len=${macOut.size}")
+        return tlv + SW_SUCCESS
+    }
+
+    private fun handleOpControl(p1: Byte): ByteArray {
+        if (!aidSelected) return SW_UNKNOWN
+        Log.i(TAG, "[PhaseA] OP CONTROL FLOW P1=${String.format("%02X", p1)}")
+        return SW_SUCCESS
     }
 
     private fun handleReadBinary(p1: Byte, p2: Byte): ByteArray {
@@ -191,7 +215,32 @@ class ProvisioningHostApduService : HostApduService() {
 
     override fun onDeactivated(reason: Int) {
         aidSelected = false
+        spake2Challenge = null
         Log.i(TAG, "HCE deactivated reason=$reason")
+    }
+
+    private fun extractTlv(tag: Byte, data: ByteArray): ByteArray? {
+        var idx = 0
+        while (idx + 2 <= data.size) {
+            val t = data[idx]
+            val len = data[idx + 1].toInt() and 0xFF
+            idx += 2
+            if (idx + len > data.size) return null
+            if (t == tag) {
+                return data.copyOfRange(idx, idx + len)
+            }
+            idx += len
+        }
+        return null
+    }
+
+    private fun buildTlv(tag: Byte, value: ByteArray): ByteArray {
+        val len = value.size
+        val out = ByteArray(2 + len)
+        out[0] = tag
+        out[1] = len.toByte()
+        System.arraycopy(value, 0, out, 2, len)
+        return out
     }
 }
 

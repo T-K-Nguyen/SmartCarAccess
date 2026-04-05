@@ -1,272 +1,170 @@
-Perfect — this is the right time to deeply understand **Phase A: Provisioning**.
-You already have the code working toward it, so let’s connect the dots clearly and human-readably.
+## ESP32 Smart Car Access (IoT)
+
+This firmware implements the ESP32 side of a CCC-inspired digital key flow. It keeps all vehicle secrets on-device, uses NFC for owner provisioning, uses BLE for authentication and secure data, and exposes a BLE attestation path for key sharing packages that are stored in Firebase on the phone side.
+
+The design follows two key rules:
+1. The cloud never stores immobilizer tokens.
+2. The ESP32 only trusts what it can verify locally (owner public key, signatures, and mailbox state).
 
 ---
 
-# 🚗 PHASE A — Provisioning Overview
+## 1) CCC Mailbox (Confidential Storage)
 
-### 🧩 Goal
+The CCC mailbox is persisted in ESP32 NVS (namespace `ccc_dk`) and cached in RAM for fast access.
 
-Phase A (Provisioning) is the **secure enrollment step** — it’s what happens when you first pair a *new phone* with your *vehicle ECU (ESP32 + PN532)*.
+Stored fields:
+- `v_id` (8 bytes): Vehicle ID, generated once at first boot.
+- `v_pub` (65 bytes): Vehicle public key, generated once at first boot.
+- `ep_pub` (65 bytes): Owner (endpoint) public key, stored during NFC provisioning.
+- `slot_bmp` (8 bits): Slot activation bitmap (0..7).
+- `sig_bmp` (16 bits): Signaling bitmap (flags).
+- `tok_0..tok_7` (32 bytes each): Immobilizer tokens per slot.
 
-After this phase:
-
-* The ESP32 “knows” and stores the phone’s **public key**, **key ID**, and optionally **certificate chain**.
-* The phone becomes a recognized, authorized key.
-* Later phases (Phase B “Unlock” and Phase C “UWB proximity”) depend on this trust relationship.
-
----
-
-# ⚙️ High-Level Flow
-
-| Step | Device        | Action                                              | Purpose                         |
-| ---- | ------------- | --------------------------------------------------- | ------------------------------- |
-| 1️⃣  | ESP32 + PN532 | Generate / load its own ECC keypair                 | Device identity                 |
-| 2️⃣  | ESP32         | Wait for admin to request provisioning              | Start provisioning mode         |
-| 3️⃣  | PN532         | Go into NFC target polling                          | Wait for phone tap              |
-| 4️⃣  | Phone (HCE)   | Respond to SELECT AID APDU                          | Identify correct app            |
-| 5️⃣  | ESP32         | Send `GET_CHALLENGE` APDU with `{vehicleId, nonce}` | Ask phone to prove its identity |
-| 6️⃣  | Phone         | Sign that nonce with its private key                | Prove it owns the key           |
-| 7️⃣  | Phone         | Send back `{keyId, pubKey, cert}`                   | Give ECU its credentials        |
-| 8️⃣  | ESP32         | Validate and save those credentials in NVS          | Remember authorized phone       |
+Behavior:
+- First boot generates `v_id` and `v_pub` and clears legacy provisioning data.
+- Owner provisioning sets slot 0 active and generates `tok_0`.
+- Slots 1..7 remain inactive until sharing is enabled.
 
 ---
 
-# 🧠 Step-by-Step Deep Dive
+## 2) NFC Owner Provisioning (Phase A)
 
-### 🟢 1. ESP32 loads or creates its own ECC keypair
+NFC provisioning uses the phone HCE applet and a two-step GET_CHALLENGE exchange.
 
-```cpp
-ensureKeypair()
-```
+Flow summary:
+1. ESP32 SELECTs the phone AID.
+2. Base GET_CHALLENGE returns phone public key (65 bytes) and optional cert chain.
+3. Signature GET_CHALLENGE verifies the phone signature over the challenge.
+4. On success, ESP32 stores the owner public key, sets slot 0, and generates `tok_0`.
 
-* Checks if an ECC key already exists in NVS (Preferences).
-* If not, it creates one using mbedTLS + `SECP256R1`.
-* Saves it back to NVS in PEM format.
+Challenge format:
+- `challenge = vehicle_id(8) || nonce(16)`
+- `vehicle_id` is taken from the CCC mailbox; a fallback constant is used only if missing.
 
-💡 *This keypair identifies the car — you can think of it as the car’s own “certificate”.*
-
----
-
-### 🟢 2. Admin triggers provisioning
-
-```cpp
-Provisioning::runNfcProvisioning();
-```
-
-* Puts PN532 into *provision mode* → polling suspended to avoid noise.
-* Uses a special AID:
-
-  ```cpp
-  static const uint8_t HCE_AID[] = {0xF0, 0x01, 0x02, 0x03, 0x04, 0x05};
-  ```
-* That AID must match your Android HCE app.
-
-Console shows:
-
-```
-[Prov] Admin requested provisioning. Bring phone close...
-```
+Result:
+- Owner is provisioned and the FSM is notified of credentials stored.
 
 ---
 
-### 🟢 3. Phone tap detected (ISO14443-A)
+## 3) BLE Authentication (Phase B)
 
-PN532 detects the NFC field:
+BLE Phase B establishes a secure session and proves the phone owns the long-term key.
 
-```
-[Prov][NFC] Waiting for phone tap...
-```
+High-level steps:
+1. ESP32 generates an ephemeral keypair and sends the public key.
+2. Phone returns its ephemeral key + signature over it.
+3. ESP32 verifies the signature using the stored owner public key.
+4. ECDH derives session keys (AES-256 key + HMAC key).
+5. ESP32 sends a challenge: `vehicle_id(8) || nonce(16)`.
+6. Phone signs the challenge; ESP32 verifies it.
 
-→ When the phone is in HCE mode, Android behaves as a **virtual card** using ISO-DEP.
-
----
-
-### 🟢 4. SELECT AID APDU
-
-ESP32 sends this APDU:
-
-```
-00 A4 04 00 06 F00102030405 00
-```
-
-Phone receives it, Android finds a matching HCE service registered for `F00102030405`, wakes up the app, and calls:
-
-```java
-processCommandApdu()
-```
-
-If your app replies with `90 00`, the ESP32 knows it’s the right phone:
-
-```
-[Prov][NFC] <<< Response ok=true
-```
+Notes:
+- `vehicle_id` for the challenge is pulled from the CCC mailbox, not random.
+- On success, the FSM is notified and the session keys are ready for encrypted channels.
 
 ---
 
-### 🟢 5. GET_CHALLENGE APDU
+## 4) BLE Attestation Service (Key Sharing Package)
 
-ESP32 builds another command:
+This is the ESP-side endpoint for the Firebase-driven sharing flow. The phone downloads the `attestation_package` from Firebase and writes it to the ESP32 over BLE.
 
-```cpp
-00 CA 00 00 [Lc] [vehicleId || nonce]
-```
+Service UUIDs:
+- Service: `555a0001-00aa-1111-2222-333344445555`
+- Auth_RX (phone -> ESP): `555a0002-00aa-1111-2222-333344445555`
+- Auth_TX (ESP -> phone): `555a0003-00aa-1111-2222-333344445555`
 
-* `vehicleId` = first 8 bytes of SHA-256 fingerprint of the car’s public key.
-* `nonce` = 16 random bytes from DRBG.
+Attestation payload (fixed 147 bytes):
+- Bytes 0..82 are hashed (SHA-256) and signed by the owner.
+- Signature is raw ECDSA R/S (64 bytes), not DER.
 
-Purpose → ask the phone to sign this random challenge.
+Layout:
+- 0x00..0x07: Vehicle_ID (8 bytes)
+- 0x08: Slot_ID (1 byte)
+- 0x09..0x49: Friend public key (65 bytes)
+- 0x4A..0x4D: Valid_From (uint32, big-endian)
+- 0x4E..0x51: Valid_Until (uint32, big-endian)
+- 0x52: Entitlement (1 byte)
+- 0x53..0x72: Signature_R (32 bytes)
+- 0x73..0x92: Signature_S (32 bytes)
+
+Verification rules on ESP32:
+1. Vehicle_ID must match the CCC mailbox `v_id`.
+2. Signature must verify using the stored owner public key.
+3. Time window must be valid (requires a trusted epoch).
+4. Slot_ID must be 1..7.
+
+Current policy:
+- Slots 1..7 are locked for now, even if the attestation is valid. The ESP replies with `ERR_SLOT_LOCKED` until sharing is enabled.
+
+Status responses on Auth_TX:
+- `READY`, `OK`, `ERR_LEN`, `ERR_VID`, `ERR_SIG`, `ERR_TIME`, `ERR_SLOT`, `ERR_NOT_PROVISIONED`, `ERR_SLOT_LOCKED`
+
+MTU requirement:
+- The 147-byte attestation write expects a larger MTU than the default 23 bytes. The firmware requests a larger MTU during BLE init (currently 512) so the payload is not fragmented.
 
 ---
 
-### 🟢 6. Phone signs the challenge
+## 5) BLE Admin Commands
 
-In your Android app:
+The admin service provides diagnostics and maintenance.
 
-1. Gets the APDU.
-2. Extracts `vehicleId` + `nonce`.
-3. Retrieves its **private key** from Android Keystore.
-4. Signs `nonce || vehicleId`.
-5. Builds a response:
-
-   ```
-   [keyIdLen][keyId][pubKey(65)][certLen(2)][cert]90 00
-   ```
+Notable admin commands:
+- 0x01: Clear provisioning only
+- 0x02: Clear all provisioning data
+- 0x33: Status summary
+- 0x34: Validate cert vs stored public key
+- 0x35: Check if public key is present
+- 0x36: CCC mailbox summary (vehicle ID, slot bitmap, endpoint presence)
 
 ---
 
-### 🟢 7. ESP32 verifies and stores credentials
+## 6) Time Requirement
 
-ESP32 parses the response:
+The attestation verifier checks `valid_from` and `valid_until`. This requires a trusted epoch on the ESP32. If time is not set, the ESP replies with `ERR_TIME`.
 
-```cpp
-pd.keyId
-pd.pubKey65
-pd.cert
-```
+Possible time sources:
+- SNTP/NTP
+- RTC module
+- BLE time sync from the phone
 
-Then:
+---
 
-* Checks that `pubKey65[0] == 0x04` → uncompressed EC key.
-* Saves them to NVS:
+## 7) Build
 
-  * `prov/phone_pub_raw`
-  * `prov/key_id`
-  * `prov/cert_chain`
-
-Example serial output:
+Use PlatformIO to build the firmware:
 
 ```
-[Prov] Stored phone public key (raw 65 bytes) in NVS.
-[Prov] Stored phone keyId in NVS.
-[Prov] Provisioned keyId='user-phone-1'
+platformio run
 ```
 
 ---
 
-### 🟢 8. Provisioning Success
+## 8) Current Limitations (By Design)
 
-Once saved, provisioning exits:
-
-```
-[Prov] Provisioning success. Polling resumed.
-```
-
-Now the ECU recognizes this phone as an authorized key.
+- Shared slots (1..7) are parsed and verified but not activated yet.
+- Token MAC binding is not implemented because the current 147-byte format does not carry a MAC and the phone does not possess `tok_n`.
+- Attestation time checks will fail unless the ESP32 has a valid epoch.
 
 ---
 
-# 🛡️  Error Handling
+## 9) Next Steps
 
-Phase A has detailed error management:
+- Add a trusted time source or allow a controlled dev bypass.
+- Enable slot activation for sharing (slots 1..7) once the phone flow is ready.
+- Define a token MAC binding step if cryptographic coupling to `tok_n` is required.
 
-| Stage            | Possible Error                      | System Reaction              |
-| ---------------- | ----------------------------------- | ---------------------------- |
-| Keypair missing  | `[Prov] Failed to init ECC keypair` | Retry or reset NVS           |
-| No NFC or phone  | `"no phone"`                        | Wait and re-poll             |
-| SELECT AID fails | `"SELECT AID failed"`               | Ignore tag, continue polling |
-| Wrong key format | `"Invalid phone public key format"` | Reset for retry              |
-| Duplicate keyId  | `"Duplicate keyId detected"`        | Abort provisioning           |
-| Commit failed    | `"Commit to flash failed"`          | Rollback and retry           |
 
----
 
-# 🧩 Internal Storage Map (ESP32 NVS)
 
-| NVS Key              | Description                      |
-| -------------------- | -------------------------------- |
-| `prov/ec_priv`       | ECC private key (PEM)            |
-| `prov/cert`          | Device certificate (optional)    |
-| `prov/phone_pub_raw` | 65-byte phone public key         |
-| `prov/key_id`        | Phone’s identifier               |
-| `prov/tags`          | Authorized physical tag list     |
-| `prov/cert_chain`    | Optional phone certificate chain |
 
----
 
-## 📶 Using the BLE Admin Service (to drive provisioning)
 
-When BLE is enabled (the firmware calls `BLEMod::begin()` in `setup()`), the ECU exposes an Admin GATT service that lets you query status and control provisioning behavior without serial.
 
-### Service and characteristics
 
-- Service (Admin): `9a9b9c9d-0000-4000-8000-9a9b9c9d0000`
-  - Admin Mode (RW, 1 byte): `9a9b9c9d-0001-4000-8000-9a9b9c9d0001`
-  - Admin Command (W): `9a9b9c9d-0002-4000-8000-9a9b9c9d0002`
-  - Admin Info (R/Notify): `9a9b9c9d-0003-4000-8000-9a9b9c9d0003`
-  - Phone Key Upload (W): `9a9b9c9d-0004-4000-8000-9a9b9c9d0004` (disabled in Phase A – use NFC provisioning)
 
-Enable notifications on Admin Info so you can see responses to your commands.
 
-### Commands (write to Admin Command)
 
-The characteristic accepts either a single raw byte or an ASCII hex string (e.g., `"01"`, `"0x01"`, `"33"`). The recognized commands are:
 
-- 0x01 — Clear phone provisioning only (keeps device keypair).
-  - Response: `CLEARED_PROVISIONED`
-- 0x02 — Clear everything including device keypair.
-  - Response: `CLEARED_ALL`
-- 0x10 — Legacy tag listing.
-  - Response: `NOT_SUPPORTED`
-- 0x20 — Request NFC provisioning (informational; NFC loop is always active).
-  - Response: `NFC_TAP_TO_PROVISION`
-- 0x30 — Set persistent force provisioning ON (future taps overwrite stored phone data).
-  - Response: `FORCE_PERSIST_ON`
-- 0x31 — Set persistent force provisioning OFF.
-  - Response: `FORCE_PERSIST_OFF`
-- 0x32 — Arm one‑shot force (only next successful provisioning overwrites, then auto-clears).
-  - Response: `FORCE_ONESHOT_ARMED`
-- 0x33 — Status query.
-  - Response: `STATUS P=YES/NO PF=ON/OFF OS=ARMED/NO`
-- 0x34 — Validate that stored cert matches stored pub key (if available).
-  - Response: `CERT_MATCH` or `CERT_MISMATCH`
-- 0x35 — Check if phone public key is present.
-  - Response: `PUB_PRESENT` or `PUB_NONE`
-- 0x36 — Get keyId summary (truncated if long).
-  - Response: `KEYID:<value>` or `KEYID_NONE`
 
-Any other values will respond with `UNSUPPORTED`.
 
-### Typical flows
 
-1) Check state before provisioning
-
-- Write `"33"` (or raw 0x33) to Admin Command.
-- Read/observe Admin Info notification (e.g., `STATUS P=NO PF=OFF OS=NO`).
-
-2) Ask app/user to tap phone for provisioning
-
-- Write `"20"` to Admin Command.
-- App shows prompt; user taps phone at reader. The NFC Phase A flow handles the rest.
-
-3) Force re‑provisioning for a different phone
-
-- Write `"32"` to arm one‑shot force (ideal for a single overwrite), or `"30"` to enable persistent force.
-- Tap the new phone; provisioning data will be overwritten if the signature verification succeeds.
-- Query `"33"` again to confirm flags (one‑shot clears automatically after success).
-
-### Troubleshooting tips
-
-- If you don’t see Admin Info notifications, ensure notifications are enabled in your BLE client.
-- The device advertises as `ESP-Smart-Car-ECU` and exposes both Admin and Auth/Echo services.
-- Serial prints include lines like `"[BLE-Admin] Cmd write: ..."` for command debugging.

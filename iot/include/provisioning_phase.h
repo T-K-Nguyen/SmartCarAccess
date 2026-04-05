@@ -7,29 +7,25 @@ namespace ProvisioningPhase {
   // Initialize provisioning. No device keypair is generated; Android Keystore holds private key.
   void begin();
 
-  // True if a phone keyId has already been stored.
+  // True if a phone public key has already been stored.
   bool isProvisioned();
-
-  // Store a keyId as hex if nothing is provisioned yet. Returns true on first-time set.
-  bool storeKeyIdHexIfEmpty(const uint8_t* bytes, size_t len);
-  // Store ASCII keyId (as provided by phone) if not already provisioned.
-  bool storeKeyIdAsciiIfEmpty(const char* ascii);
-  // Overwrite stored keyId unconditionally (for testing provisioning repeatedly)
-  bool storeKeyIdAsciiForce(const char* ascii);
 
   // Persist phone long-term public key (raw uncompressed 65 bytes: 0x04||X||Y)
   bool storePhonePubRaw(const uint8_t* pub65);
   // Persist optional certificate chain blob
   bool storeCertChain(const uint8_t* cert, size_t certLen);
 
+  // Owner provisioning helper: store phone pub, set slot 0, and generate tok_0.
+  bool setOwnerProvisioned(const uint8_t* pub65, bool force);
+
   // Verify ECDSA-P256 DER signature over data using uncompressed 65-byte public key
   bool verifySignatureP256(const uint8_t* pub65,
                            const uint8_t* data, size_t dataLen,
                            const uint8_t* sigDer, size_t sigLen);
 
-  // Clear all provisioning-related state (keys and key id)
+  // Clear all provisioning-related state (mailboxes, cert, flags)
   void clearAll();
-  // Clear only phone provisioning artifacts (keyId, phone pub, cert), keep device keypair
+  // Clear only phone provisioning artifacts (endpoint pub, cert), keep vehicle identity
   void clearProvisionedOnly();
   // Alias for clearProvisionedOnly (for FSM compatibility)
   void clearProvisionedData();
@@ -40,7 +36,6 @@ namespace ProvisioningPhase {
   void setOneShotForce(bool enable);           // Enable one-time force provisioning (cleared after use)
 
   // Read-back helpers for diagnostics
-  bool getKeyId(String& out);
   // Returns number of bytes copied (0 if missing). Expects max>=65 for full key.
   size_t getPhonePubRaw(uint8_t* out, size_t max);
   // Returns cert chain length (0 if missing). If 'out' provided and max>=len, copies into out.
@@ -50,11 +45,9 @@ namespace ProvisioningPhase {
   bool validateCertPublicKeyMatchesPub(const uint8_t* cert, size_t certLen, const uint8_t* pub65);
   bool validateStoredCertMatchesStoredPub();
 
-  // Optional: run a simple provisioning exchange using the currently working HCE flow.
-  // Uses the SELECT payload or subsequent UID APDU payload as the persistent ID.
-  // Returns true if a new keyId was stored.
+  // Deprecated: provisioning via HCE helper is not supported under CCC flow.
   bool runOnceWithHce(PN532& nfc, const uint8_t* aid, size_t aidLen, uint32_t waitMs = 15000);
   
-  // Get device private key in PEM format for signing (Phase B authentication)
+  // Deprecated: device does not hold a private key under CCC flow.
   size_t getDevicePrivateKeyPEM(uint8_t* out, size_t maxLen);
 }

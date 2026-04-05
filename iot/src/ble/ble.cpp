@@ -9,6 +9,7 @@
 #include "ble/ble.h"
 #include "ble/ble_admin.h"
 #include "ble/ble_auth.h"
+#include "ble/ble_attestation.h"
 #include "ble/ble_echo.h"
 
 namespace {
@@ -60,12 +61,14 @@ namespace BLEMod {
     pServer->setCallbacks(&s_serverCbs);
 
     // Register services (Auth/Echo share the same service UUID)
-  BLEAdmin::registerService(pServer);
-  BLEEcho::registerService(pServer, &s_drbg);
-  BLEAuth::registerService(pServer, &s_drbg);
+    BLEAdmin::registerService(pServer);
+    BLEEcho::registerService(pServer, &s_drbg);
+    BLEAuth::registerService(pServer, &s_drbg);
+    BLEAttestation::registerService(pServer);
 
-  if (pServer->getServiceByUUID("9a9b9c9d-0000-4000-8000-9a9b9c9d0000")) Serial.println("[BLE] Admin service registered");
-  if (pServer->getServiceByUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000")) Serial.println("[BLE] Auth/Echo service registered");
+    if (pServer->getServiceByUUID("9a9b9c9d-0000-4000-8000-9a9b9c9d0000")) Serial.println("[BLE] Admin service registered");
+    if (pServer->getServiceByUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000")) Serial.println("[BLE] Auth/Echo service registered");
+    if (pServer->getServiceByUUID("555a0001-00aa-1111-2222-333344445555")) Serial.println("[BLE] Attestation service registered");
 
     // Start the Auth service once after all characteristics are added
     if (auto pAuth = pServer->getServiceByUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000")) {
@@ -77,8 +80,9 @@ namespace BLEMod {
     NimBLEAdvertisementData advData; advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
     pAdvertising->setAdvertisementData(advData);
     NimBLEAdvertisementData scanResp; scanResp.setName(kDeviceName); pAdvertising->setScanResponseData(scanResp);
-  pAdvertising->addServiceUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000"); // Auth/Echo service UUID
-  pAdvertising->addServiceUUID("9a9b9c9d-0000-4000-8000-9a9b9c9d0000"); // Admin service UUID
+    pAdvertising->addServiceUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000"); // Auth/Echo service UUID
+    pAdvertising->addServiceUUID("9a9b9c9d-0000-4000-8000-9a9b9c9d0000"); // Admin service UUID
+    pAdvertising->addServiceUUID("555a0001-00aa-1111-2222-333344445555"); // Attestation service UUID
     pAdvertising->start();
 
     Serial.printf("[BLE] Advertising started: %s\n", kDeviceName);

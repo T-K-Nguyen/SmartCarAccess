@@ -4,6 +4,7 @@
 
 #include "../../include/ble/ble_admin.h"
 #include "provisioning_phase.h"
+#include "ccc_mailbox.h"
 #include "../../include/nfc_session.h"
 #include "../../include/ble/ble_auth.h"
 
@@ -71,7 +72,7 @@ namespace {
           _info->notify();
           break;
         case 0x02:
-          // Clear everything, including device keypair (equivalent to 'C')
+          // Clear provisioning data (equivalent to 'C')
           ProvisioningPhase::clearAll();
           _info->setValue("CLEARED_ALL");
           _info->notify();
@@ -124,19 +125,16 @@ namespace {
           _info->notify();
           Serial.printf("[BLE-Admin] Pub presence: %s\n", (len==65 && pub[0]==0x04)?"PRESENT":"NONE");
           break; }
-        case 0x36: { // KeyId summary
-          String kid; bool haveKid = ProvisioningPhase::getKeyId(kid);
-          if (!haveKid) {
-            _info->setValue("KEYID_NONE");
-             Serial.printf("[BLE-Admin] KEYID_NONE\n");
-          }else {
-            char buf[40];
-            size_t copyLen = kid.length() < 24 ? kid.length() : 24; // truncate if long
-            snprintf(buf, sizeof(buf), "KEYID:%.*s", (int)copyLen, kid.c_str());
-            _info->setValue(buf);
-            Serial.printf("[BLE-Admin] %s\n", buf);
-          }
+        case 0x36: { // CCC mailbox summary
+          const CCCMailbox::CCC_Mailbox& box = CCCMailbox::get();
+          const char* vid = CCCMailbox::vehicleId();
+          const char* vidSafe = (vid && vid[0] != '\0') ? vid : "--------";
+          char buf[64];
+          snprintf(buf, sizeof(buf), "CCC VID=%s SLOT=0x%02X EP=%s",
+                   vidSafe, box.slot_bitmap, CCCMailbox::hasEndpointPub() ? "Y" : "N");
+          _info->setValue(buf);
           _info->notify();
+          Serial.printf("[BLE-Admin] %s\n", buf);
           break; }
         case 0x40: // Start Phase B authentication test
           _info->setValue("AUTH_TEST_READY");

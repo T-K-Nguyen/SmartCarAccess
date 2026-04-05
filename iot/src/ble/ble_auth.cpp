@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <string>
+#include <cstring>
 #include <mbedtls/ecp.h>
 #include <mbedtls/ecdsa.h>
 #include <mbedtls/ecdh.h>
@@ -14,6 +15,7 @@
 
 #include "ble/ble_auth.h"
 #include "provisioning_phase.h"
+#include "ccc_mailbox.h"
 #include "fsm/fsm.h"
 #include "fsm/fsm_integration.h"
 
@@ -447,8 +449,15 @@ namespace {
       g_cStatus->notify();
     }
 
-    // Prepare challenge: generate vehicleId and nonce; publish to characteristic
-    for (int i = 0; i < 8; ++i) s_vehicle_id[i] = (uint8_t)esp_random();
+    // Prepare challenge: use CCC vehicleId and fresh nonce; publish to characteristic
+    const char* vid = CCCMailbox::vehicleId();
+    bool vidOk = vid && strlen(vid) == 8;
+    if (vidOk) {
+      memcpy(s_vehicle_id, vid, 8);
+    } else {
+      Serial.println("[AUTH] WARNING: CCC vehicleId missing; using random bytes");
+      for (int i = 0; i < 8; ++i) s_vehicle_id[i] = (uint8_t)esp_random();
+    }
     for (int i = 0; i < 16; ++i) s_nonce[i] = (uint8_t)esp_random();
     memcpy(s_challenge, s_vehicle_id, 8);
     memcpy(s_challenge + 8, s_nonce, 16);

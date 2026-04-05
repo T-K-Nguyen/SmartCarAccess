@@ -63,6 +63,15 @@ object ProvisioningResponseBuilder {
         
         return packet
     }
+
+    /**
+     * Wrap base credentials in CCC GET DATA tag 7F24.
+     */
+    fun buildCccGetDataPacket(context: Context): ByteArray {
+        val inner = buildBaseCredentialsPacket(context)
+        if (inner.isEmpty()) return ByteArray(0)
+        return wrapWith7F24(inner)
+    }
     
     /**
      * Build signature packet for Phase A challenge-response.
@@ -101,6 +110,15 @@ object ProvisioningResponseBuilder {
         Log.d(TAG, "   Signature: ${signature.toHex()}")
         
         return packet
+    }
+
+    private fun wrapWith7F24(inner: ByteArray): ByteArray {
+        val len = inner.size
+        return if (len <= 0x7F) {
+            byteArrayOf(0x7F.toByte(), 0x24.toByte(), len.toByte()) + inner
+        } else {
+            byteArrayOf(0x7F.toByte(), 0x24.toByte(), 0x81.toByte(), len.toByte()) + inner
+        }
     }
 
     /**
