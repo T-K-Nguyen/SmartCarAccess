@@ -72,6 +72,9 @@ const struct {
   
   // IDLE → AUTH on BLE connect (if provisioned)
   {State::IDLE, Event::BLE_CLIENT_CONNECTED, State::AUTH_WAIT_CONNECT, guardProvisioned},
+
+  // Accept credentials stored while idle (NFC flow can run outside FSM)
+  {State::IDLE, Event::CREDENTIALS_STORED, State::IDLE, nullptr},
   
   // PROVISIONING flow
   {State::PROVISIONING_WAIT_TAP, Event::NFC_CARD_DETECTED, State::PROVISIONING_SELECT_AID, nullptr},

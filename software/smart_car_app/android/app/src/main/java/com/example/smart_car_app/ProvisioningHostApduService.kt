@@ -1,6 +1,7 @@
 package com.example.smart_car_app
 
 import android.nfc.cardemulation.HostApduService
+import android.os.SystemClock
 import android.os.Bundle
 import android.util.Log
 import javax.crypto.Mac
@@ -31,10 +32,13 @@ class ProvisioningHostApduService : HostApduService() {
     // Track selection
     private var aidSelected = false
     private var spake2Challenge: ByteArray? = null
+    @Volatile private var cachedBase: ByteArray? = null
+    @Volatile private var baseWarmStarted = false
 
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "HCE provisioning service created. AID=${AID.toHex()}")
+        warmBaseCredentials()
     }
 
     override fun processCommandApdu(commandApdu: ByteArray?, extras: Bundle?): ByteArray {
@@ -43,6 +47,7 @@ class ProvisioningHostApduService : HostApduService() {
         // NOTE: We now only enforce login for the signature step. Allow SELECT and base (Lc=0) for testing.
 
         if (commandApdu.size < 4) return SW_UNKNOWN
+        val t0 = SystemClock.elapsedRealtime()
         val cla = commandApdu[0]
         val ins = commandApdu[1]
         val p1 = commandApdu[2]
@@ -55,7 +60,7 @@ class ProvisioningHostApduService : HostApduService() {
 
         if (cla != 0x00.toByte()) return SW_CLA_NOT_SUPPORTED
 
-        return try {
+        val response = try {
             when (ins) {
                 0xA4.toByte() -> handleSelect(commandApdu) // always allow SELECT
                 INS_GET_DATA -> handleGetData(lc, commandData)
@@ -70,6 +75,13 @@ class ProvisioningHostApduService : HostApduService() {
             Log.e(TAG, "Exception processing APDU: ${e.message}", e)
             SW_UNKNOWN
         }
+
+        val dt = SystemClock.elapsedRealtime() - t0
+        Log.i(
+            TAG,
+            "[APDU] ins=${String.format("%02X", ins)} lc=$lc respLen=${response.size} dt=${dt}ms selected=$aidSelected"
+        )
+        return response
     }
 
     private fun handleSelect(apdu: ByteArray): ByteArray {
@@ -104,7 +116,7 @@ class ProvisioningHostApduService : HostApduService() {
         
         return if (lc == 0) {
             // Base credentials (wrapped in 7F24)
-            val base = ProvisioningResponseBuilder.buildCccGetDataPacket(this)
+            val base = getCachedBaseCredentials() ?: return SW_UNKNOWN
             Log.i(TAG, "[PhaseA] OUT GET DATA len=${base.size} last2=${String.format("%02X%02X", SW_SUCCESS[0], SW_SUCCESS[1])}")
             base + SW_SUCCESS
         } else {
@@ -130,6 +142,37 @@ class ProvisioningHostApduService : HostApduService() {
             }
             pkt + SW_SUCCESS
         }
+    }
+
+    private fun warmBaseCredentials() {
+        if (baseWarmStarted) return
+        baseWarmStarted = true
+        Thread {
+            try {
+                Log.i(TAG, "[PhaseA] Warming base credentials")
+                val base = ProvisioningResponseBuilder.buildCccGetDataPacket(this)
+                if (base.isNotEmpty()) {
+                    cachedBase = base
+                    Log.i(TAG, "[PhaseA] Base credentials cached len=${base.size}")
+                } else {
+                    Log.w(TAG, "[PhaseA] Base credentials warm returned empty")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[PhaseA] Base credentials warm failed", e)
+            }
+        }.start()
+    }
+
+    private fun getCachedBaseCredentials(): ByteArray? {
+        cachedBase?.let { return it }
+        warmBaseCredentials()
+        val start = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - start < 200) {
+            cachedBase?.let { return it }
+            Thread.sleep(10)
+        }
+        Log.w(TAG, "[PhaseA] Base credentials not ready; retry")
+        return null
     }
 
     private fun handleSpake2Request(lc: Int, data: ByteArray): ByteArray {
@@ -216,7 +259,12 @@ class ProvisioningHostApduService : HostApduService() {
     override fun onDeactivated(reason: Int) {
         aidSelected = false
         spake2Challenge = null
-        Log.i(TAG, "HCE deactivated reason=$reason")
+        val reasonStr = when (reason) {
+            DEACTIVATION_DESELECTED -> "DESELECTED"
+            DEACTIVATION_LINK_LOSS -> "LINK_LOSS"
+            else -> "UNKNOWN"
+        }
+        Log.i(TAG, "HCE deactivated reason=$reason ($reasonStr)")
     }
 
     private fun extractTlv(tag: Byte, data: ByteArray): ByteArray? {

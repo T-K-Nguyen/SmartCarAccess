@@ -17,6 +17,10 @@ namespace {
     PN532_HSU* hsu = nullptr;
     PN532* nfc = nullptr;
     bool samConfigured = false;
+    bool waitingForRemoval = false;
+    bool targetActive = false;
+    uint32_t removalWaitStartedMs = 0;
+    uint32_t lastRemovalWaitLogMs = 0;
 
     // Startup guard to ignore early serial noise
     uint32_t bootMillis = 0;
@@ -66,6 +70,10 @@ namespace {
 
     bool apduRetry(const uint8_t* apdu, uint8_t apduLen, uint8_t* resp, uint8_t* respLen,
                                  uint8_t attempts, uint16_t backoffMs);
+    bool apduRetryWithReselect(const uint8_t* apdu, uint8_t apduLen, uint8_t* resp, uint8_t* respLen,
+                               uint8_t attempts, uint16_t backoffMs, uint32_t selectTimeoutMs,
+                               uint8_t inPlaceTries);
+    bool releaseTarget();
     bool ensureSelected(uint32_t timeoutMs);
 
     bool unwrap7F24(const uint8_t* payload, int payloadLen, const uint8_t** out, int* outLen) {
@@ -106,14 +114,21 @@ namespace {
         return false;
     }
 
+    bool isExpectedSelectPayload(const uint8_t* payload, int payloadLen) {
+        static const uint8_t kSelectPayload[] = {
+            0x5A, 0x03, 0x02, 0x00, 0x00,
+            0x5C, 0x04, 0x01, 0x00, 0x01, 0x00
+        };
+        return payload && payloadLen == (int)sizeof(kSelectPayload)
+            && memcmp(payload, kSelectPayload, sizeof(kSelectPayload)) == 0;
+    }
+
     bool sendSpake2Mastercard(const uint8_t* challenge, size_t challengeLen) {
         if (!challenge || challengeLen == 0 || challengeLen > 32) return false;
 
+        delay(150); // give HCE a moment to settle between APDUs
+
         // SPAKE2+ REQUEST (INS 0x30) with TLV tag 0x50 carrying the challenge
-        if (!ensureSelected(2500)) {
-            Serial.println("[PhaseA] SELECT before SPAKE2+ request failed");
-            return false;
-        }
         uint8_t reqApdu[5 + 2 + 32 + 1];
         uint8_t idx = 0;
         uint8_t tlvLen = (uint8_t)(2 + challengeLen);
@@ -125,7 +140,7 @@ namespace {
         reqApdu[idx++] = 0x00; // Le
 
         uint8_t reqResp[64]; uint8_t reqLen = sizeof(reqResp);
-        bool reqOk = apduRetry(reqApdu, idx, reqResp, &reqLen, 3, 120)
+        bool reqOk = apduRetryWithReselect(reqApdu, idx, reqResp, &reqLen, 4, 120, 5000, 2)
             && reqLen >= 2 && reqResp[reqLen - 2] == 0x90 && reqResp[reqLen - 1] == 0x00;
         if (!reqOk) {
             Serial.println("[PhaseA] SPAKE2+ REQUEST failed");
@@ -133,13 +148,10 @@ namespace {
         }
 
         // SPAKE2+ VERIFY (INS 0x32) expects TLV tag 0x58 with MAC
-        if (!ensureSelected(2500)) {
-            Serial.println("[PhaseA] SELECT before SPAKE2+ verify failed");
-            return false;
-        }
+        delay(120);
         uint8_t verApdu[] = {0x00, kInsSpake2Verify, 0x00, 0x00, 0x00};
         uint8_t verResp[96]; uint8_t verLen = sizeof(verResp);
-        bool verOk = apduRetry(verApdu, sizeof(verApdu), verResp, &verLen, 3, 120)
+        bool verOk = apduRetryWithReselect(verApdu, sizeof(verApdu), verResp, &verLen, 5, 200, 6000, 1)
             && verLen >= 2 && verResp[verLen - 2] == 0x90 && verResp[verLen - 1] == 0x00;
         if (!verOk) {
             Serial.println("[PhaseA] SPAKE2+ VERIFY failed");
@@ -166,13 +178,14 @@ namespace {
     }
 
     bool sendOpControlFlowSuccess() {
-        if (!ensureSelected(1500)) {
+        // Best-effort only. Keep this non-blocking to avoid long stalls after success.
+        if (!ensureSelected(350)) {
             Serial.println("[PhaseA] SELECT before OP CONTROL FLOW failed");
             return false;
         }
         uint8_t apdu[] = {0x00, kInsOpControl, 0x11, 0x00, 0x00};
         uint8_t resp[16]; uint8_t rlen = sizeof(resp);
-        bool ok = apduRetry(apdu, sizeof(apdu), resp, &rlen, 2, 80)
+        bool ok = apduRetry(apdu, sizeof(apdu), resp, &rlen, 1, 0)
             && rlen >= 2 && resp[rlen - 2] == 0x90 && resp[rlen - 1] == 0x00;
         if (!ok) {
             Serial.println("[PhaseA] OP CONTROL FLOW failed");
@@ -193,8 +206,10 @@ namespace {
     // Repeatedly try an INDATAEXCHANGE (APDU) with retry/backoff
     bool apduRetry(const uint8_t* apdu, uint8_t apduLen, uint8_t* resp, uint8_t* respLen,
                                  uint8_t attempts = 3, uint16_t backoffMs = 60) {
+        if (!respLen) return false;
+        uint8_t maxLen = *respLen;
         for (uint8_t attempt = 1; attempt <= attempts; ++attempt) {
-            uint8_t len = *respLen;
+            uint8_t len = maxLen;
             bool ok = nfc->inDataExchange((uint8_t*)apdu, apduLen, resp, &len);
             if (kDebugApdu) {
                 Serial.printf("[APDU] try=%u ok=%s len=%u\n", attempt, ok ? "YES" : "NO", len);
@@ -211,6 +226,35 @@ namespace {
             }
             if (attempt < attempts) delay(backoffMs);
         }
+        *respLen = 0;
+        return false;
+    }
+
+    bool apduRetryWithReselect(const uint8_t* apdu, uint8_t apduLen, uint8_t* resp, uint8_t* respLen,
+                               uint8_t attempts, uint16_t backoffMs, uint32_t selectTimeoutMs,
+                               uint8_t inPlaceTries = 3) {
+        if (!respLen) return false;
+        uint8_t maxLen = *respLen;
+        // First try in-place with a few retries; avoid hammering the HCE with immediate reselects.
+        *respLen = maxLen;
+        if (apduRetry(apdu, apduLen, resp, respLen, inPlaceTries, backoffMs)) {
+            return true;
+        }
+        for (uint8_t attempt = 1; attempt <= attempts; ++attempt) {
+            // Hard-reset the target state before trying to reselect.
+            releaseTarget();
+            delay(80);
+            if (!ensureSelected(selectTimeoutMs)) {
+                if (attempt < attempts) delay(backoffMs);
+                continue;
+            }
+            delay(80);
+            *respLen = maxLen;
+            bool ok = apduRetry(apdu, apduLen, resp, respLen, 1, 0);
+            if (ok) return true;
+            if (attempt < attempts) delay(backoffMs);
+        }
+        *respLen = 0;
         return false;
     }
 
@@ -226,11 +270,12 @@ namespace {
     // Explicitly release any active target/session on the PN532 to return to idle.
     // This prevents the next poll from requiring a "priming" tap.
     bool releaseTarget() {
-        // Some libraries return bool; ignore result if not supported.
+        if (!targetActive) return true;
         bool ok = nfc->inRelease();
         if (kDebugApdu) {
             Serial.printf("[PN532] inRelease=%s\n", ok ? "OK" : "FAIL");
         }
+        targetActive = false;
         return ok;
     }
 
@@ -248,6 +293,7 @@ namespace {
             if (present) {
                 if (++stableCount >= stableReads) {
                     Serial.println("Card detected (stable)");
+                    targetActive = true;
                     return true;
                 }
             } else {
@@ -278,7 +324,6 @@ namespace {
                 absentCount = 0;
             }
             if (timeoutMs && millis() - start >= timeoutMs) {
-                Serial.println("Removal wait timeout");
                 return false;
             }
             delay(pollMs);
@@ -314,19 +359,18 @@ namespace {
     // or continue to the next cycle to keep UX snappy. For failed SELECT, just short backoff.
     void postSessionCooldown(bool hadSelectSuccess) {
         if (hadSelectSuccess) {
-            // Wait up to ~1.5s for user to remove phone; if not, continue anyway
-            bool removed = waitForRemoval(1500, 2, 80);
-            if (!removed) {
-                Serial.println("[Session] Proceeding without removal (phone still present)");
-            }
-            // In any case, release the target to ensure the next poll starts cleanly
-            releaseTarget();
-        } else {
-            // Wrong tag / SELECT failed: small backoff to avoid tight loop
-            delay(200);
-            // Release just in case there is a half-open session
-            releaseTarget();
+            // Defer removal handling so FSM can process the queued event immediately.
+            waitingForRemoval = true;
+            removalWaitStartedMs = millis();
+            lastRemovalWaitLogMs = 0;
+            return;
         }
+        // Wrong tag / SELECT failed: small backoff to avoid tight loop
+        delay(200);
+        // Release just in case there is a half-open session
+        removalWaitStartedMs = 0;
+        lastRemovalWaitLogMs = 0;
+        releaseTarget();
     }
 
     // Build and send SELECT AID APDU; returns SW1, SW2 and payload length
@@ -338,9 +382,12 @@ namespace {
         for (size_t i = 0; i < sizeof(aid); ++i) sel[idx++] = aid[i];
         sel[idx++] = 0x00; // Le
 
-        uint8_t resp[64];
+        uint8_t resp[255];
         uint8_t rlen = sizeof(resp);
-        if (!apduRetry(sel, idx, resp, &rlen, 3, 80)) {
+        if (kDebugApdu) {
+            Serial.print("[APDU] SELECT cmd: "); printHex(sel, idx);
+        }
+        if (!apduRetry(sel, idx, resp, &rlen, 1, 0)) {
             if (kDebugApdu) Serial.println("[APDU] SELECT failed (no response)");
             return false;
         }
@@ -348,6 +395,18 @@ namespace {
         sw1 = (rlen >= 2) ? resp[rlen - 2] : 0x00;
         sw2 = (rlen >= 2) ? resp[rlen - 1] : 0x00;
         payloadLen = (rlen >= 2) ? (rlen - 2) : 0;
+
+        if (sw1 == 0x90 && sw2 == 0x00 && !isExpectedSelectPayload(resp, payloadLen)) {
+            if (kDebugApdu) {
+                Serial.printf("[APDU] SELECT payload mismatch len=%d (likely stale response)\n", payloadLen);
+                if (payloadLen > 0) {
+                    Serial.print("[APDU] SELECT unexpected payload: ");
+                    printHex(resp, payloadLen);
+                }
+            }
+            return false;
+        }
+
         if (kDebugApdu) {
             Serial.printf("[APDU] SELECT SW=%02X%02X payloadLen=%d\n", sw1, sw2, payloadLen);
         }
@@ -423,68 +482,65 @@ namespace {
         // Step 1: Base GET DATA (Lc=0)
         // ------------------------------
         Serial.println("[PhaseA] Step1: Base GET DATA (Lc=0)");
-        if (!ensureSelected(2500)) {
-            Serial.println("[PhaseA] SELECT before base failed");
-            return;
-        }
-        uint8_t baseApduNoLe[] = {0x00, 0xCA, 0x00, 0x00};
         uint8_t baseApduLe0[] = {0x00, 0xCA, 0x00, 0x00, 0x00};
         uint8_t baseResp[255]; uint8_t baseLen = sizeof(baseResp);
 
-        Serial.print("[PhaseA] OUT Base APDU: "); printHex(baseApduNoLe, sizeof(baseApduNoLe));
+        Serial.print("[PhaseA] OUT Base APDU (Le=0): "); printHex(baseApduLe0, sizeof(baseApduLe0));
         delay(120);
-        bool baseOk = apduRetry(baseApduNoLe, sizeof(baseApduNoLe), baseResp, &baseLen, 5, 150)
-            && baseLen >= 2 && baseResp[baseLen - 2] == 0x90 && baseResp[baseLen - 1] == 0x00;
-        if (!baseOk) {
+        BaseInfo info;
+        const uint8_t* basePayload = nullptr;
+        int basePayloadLen = 0;
+        bool baseOk = false;
+        for (uint8_t pass = 1; pass <= 3; ++pass) {
             baseLen = sizeof(baseResp);
-            Serial.print("[PhaseA] OUT Base APDU (Le=0): "); printHex(baseApduLe0, sizeof(baseApduLe0));
-            delay(120);
-            baseOk = apduRetry(baseApduLe0, sizeof(baseApduLe0), baseResp, &baseLen, 5, 150)
+            bool exchangeOk = apduRetryWithReselect(baseApduLe0, sizeof(baseApduLe0), baseResp, &baseLen, 4, 150, 4000, 1)
                 && baseLen >= 2 && baseResp[baseLen - 2] == 0x90 && baseResp[baseLen - 1] == 0x00;
-        }
-        if (!baseOk) {
-            Serial.println("[PhaseA] Base GET DATA failed (reselect + retry)");
-            if (ensureSelected(2500)) {
-                delay(160);
-                baseLen = sizeof(baseResp);
-                Serial.print("[PhaseA] OUT Base APDU (retry): "); printHex(baseApduNoLe, sizeof(baseApduNoLe));
-                baseOk = apduRetry(baseApduNoLe, sizeof(baseApduNoLe), baseResp, &baseLen, 5, 150)
-                    && baseLen >= 2 && baseResp[baseLen - 2] == 0x90 && baseResp[baseLen - 1] == 0x00;
-                if (!baseOk) {
-                    baseLen = sizeof(baseResp);
-                    Serial.print("[PhaseA] OUT Base APDU (retry Le=0): "); printHex(baseApduLe0, sizeof(baseApduLe0));
-                    baseOk = apduRetry(baseApduLe0, sizeof(baseApduLe0), baseResp, &baseLen, 5, 150)
-                        && baseLen >= 2 && baseResp[baseLen - 2] == 0x90 && baseResp[baseLen - 1] == 0x00;
-                }
+            if (!exchangeOk) {
+                continue;
             }
+
+            Serial.printf("[PhaseA] IN Base Resp len=%u SW=%02X%02X\n", baseLen, baseResp[baseLen - 2], baseResp[baseLen - 1]);
+            int payloadLen = baseLen - 2;
+            const uint8_t* payload = baseResp;
+            const uint8_t* candidatePayload = payload;
+            int candidateLen = payloadLen;
+            if (payloadLen >= 2 && payload[0] == 0x7F && payload[1] == 0x24) {
+                const uint8_t* inner = nullptr;
+                int innerLen = 0;
+                if (!unwrap7F24(payload, payloadLen, &inner, &innerLen)) {
+                    Serial.println("[PhaseA] GET DATA 7F24 parse failed");
+                    releaseTarget();
+                    delay(120);
+                    continue;
+                }
+                candidatePayload = inner;
+                candidateLen = innerLen;
+                Serial.printf("[PhaseA] GET DATA 7F24 unwrapped len=%d\n", candidateLen);
+            }
+
+            BaseInfo candidateInfo;
+            if (!parseBaseResponse(candidatePayload, candidateLen, candidateInfo)) {
+                Serial.printf("[PhaseA] Base payload parse error (len=%d), retrying...\n", candidateLen);
+                Serial.print("[PhaseA] Base payload: "); printHex(candidatePayload, candidateLen);
+                releaseTarget();
+                delay(120);
+                continue;
+            }
+
+            info = candidateInfo;
+            basePayload = candidatePayload;
+            basePayloadLen = candidateLen;
+            baseOk = true;
+            break;
         }
+
         if (!baseOk) {
             Serial.println("[PhaseA] Base GET DATA failed");
-            Serial.print("[PhaseA] Last base resp: "); printHex(baseResp, baseLen);
-            return;
-        }
-
-        Serial.printf("[PhaseA] IN Base Resp len=%u SW=%02X%02X\n", baseLen, baseResp[baseLen - 2], baseResp[baseLen - 1]);
-        int payloadLen = baseLen - 2;
-        const uint8_t* payload = baseResp;
-        const uint8_t* basePayload = payload;
-        int basePayloadLen = payloadLen;
-        if (payloadLen >= 2 && payload[0] == 0x7F && payload[1] == 0x24) {
-            const uint8_t* inner = nullptr;
-            int innerLen = 0;
-            if (!unwrap7F24(payload, payloadLen, &inner, &innerLen)) {
-                Serial.println("[PhaseA] GET DATA 7F24 parse failed");
-                return;
+            if (baseLen > 0) {
+                Serial.print("[PhaseA] Last base resp: "); printHex(baseResp, baseLen);
+            } else {
+                Serial.println("[PhaseA] Last base resp: <none>");
             }
-            basePayload = inner;
-            basePayloadLen = innerLen;
-            Serial.printf("[PhaseA] GET DATA 7F24 unwrapped len=%d\n", basePayloadLen);
-        }
-
-        BaseInfo info;
-        if (!parseBaseResponse(basePayload, basePayloadLen, info)) {
-            Serial.printf("[PhaseA] Base payload parse error (len=%d)\n", basePayloadLen);
-            Serial.print("[PhaseA] Base payload: "); printHex(basePayload, basePayloadLen);
             return;
         }
 
@@ -501,15 +557,21 @@ namespace {
             Serial.println("[PhaseA] cert: <none>");
         }
 
-        // ------------------------------
-        // Step 2: Signature GET DATA (Lc=24)
-        // ------------------------------
-        // Some phones deselect the AID after the base response; reselect to stabilize the link.
-        if (!ensureSelected(2500)) {
+        // Re-sync RF session boundary before signature step.
+        // Phone HCE may deactivate after base response on some devices.
+        Serial.println("[PhaseA] Resync before signature...");
+        releaseTarget();
+        delay(140);
+        if (!ensureSelected(4000)) {
             Serial.println("[PhaseA] SELECT before signature failed");
             return;
         }
-        delay(120);
+        delay(140);
+
+        // ------------------------------
+        // Step 2: Signature GET DATA (Lc=24)
+        // ------------------------------
+        // Some phones deselect the AID after the base response; retries handle reselect if needed.
         Serial.println("[PhaseA] Step2: Signature GET DATA (Lc=24 challenge)");
         uint8_t nonce[16];
         for (int i = 0; i < 16; ++i) nonce[i] = (uint8_t)esp_random();
@@ -536,7 +598,7 @@ namespace {
 
         Serial.print("[PhaseA] OUT Sig APDU: "); printHex(sigApdu, sIdx);
         uint8_t sigResp[255]; uint8_t sigTotalLen = sizeof(sigResp);
-        bool sigOk = apduRetry(sigApdu, sIdx, sigResp, &sigTotalLen, 5, 150)
+        bool sigOk = apduRetryWithReselect(sigApdu, sIdx, sigResp, &sigTotalLen, 5, 150, 2500, 2)
             && sigTotalLen >= 2 && sigResp[sigTotalLen - 2] == 0x90 && sigResp[sigTotalLen - 1] == 0x00;
         if (!sigOk) {
             Serial.println("[PhaseA] Signature GET DATA failed (reselect + retry)");
@@ -546,7 +608,7 @@ namespace {
             if (selectAid(sw1c, sw2c, plc) && sw1c == 0x90 && sw2c == 0x00) {
                 delay(160);
                 sigTotalLen = sizeof(sigResp);
-                sigOk = apduRetry(sigApdu, sIdx, sigResp, &sigTotalLen, 5, 150)
+                sigOk = apduRetryWithReselect(sigApdu, sIdx, sigResp, &sigTotalLen, 5, 150, 2500, 2)
                     && sigTotalLen >= 2 && sigResp[sigTotalLen - 2] == 0x90 && sigResp[sigTotalLen - 1] == 0x00;
             }
         }
@@ -598,10 +660,11 @@ namespace {
         if (info.certLen > 0) ProvisioningPhase::storeCertChain(info.cert, info.certLen);
         Serial.println("[PhaseA] Provisioning data persisted (CCC mailbox owner slot)");
 
+        // Best-effort close while session is still active.
+        sendOpControlFlowSuccess();
         if (!sendProvisionResult()) {
             Serial.println("[PhaseA] Warning: failed to notify phone of provisioning result");
         }
-        sendOpControlFlowSuccess();
 
         // Trigger FSM provision success event
         FSMIntegration::NFC::onCredentialsStored();
@@ -695,6 +758,37 @@ namespace NfcSession {
     void tick() {
         // Process admin serial commands
         handleSerialCommands();
+
+        if (waitingForRemoval) {
+            bool removed = waitForRemoval(1500, 2, 80);
+            if (removed) {
+                waitingForRemoval = false;
+                removalWaitStartedMs = 0;
+                lastRemovalWaitLogMs = 0;
+                releaseTarget();
+                return;
+            }
+
+            uint32_t now = millis();
+            if (removalWaitStartedMs == 0) removalWaitStartedMs = now;
+
+            // Prevent indefinite wait loops when some phones keep the RF field "present".
+            // Use a shorter cap to keep post-success UX snappy.
+            if (now - removalWaitStartedMs >= 4500) {
+                Serial.println("[Session] Removal wait max reached; continuing");
+                waitingForRemoval = false;
+                removalWaitStartedMs = 0;
+                lastRemovalWaitLogMs = 0;
+                releaseTarget();
+                return;
+            }
+
+            if (lastRemovalWaitLogMs == 0 || (now - lastRemovalWaitLogMs >= 3000)) {
+                Serial.println("[Session] Waiting for removal...");
+                lastRemovalWaitLogMs = now;
+            }
+            return;
+        }
 
         // Wait for card; if none, try to refresh SAMConfig occasionally
         if (!waitForCard(15000, 2, 60)) {

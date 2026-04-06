@@ -903,17 +903,41 @@ bool PN532::inDataExchange(uint8_t *send, uint8_t sendLength, uint8_t *response,
 
     if (HAL(writeCommand)(pn532_packetbuffer, 2, send, sendLength))
     {
+#if PN532_EXCHANGE_DEBUG
+        Serial.println("[PN532] inDataExchange writeCommand failed");
+#endif
         return false;
     }
 
-    int16_t status = HAL(readResponse)(response, *responseLength, 1000);
+    int16_t status = HAL(readResponse)(response, *responseLength, PN532_INDATAEXCHANGE_TIMEOUT_MS);
     if (status < 0)
     {
+#if PN532_EXCHANGE_DEBUG
+        if (status == PN532_TIMEOUT)
+        {
+            Serial.println("[PN532] inDataExchange timeout");
+        }
+        else if (status == PN532_INVALID_FRAME)
+        {
+            Serial.println("[PN532] inDataExchange invalid frame");
+        }
+        else if (status == PN532_NO_SPACE)
+        {
+            Serial.println("[PN532] inDataExchange no space");
+        }
+        else
+        {
+            Serial.printf("[PN532] inDataExchange error=%d\n", (int)status);
+        }
+#endif
         return false;
     }
 
     if ((response[0] & 0x3f) != 0)
     {
+#if PN532_EXCHANGE_DEBUG
+        Serial.printf("[PN532] inDataExchange status=0x%02X len=%d\n", response[0], (int)status);
+#endif
         DMSG("Status code indicates an error\n");
         return false;
     }
@@ -952,18 +976,42 @@ bool PN532::inCommunicateThru(uint8_t *send, uint8_t sendLength, uint8_t *respon
 
     if (HAL(writeCommand)(pn532_packetbuffer, 1, send, sendLength))
     {
+#if PN532_EXCHANGE_DEBUG
+        Serial.println("[PN532] inCommunicateThru writeCommand failed");
+#endif
         return false;
     }
 
-    int16_t status = HAL(readResponse)(response, *responseLength, 1000);
+    int16_t status = HAL(readResponse)(response, *responseLength, PN532_INDATAEXCHANGE_TIMEOUT_MS);
     if (status < 0)
     {
+#if PN532_EXCHANGE_DEBUG
+        if (status == PN532_TIMEOUT)
+        {
+            Serial.println("[PN532] inCommunicateThru timeout");
+        }
+        else if (status == PN532_INVALID_FRAME)
+        {
+            Serial.println("[PN532] inCommunicateThru invalid frame");
+        }
+        else if (status == PN532_NO_SPACE)
+        {
+            Serial.println("[PN532] inCommunicateThru no space");
+        }
+        else
+        {
+            Serial.printf("[PN532] inCommunicateThru error=%d\n", (int)status);
+        }
+#endif
         return false;
     }
 
     // check status code
     if (response[0] != 0x0)
     {
+#if PN532_EXCHANGE_DEBUG
+        Serial.printf("[PN532] inCommunicateThru status=0x%02X len=%d\n", response[0], (int)status);
+#endif
         DMSG("Status code indicates an error : 0x");
         DMSG_HEX(pn532_packetbuffer[0]);
         DMSG("\n");

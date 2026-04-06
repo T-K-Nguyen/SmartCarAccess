@@ -51,6 +51,15 @@
 
 #define PN532_MIFARE_ISO14443A (0x00)
 
+// HCE APDU exchanges can be slower on some phones; allow a longer timeout.
+#ifndef PN532_INDATAEXCHANGE_TIMEOUT_MS
+#define PN532_INDATAEXCHANGE_TIMEOUT_MS (1200)
+#endif
+
+#ifndef PN532_EXCHANGE_DEBUG
+#define PN532_EXCHANGE_DEBUG (1)
+#endif
+
 // Mifare Commands
 #define MIFARE_CMD_AUTH_A (0x60)
 #define MIFARE_CMD_AUTH_B (0x61)
