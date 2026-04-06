@@ -20,6 +20,7 @@ class ProvisioningHostApduService : HostApduService() {
         private const val INS_GET_DATA = 0xCA.toByte()
         private const val INS_SPAKE2_REQUEST = 0x30.toByte()
         private const val INS_SPAKE2_VERIFY = 0x32.toByte()
+        private const val INS_WRITE_DATA = 0xD4.toByte()
         private const val INS_OP_CONTROL = 0x3C.toByte()
         private const val INS_READ_BINARY = 0xB0.toByte()
         private const val INS_PROVISION_RESULT = 0xDA.toByte()
@@ -66,6 +67,7 @@ class ProvisioningHostApduService : HostApduService() {
                 INS_GET_DATA -> handleGetData(lc, commandData)
                 INS_SPAKE2_REQUEST -> handleSpake2Request(lc, commandData)
                 INS_SPAKE2_VERIFY -> handleSpake2Verify()
+                INS_WRITE_DATA -> handleWriteData(lc, commandData)
                 INS_OP_CONTROL -> handleOpControl(p1)
                 INS_READ_BINARY -> handleReadBinary(p1, p2)
                 INS_PROVISION_RESULT -> handleProvisionResult(lc, commandData)
@@ -201,6 +203,31 @@ class ProvisioningHostApduService : HostApduService() {
         spake2Challenge = null
         Log.i(TAG, "[PhaseA] SPAKE2+ verify returning MAC len=${macOut.size}")
         return tlv + SW_SUCCESS
+    }
+
+    private fun handleWriteData(lc: Int, data: ByteArray): ByteArray {
+        if (!aidSelected) return SW_UNKNOWN
+        if (lc < 4 || data.isEmpty()) return SW_UNKNOWN
+
+        val vehicleId = extractTlv(0x80.toByte(), data)
+        val vehiclePub = extractTlv(0x81.toByte(), data)
+        if (vehicleId == null || vehiclePub == null) {
+            Log.w(TAG, "[PhaseA] WRITE DATA missing required TLVs (0x80/0x81)")
+            return SW_UNKNOWN
+        }
+        if (vehicleId.size != 8 || vehiclePub.size != 65 || vehiclePub[0] != 0x04.toByte()) {
+            Log.w(TAG, "[PhaseA] WRITE DATA invalid lengths vid=${vehicleId.size} vpub=${vehiclePub.size}")
+            return SW_UNKNOWN
+        }
+
+        val stored = DataStoreUtil.saveProvisioningVehicleBinding(this, vehicleId, vehiclePub)
+        if (!stored) {
+            Log.e(TAG, "[PhaseA] WRITE DATA storage failed")
+            return SW_UNKNOWN
+        }
+
+        Log.i(TAG, "[PhaseA] WRITE DATA stored vehicle binding vid=${vehicleId.toHex()} vpubLen=${vehiclePub.size}")
+        return SW_SUCCESS
     }
 
     private fun handleOpControl(p1: Byte): ByteArray {

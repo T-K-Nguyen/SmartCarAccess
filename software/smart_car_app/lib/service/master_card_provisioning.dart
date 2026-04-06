@@ -1,14 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nfc_manager/nfc_manager.dart';
 
 class MasterCardPayload {
-  MasterCardPayload({
-    required this.vehicleId,
-    required this.masterSecret,
-  });
+  MasterCardPayload({required this.vehicleId, required this.masterSecret});
 
   final Uint8List vehicleId; // 8 bytes
   final Uint8List masterSecret; // 32 bytes
@@ -25,13 +23,27 @@ class MasterCardPayload {
   }
 }
 
+class ProvisioningVehicleBinding {
+  ProvisioningVehicleBinding({
+    required this.vehicleId,
+    required this.vehiclePubKey,
+    required this.devicePubKey,
+  });
+
+  final Uint8List vehicleId;
+  final Uint8List vehiclePubKey;
+  final Uint8List devicePubKey;
+}
+
 /// Master card provisioning helper.
 /// - Reads NDEF text payload from master card
 /// - Parses JSON {"vid":"...","msk":"..."}
 /// - Sends session data to Android HCE service (in-memory only)
 class MasterCardProvisioningService {
   static const MethodChannel _channel = MethodChannel('smartcar/mastercard');
-  static const MethodChannel _readerChannel = MethodChannel('smartcar/nfc_reader');
+  static const MethodChannel _readerChannel = MethodChannel(
+    'smartcar/nfc_reader',
+  );
   static const String _pendingPrefix = 'pending_mastercard_';
   static final FlutterSecureStorage _secureStorage = FlutterSecureStorage();
   Completer<MasterCardPayload>? _activeCompleter;
@@ -77,11 +89,14 @@ class MasterCardProvisioningService {
       },
     );
 
-    return completer.future.timeout(timeout, onTimeout: () async {
-      await NfcManager.instance.stopSession();
-      _activeCompleter = null;
-      throw TimeoutException('Timed out waiting for master card');
-    });
+    return completer.future.timeout(
+      timeout,
+      onTimeout: () async {
+        await NfcManager.instance.stopSession();
+        _activeCompleter = null;
+        throw TimeoutException('Timed out waiting for master card');
+      },
+    );
   }
 
   Future<void> cancelReadMasterCard() async {
@@ -93,7 +108,10 @@ class MasterCardProvisioningService {
     await NfcManager.instance.stopSession();
   }
 
-  Future<void> savePendingPayload(String carId, MasterCardPayload payload) async {
+  Future<void> savePendingPayload(
+    String carId,
+    MasterCardPayload payload,
+  ) async {
     final data = jsonEncode({
       'vid': payload.vehicleIdHex,
       'msk': payload.masterSecretHex,
@@ -133,6 +151,29 @@ class MasterCardProvisioningService {
   Future<bool> isHceSessionActive() async {
     final result = await _channel.invokeMethod('isMasterSessionActive');
     return result == true;
+  }
+
+  Future<ProvisioningVehicleBinding?> getProvisioningVehicleBinding() async {
+    final raw = await _channel.invokeMethod('getProvisioningVehicleBinding');
+    if (raw is! Map) return null;
+
+    final vehicleId = _asBytes(raw['vehicleId']);
+    final vehiclePubKey = _asBytes(raw['vehiclePubKey']);
+    final devicePubKey = _asBytes(raw['devicePubKey']);
+    if (vehicleId == null || vehiclePubKey == null || devicePubKey == null) {
+      return null;
+    }
+    if (vehicleId.length != 8 ||
+        vehiclePubKey.length != 65 ||
+        devicePubKey.length != 65) {
+      return null;
+    }
+
+    return ProvisioningVehicleBinding(
+      vehicleId: vehicleId,
+      vehiclePubKey: vehiclePubKey,
+      devicePubKey: devicePubKey,
+    );
   }
 
   String _extractPayloadText(List<NdefRecord> records) {
@@ -219,5 +260,17 @@ class MasterCardProvisioningService {
       out[i ~/ 2] = int.parse(clean.substring(i, i + 2), radix: 16);
     }
     return out;
+  }
+
+  Uint8List? _asBytes(dynamic value) {
+    if (value is Uint8List) return value;
+    if (value is List<dynamic>) {
+      try {
+        return Uint8List.fromList(value.cast<int>());
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
   }
 }

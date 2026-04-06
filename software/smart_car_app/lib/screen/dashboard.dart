@@ -21,8 +21,9 @@ class Dashboard extends StatefulWidget {
 class _DashboardState extends State<Dashboard> {
   int _currentIndex = 0;
   final CarService _carService = CarService();
-  final MasterCardProvisioningService _masterCardService = MasterCardProvisioningService();
-  
+  final MasterCardProvisioningService _masterCardService =
+      MasterCardProvisioningService();
+
   List<Map<String, dynamic>> _cars = [];
   List<Map<String, dynamic>> _digitalKeys = [];
   bool _isLoading = true;
@@ -89,7 +90,7 @@ class _DashboardState extends State<Dashboard> {
           );
         }
       },
-    );    // Listen to digital keys stream
+    ); // Listen to digital keys stream
     _carService.getUserDigitalKeys().listen(
       (keys) {
         print('Loaded ${keys.length} digital keys: $keys'); // Debug log
@@ -120,25 +121,25 @@ class _DashboardState extends State<Dashboard> {
       appBar: _buildAppBar(),
       body: SafeArea(
         child: _currentIndex == 3
-          ? const ProfileContent()
-          : _currentIndex == 2
+            ? const ProfileContent()
+            : _currentIndex == 2
             ? const LocationContent()
             : _buildDashboardContent(),
       ),
       bottomNavigationBar: _buildBottomNavigationBar(),
-      floatingActionButton: _currentIndex == 0 
+      floatingActionButton: _currentIndex == 0
           ? FloatingActionButton(
               onPressed: _showAddCarDialog,
               backgroundColor: const Color(0xFF273671),
               child: const Icon(Icons.add, color: Colors.white),
             )
           : _currentIndex == 1
-              ? FloatingActionButton(
-                  onPressed: _showAddDigitalKeyDialog,
-                  backgroundColor: const Color(0xFF273671),
-                  child: const Icon(Icons.vpn_key, color: Colors.white),
-                )
-              : null,
+          ? FloatingActionButton(
+              onPressed: _showAddDigitalKeyDialog,
+              backgroundColor: const Color(0xFF273671),
+              child: const Icon(Icons.vpn_key, color: Colors.white),
+            )
+          : null,
     );
   }
 
@@ -182,7 +183,10 @@ class _DashboardState extends State<Dashboard> {
           },
         ),
         IconButton(
-          icon: const Icon(Icons.notifications_outlined, color: Color(0xFF273671)),
+          icon: const Icon(
+            Icons.notifications_outlined,
+            color: Color(0xFF273671),
+          ),
           onPressed: () {
             // Handle notifications
           },
@@ -200,9 +204,7 @@ class _DashboardState extends State<Dashboard> {
   Widget _buildDashboardContent() {
     if (_isLoading) {
       return const Center(
-        child: CircularProgressIndicator(
-          color: Color(0xFF273671),
-        ),
+        child: CircularProgressIndicator(color: Color(0xFF273671)),
       );
     }
 
@@ -240,7 +242,8 @@ class _DashboardState extends State<Dashboard> {
             Expanded(
               child: StatCard(
                 title: 'Active Keys',
-                value: '${_digitalKeys.where((k) => k['status'] == 'Active').length}',
+                value:
+                    '${_digitalKeys.where((k) => k['status'] == 'Active').length}',
                 icon: Icons.vpn_key,
                 color: const Color(0xFF41a5de),
               ),
@@ -253,7 +256,8 @@ class _DashboardState extends State<Dashboard> {
             Expanded(
               child: StatCard(
                 title: 'Available',
-                value: '${_cars.where((c) => c['keyStatus'] == 'Active').length}',
+                value:
+                    '${_cars.where((c) => c['keyStatus'] == 'Active').length}',
                 icon: Icons.check_circle,
                 color: Colors.green,
               ),
@@ -325,10 +329,7 @@ class _DashboardState extends State<Dashboard> {
                       const SizedBox(height: 8),
                       Text(
                         'Tap the + button to add your first vehicle',
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.grey[500],
-                        ),
+                        style: TextStyle(fontSize: 14, color: Colors.grey[500]),
                       ),
                       const SizedBox(height: 16),
                       OutlinedButton.icon(
@@ -373,7 +374,10 @@ class _DashboardState extends State<Dashboard> {
                           child: SizedBox(
                             width: double.infinity,
                             child: ElevatedButton.icon(
-                              onPressed: () => _startProvisionForVehicle(car, pendingPayload),
+                              onPressed: () => _startProvisionForVehicle(
+                                car,
+                                pendingPayload,
+                              ),
                               icon: const Icon(Icons.nfc),
                               label: const Text('Provision for this vehicle'),
                               style: ElevatedButton.styleFrom(
@@ -460,10 +464,7 @@ class _DashboardState extends State<Dashboard> {
                       const SizedBox(height: 8),
                       Text(
                         'Create digital keys to share vehicle access',
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.grey[500],
-                        ),
+                        style: TextStyle(fontSize: 14, color: Colors.grey[500]),
                       ),
                     ],
                   ),
@@ -482,8 +483,11 @@ class _DashboardState extends State<Dashboard> {
   }
 
   Widget _buildDigitalKeyCard(Map<String, dynamic> key) {
-    final car = _cars.firstWhere((c) => c['id'] == key['carId'], orElse: () => {});
-    
+    final car = _cars.firstWhere(
+      (c) => c['id'] == key['carId'],
+      orElse: () => {},
+    );
+
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(16),
@@ -531,10 +535,7 @@ class _DashboardState extends State<Dashboard> {
                     ),
                     Text(
                       car.isNotEmpty ? car['name'] : 'Unknown Vehicle',
-                      style: TextStyle(
-                        color: Colors.grey[600],
-                        fontSize: 14,
-                      ),
+                      style: TextStyle(color: Colors.grey[600], fontSize: 14),
                     ),
                   ],
                 ),
@@ -568,7 +569,9 @@ class _DashboardState extends State<Dashboard> {
           const SizedBox(height: 12),
           Wrap(
             spacing: 8,
-            children: (key['permissions'] as List<dynamic>).cast<String>().map((permission) {
+            children: (key['permissions'] as List<dynamic>).cast<String>().map((
+              permission,
+            ) {
               return Chip(
                 label: Text(
                   permission.replaceAll('_', ' ').toUpperCase(),
@@ -615,22 +618,13 @@ class _DashboardState extends State<Dashboard> {
       selectedItemColor: const Color(0xFF273671),
       unselectedItemColor: Colors.grey,
       items: const [
-        BottomNavigationBarItem(
-          icon: Icon(Icons.home_outlined),
-          label: 'Home',
-        ),
-        BottomNavigationBarItem(
-          icon: Icon(Icons.vpn_key),
-          label: 'Keys',
-        ),
+        BottomNavigationBarItem(icon: Icon(Icons.home_outlined), label: 'Home'),
+        BottomNavigationBarItem(icon: Icon(Icons.vpn_key), label: 'Keys'),
         BottomNavigationBarItem(
           icon: Icon(Icons.map_outlined),
           label: 'Location',
         ),
-        BottomNavigationBarItem(
-          icon: Icon(Icons.person),
-          label: 'Profile',
-        ),
+        BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Profile'),
       ],
     );
   }
@@ -638,10 +632,12 @@ class _DashboardState extends State<Dashboard> {
   void _toggleLock(Map<String, dynamic> car) async {
     try {
       await _carService.toggleCarLock(car['id'], car['isLocked'] ?? false);
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('${car['name']} has been ${!(car['isLocked'] ?? false) ? 'locked' : 'unlocked'}'),
+          content: Text(
+            '${car['name']} has been ${!(car['isLocked'] ?? false) ? 'locked' : 'unlocked'}',
+          ),
           backgroundColor: const Color(0xFF273671),
         ),
       );
@@ -660,14 +656,18 @@ class _DashboardState extends State<Dashboard> {
       context: context,
       builder: (context) => CarControlDialog(car: car),
     );
-    
+
     if (result != null) {
       String message = '';
       try {
         switch (result) {
           case 'lock_toggle':
-            await _carService.toggleCarLock(car['id'], car['isLocked'] ?? false);
-            message = '${car['name']} has been ${!(car['isLocked'] ?? false) ? 'locked' : 'unlocked'}';
+            await _carService.toggleCarLock(
+              car['id'],
+              car['isLocked'] ?? false,
+            );
+            message =
+                '${car['name']} has been ${!(car['isLocked'] ?? false) ? 'locked' : 'unlocked'}';
             break;
           case 'lights':
             await _carService.triggerLights(car['id']);
@@ -688,10 +688,11 @@ class _DashboardState extends State<Dashboard> {
             break;
           case 'find_car':
             await _carService.findCar(car['id']);
-            message = 'Finding your ${car['name']}... Horn will sound and lights will flash';
+            message =
+                'Finding your ${car['name']}... Horn will sound and lights will flash';
             break;
         }
-        
+
         if (message.isNotEmpty) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -715,7 +716,9 @@ class _DashboardState extends State<Dashboard> {
     if (car['provisioned'] != true) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Vehicle is not provisioned yet. Please provision it first.'),
+          content: Text(
+            'Vehicle is not provisioned yet. Please provision it first.',
+          ),
           backgroundColor: Colors.orange,
         ),
       );
@@ -730,7 +733,9 @@ class _DashboardState extends State<Dashboard> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Delete Vehicle'),
-        content: Text('Are you sure you want to delete $name? This will remove its digital keys too.'),
+        content: Text(
+          'Are you sure you want to delete $name? This will remove its digital keys too.',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -822,7 +827,9 @@ class _DashboardState extends State<Dashboard> {
     if (_cars.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Please add a vehicle first before creating digital keys'),
+          content: Text(
+            'Please add a vehicle first before creating digital keys',
+          ),
           backgroundColor: Colors.orange,
         ),
       );
@@ -833,7 +840,7 @@ class _DashboardState extends State<Dashboard> {
       context: context,
       builder: (context) => AddDigitalKeyDialog(cars: _cars),
     );
-    
+
     if (result != null) {
       try {
         final carId = result['carId']?.toString();
@@ -844,7 +851,9 @@ class _DashboardState extends State<Dashboard> {
         if (selectedCar.isEmpty || selectedCar['provisioned'] != true) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Vehicle is not provisioned yet. Please provision it first.'),
+              content: Text(
+                'Vehicle is not provisioned yet. Please provision it first.',
+              ),
               backgroundColor: Colors.orange,
             ),
           );
@@ -852,14 +861,13 @@ class _DashboardState extends State<Dashboard> {
         }
 
         await _carService.addDigitalKey(result);
-        
+
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Digital key created successfully!'),
             backgroundColor: Color(0xFF273671),
           ),
         );
-
       } catch (e) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -930,7 +938,9 @@ class _DashboardState extends State<Dashboard> {
       Navigator.of(context).pop();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Master card scanned. Tap "Provision for this vehicle" to continue.'),
+          content: Text(
+            'Master card scanned. Tap "Provision for this vehicle" to continue.',
+          ),
           backgroundColor: const Color(0xFF273671),
         ),
       );
@@ -946,19 +956,56 @@ class _DashboardState extends State<Dashboard> {
     }
   }
 
-  Future<void> _startProvisionForVehicle(Map<String, dynamic> car, MasterCardPayload payload) async {
+  Future<void> _startProvisionForVehicle(
+    Map<String, dynamic> car,
+    MasterCardPayload payload,
+  ) async {
     final carId = car['id']?.toString();
     final carName = car['name']?.toString() ?? 'Vehicle';
     final result = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
-        builder: (_) => MasterCardFlowScreen(
-          payload: payload,
-          targetName: carName,
-        ),
+        builder: (_) =>
+            MasterCardFlowScreen(payload: payload, targetName: carName),
       ),
     );
 
     if (result == true && carId != null) {
+      try {
+        final binding = await _masterCardService
+            .getProvisioningVehicleBinding();
+        if (binding != null) {
+          await _carService.registerOwnerProvisioningRecord(
+            carDocId: carId,
+            vehicleId: binding.vehicleId,
+            vehiclePubKey: binding.vehiclePubKey,
+            devicePubKey: binding.devicePubKey,
+          );
+        }
+      } on FirebaseException catch (e) {
+        if (mounted) {
+          final msg = e.message ?? 'unknown firebase error';
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Provisioned locally, but cloud registration failed [${e.code}]: $msg',
+              ),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Provisioned locally, but cloud registration failed: $e',
+              ),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      }
+
       await _carService.updateCar(carId, {'provisioned': true});
       await _masterCardService.clearPendingPayload(carId);
       if (!mounted) return;
@@ -976,7 +1023,7 @@ class _DashboardState extends State<Dashboard> {
 
   String _formatDate(dynamic dateValue) {
     if (dateValue == null) return 'No expiration';
-    
+
     DateTime date;
     if (dateValue is Timestamp) {
       date = dateValue.toDate();
@@ -991,7 +1038,7 @@ class _DashboardState extends State<Dashboard> {
     } else {
       return 'Invalid date';
     }
-    
+
     return '${date.day}/${date.month}/${date.year}';
   }
 
@@ -1099,8 +1146,8 @@ class _DashboardState extends State<Dashboard> {
           ),
           ElevatedButton(
             onPressed: () async {
-              if (nameController.text.isEmpty || 
-                  modelController.text.isEmpty || 
+              if (nameController.text.isEmpty ||
+                  modelController.text.isEmpty ||
                   locationController.text.isEmpty) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
@@ -1120,7 +1167,7 @@ class _DashboardState extends State<Dashboard> {
                 );
 
                 await _carService.addCar(carData);
-                
+
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(

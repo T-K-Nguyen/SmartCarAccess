@@ -39,6 +39,7 @@ namespace {
 
     const uint8_t kInsSpake2Request = 0x30;
     const uint8_t kInsSpake2Verify = 0x32;
+    const uint8_t kInsWriteData = 0xD4;
     const uint8_t kInsOpControl = 0x3C;
     const uint8_t kTlvTagChallenge = 0x50;
     const uint8_t kTlvTagMac = 0x58;
@@ -178,14 +179,14 @@ namespace {
     }
 
     bool sendOpControlFlowSuccess() {
-        // Best-effort only. Keep this non-blocking to avoid long stalls after success.
-        if (!ensureSelected(350)) {
+        // Commit transaction state on the applet side before persisting owner data.
+        if (!ensureSelected(1200)) {
             Serial.println("[PhaseA] SELECT before OP CONTROL FLOW failed");
             return false;
         }
         uint8_t apdu[] = {0x00, kInsOpControl, 0x11, 0x00, 0x00};
         uint8_t resp[16]; uint8_t rlen = sizeof(resp);
-        bool ok = apduRetry(apdu, sizeof(apdu), resp, &rlen, 1, 0)
+        bool ok = apduRetryWithReselect(apdu, sizeof(apdu), resp, &rlen, 3, 120, 2500, 1)
             && rlen >= 2 && resp[rlen - 2] == 0x90 && resp[rlen - 1] == 0x00;
         if (!ok) {
             Serial.println("[PhaseA] OP CONTROL FLOW failed");
@@ -201,6 +202,58 @@ namespace {
         }
         memcpy(out, EXPECTED_VEHICLE_ID, 8);
         return false;
+    }
+
+    bool sendVehicleWriteData() {
+        // CCC WRITE DATA (INS 0xD4): push vehicle_id + vehicle_pub to phone side.
+        uint8_t vehicleId[8];
+        uint8_t vehiclePub[65];
+        bool vidOk = getVehicleIdBytes(vehicleId);
+        bool vpubOk = CCCMailbox::getVehiclePub(vehiclePub, sizeof(vehiclePub));
+        if (!vpubOk) {
+            Serial.println("[PhaseA] WRITE DATA skipped: vehicle public key unavailable");
+            return false;
+        }
+
+        if (!vidOk) {
+            Serial.println("[PhaseA] WARNING: CCC vehicleId missing; using fallback for WRITE DATA");
+        }
+
+        // TLV payload layout:
+        // 0x80 0x08 <vehicle_id(8)> 0x81 0x41 <vehicle_pub(65)>
+        uint8_t payload[2 + 8 + 2 + 65];
+        uint8_t p = 0;
+        payload[p++] = 0x80;
+        payload[p++] = 0x08;
+        memcpy(payload + p, vehicleId, sizeof(vehicleId));
+        p += sizeof(vehicleId);
+        payload[p++] = 0x81;
+        payload[p++] = 0x41;
+        memcpy(payload + p, vehiclePub, sizeof(vehiclePub));
+        p += sizeof(vehiclePub);
+
+        uint8_t apdu[5 + sizeof(payload) + 1];
+        uint8_t idx = 0;
+        apdu[idx++] = 0x00;
+        apdu[idx++] = kInsWriteData;
+        apdu[idx++] = 0x00;
+        apdu[idx++] = 0x00;
+        apdu[idx++] = (uint8_t)sizeof(payload);
+        memcpy(apdu + idx, payload, sizeof(payload));
+        idx += (uint8_t)sizeof(payload);
+        apdu[idx++] = 0x00; // Le
+
+        uint8_t resp[16];
+        uint8_t rlen = sizeof(resp);
+        bool ok = apduRetryWithReselect(apdu, idx, resp, &rlen, 4, 120, 4000, 2)
+            && rlen >= 2 && resp[rlen - 2] == 0x90 && resp[rlen - 1] == 0x00;
+        if (!ok) {
+            Serial.println("[PhaseA] WRITE DATA (vehicle key push) failed");
+            return false;
+        }
+
+        Serial.println("[PhaseA] WRITE DATA accepted by phone");
+        return true;
     }
 
     // Repeatedly try an INDATAEXCHANGE (APDU) with retry/backoff
@@ -479,6 +532,30 @@ namespace {
         if (!shouldProvision) return;
 
         // ------------------------------
+        // Phase 1: SPAKE2+ auth challenge (before key exchange)
+        // ------------------------------
+        uint8_t nonce[16];
+        for (int i = 0; i < 16; ++i) nonce[i] = (uint8_t)esp_random();
+
+        uint8_t challenge[24];
+        uint8_t vehicleId[8];
+        bool vidOk = getVehicleIdBytes(vehicleId);
+        memcpy(challenge, vehicleId, 8);
+        memcpy(challenge + 8, nonce, 16);
+
+        if (!vidOk) {
+            Serial.println("[PhaseA] WARNING: CCC vehicleId missing; using fallback");
+        }
+        Serial.print("[PhaseA] vehicleId: "); printHex(vehicleId, 8);
+        Serial.print("[PhaseA] nonce: "); printHex(nonce, 16);
+        Serial.print("[PhaseA] challenge(24): "); printHex(challenge, 24);
+
+        if (!sendSpake2Mastercard(challenge, sizeof(challenge))) {
+            Serial.println("[PhaseA] MasterCard SPAKE2+ verify failed");
+            return;
+        }
+
+        // ------------------------------
         // Step 1: Base GET DATA (Lc=0)
         // ------------------------------
         Serial.println("[PhaseA] Step1: Base GET DATA (Lc=0)");
@@ -569,25 +646,18 @@ namespace {
         delay(140);
 
         // ------------------------------
+        // Step 1.5: WRITE DATA (Lc=77) vehicle_id + vehicle_pub
+        // ------------------------------
+        if (!sendVehicleWriteData()) {
+            return;
+        }
+        delay(100);
+
+        // ------------------------------
         // Step 2: Signature GET DATA (Lc=24)
         // ------------------------------
         // Some phones deselect the AID after the base response; retries handle reselect if needed.
         Serial.println("[PhaseA] Step2: Signature GET DATA (Lc=24 challenge)");
-        uint8_t nonce[16];
-        for (int i = 0; i < 16; ++i) nonce[i] = (uint8_t)esp_random();
-
-        uint8_t challenge[24];
-        uint8_t vehicleId[8];
-        bool vidOk = getVehicleIdBytes(vehicleId);
-        memcpy(challenge, vehicleId, 8);
-        memcpy(challenge + 8, nonce, 16);
-
-        if (!vidOk) {
-            Serial.println("[PhaseA] WARNING: CCC vehicleId missing; using fallback");
-        }
-        Serial.print("[PhaseA] vehicleId: "); printHex(vehicleId, 8);
-        Serial.print("[PhaseA] nonce: "); printHex(nonce, 16);
-        Serial.print("[PhaseA] challenge(24): "); printHex(challenge, 24);
 
         // Build signature APDU: CLA INS P1 P2 Lc [challenge]
         uint8_t sigApdu[5 + sizeof(challenge)];
@@ -635,21 +705,19 @@ namespace {
         bool sigOK = false;
         if (sigLen > 0 && info.hasPub) {
             sigOK = ProvisioningPhase::verifySignatureP256(info.pubKey65, challenge, sizeof(challenge), sigDer, sigLen);
-        } else if (sigLen == 0) {
-            sigOK = true; // fallback acceptance
         }
 
         Serial.printf("[PhaseA] sigLen=%u verify=%s\n", sigLen, sigOK ? "OK" : "FAIL");
         if (!sigOK) { Serial.println("[PhaseA] Credentials NOT stored (signature failure)"); return; }
 
-        if (!sendSpake2Mastercard(challenge, sizeof(challenge))) {
-            Serial.println("[PhaseA] MasterCard SPAKE2+ verify failed");
-            return;
-        }
-
         // Decide whether to store provisioning data
         if (!info.hasPub) {
             Serial.println("[PhaseA] Missing endpoint public key; provisioning rejected");
+            return;
+        }
+
+        if (!sendOpControlFlowSuccess()) {
+            Serial.println("[PhaseA] Provisioning aborted: OP CONTROL FLOW commit failed");
             return;
         }
 
@@ -660,8 +728,7 @@ namespace {
         if (info.certLen > 0) ProvisioningPhase::storeCertChain(info.cert, info.certLen);
         Serial.println("[PhaseA] Provisioning data persisted (CCC mailbox owner slot)");
 
-        // Best-effort close while session is still active.
-        sendOpControlFlowSuccess();
+        // Notify app after local persist succeeds.
         if (!sendProvisionResult()) {
             Serial.println("[PhaseA] Warning: failed to notify phone of provisioning result");
         }

@@ -103,6 +103,22 @@ class MainActivity : FlutterActivity() {
                     "isMasterSessionActive" -> {
                         result.success(MasterCardSession.isActive())
                     }
+                    "getProvisioningVehicleBinding" -> {
+                        val vid = DataStoreUtil.getProvisionedVehicleId(this)
+                        val vpub = DataStoreUtil.getProvisionedVehiclePub(this)
+                        val epub = KeystoreBridge.getPhaseAPublicKey65()
+                        if (vid == null || vpub == null || epub == null) {
+                            result.success(null)
+                            return@setMethodCallHandler
+                        }
+
+                        val map = hashMapOf<String, Any>(
+                            "vehicleId" to vid,
+                            "vehiclePubKey" to vpub,
+                            "devicePubKey" to epub,
+                        )
+                        result.success(map)
+                    }
                     else -> result.notImplemented()
                 }
             } catch (e: Exception) {
