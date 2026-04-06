@@ -153,6 +153,70 @@ platformio run
 - Enable slot activation for sharing (slots 1..7) once the phone flow is ready.
 - Define a token MAC binding step if cryptographic coupling to `tok_n` is required.
 
+---
+
+## 10) Current Runtime Behavior (Important)
+
+This section documents the latest stable behavior after NFC/HCE reliability hardening.
+
+### NFC polling and first tap behavior
+
+- Card detect polling is tuned for faster HCE pickup.
+- The main NFC loop accepts detection with a single stable read to reduce missed first taps on phones.
+- Non-HCE cards may still be detected at RF level, but they fail at SELECT AID as expected.
+
+### SELECT response validation
+
+- The reader does not trust `SW=9000` alone.
+- SELECT success requires expected payload bytes (`5A...` and `5C...`) to reject stale or delayed frames.
+- This prevents false-positive SELECT success from old APDU traffic.
+
+### APDU retry and recovery strategy
+
+- APDUs use in-place retries first.
+- If needed, recovery performs:
+	1) `inRelease()`
+	2) reselect target
+	3) resend APDU
+- This minimizes unnecessary reselect churn while still recovering from link-loss/deactivation.
+
+### Provisioning close-out behavior
+
+- After successful provisioning, OP CONTROL FLOW is best-effort and non-blocking.
+- Provisioning result ACK (`INS=0xDA`) is sent to Android HCE.
+- Session enters a short removal wait path to avoid immediate re-trigger loops.
+
+Removal wait tuning:
+- Fast check loop runs with short timeout slices.
+- Logging is throttled to avoid monitor spam.
+- Hard cap is short (about 4.5 seconds) to keep UX snappy.
+- If removal is not detected within cap, session continues safely.
+
+---
+
+## 11) Android App Integration Notes
+
+Provisioning state handshake between ESP and Android uses shared preferences flags:
+- `flutter.provision_result` (boolean)
+- `flutter.provision_ts` (epoch ms)
+
+Expected behavior:
+- HCE sets these when ESP sends provisioning result.
+- App provisioning flow checks these to decide success.
+
+Important UI fix already applied in app flow:
+- Countdown timeout no longer overwrites success after provisioning has already succeeded.
+- Success path cancels timer and returns success to dashboard update logic.
+
+---
+
+## 12) Security Notes
+
+- Owner private key stays in Android Keystore.
+- ESP stores owner public key and verifies signatures locally.
+- Cloud/Firebase must not hold immobilizer tokens.
+- Test bypasses (if enabled in debug builds) must be disabled for production.
+
 
 
 

@@ -19,14 +19,11 @@ class MasterCardFlowScreen extends StatefulWidget {
   State<MasterCardFlowScreen> createState() => _MasterCardFlowScreenState();
 }
 
-enum _FlowStep {
-  tapCar,
-  success,
-  error,
-}
+enum _FlowStep { tapCar, success, error }
 
 class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
-  final MasterCardProvisioningService _service = MasterCardProvisioningService();
+  final MasterCardProvisioningService _service =
+      MasterCardProvisioningService();
   _FlowStep _step = _FlowStep.tapCar;
   bool _isBusy = false;
   String? _errorMessage;
@@ -35,6 +32,11 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
 
   Timer? _countdownTimer;
   int _secondsLeft = 60;
+
+  void _popWithCurrentResult() {
+    if (!mounted) return;
+    Navigator.pop(context, _step == _FlowStep.success);
+  }
 
   @override
   void dispose() {
@@ -58,7 +60,10 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
       _provisionStartMs = DateTime.now().millisecondsSinceEpoch;
       await prefs.setBool('provision_result', false);
       await prefs.setInt('provision_ts', _provisionStartMs!);
-      await _service.activateHceSession(widget.payload, ttl: const Duration(seconds: 60));
+      await _service.activateHceSession(
+        widget.payload,
+        ttl: const Duration(seconds: 60),
+      );
       _startCountdown();
       setState(() {
         _provisioningActive = true;
@@ -82,10 +87,18 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
     _secondsLeft = 60;
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
       if (!mounted) return;
+      if (!_provisioningActive) {
+        timer.cancel();
+        return;
+      }
       setState(() {
         _secondsLeft -= 1;
       });
       await _checkProvisionResult();
+      if (!mounted || !_provisioningActive) {
+        timer.cancel();
+        return;
+      }
       if (_secondsLeft <= 0) {
         timer.cancel();
         await _service.clearHceSession();
@@ -93,6 +106,7 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
           setState(() {
             _step = _FlowStep.error;
             _errorMessage = 'Timed out. Please try again.';
+            _provisioningActive = false;
           });
         }
       }
@@ -113,6 +127,7 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
   }
 
   Future<void> _finishFlow() async {
+    _countdownTimer?.cancel();
     await _service.clearHceSession();
     await WakelockPlus.disable();
     if (!mounted) return;
@@ -137,18 +152,24 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Provision Vehicle'),
-        backgroundColor: Colors.white,
-        foregroundColor: const Color(0xFF273671),
-        elevation: 0,
-      ),
-      backgroundColor: Colors.grey[50],
-      body: SafeArea(
-        child: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 250),
-          child: _buildStep(context),
+    return WillPopScope(
+      onWillPop: () async {
+        _popWithCurrentResult();
+        return false;
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Provision Vehicle'),
+          backgroundColor: Colors.white,
+          foregroundColor: const Color(0xFF273671),
+          elevation: 0,
+        ),
+        backgroundColor: Colors.grey[50],
+        body: SafeArea(
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 250),
+            child: _buildStep(context),
+          ),
         ),
       ),
     );
@@ -168,7 +189,8 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
   Widget _buildTapCar(BuildContext context) {
     return _buildCard(
       title: 'Step 2: Tap the vehicle',
-      description: 'Vehicle: ${widget.targetName}. Tap Provision to enable HCE, then hold your phone to the door handle within ${_secondsLeft}s.',
+      description:
+          'Vehicle: ${widget.targetName}. Tap Provision to enable HCE, then hold your phone to the door handle within ${_secondsLeft}s.',
       icon: Icons.directions_car,
       actions: [
         ElevatedButton(
@@ -177,7 +199,9 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
             backgroundColor: const Color(0xFF273671),
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
           ),
           child: Text(_provisioningActive ? 'Provisioning...' : 'Provision'),
         ),
@@ -188,7 +212,9 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
             foregroundColor: const Color(0xFF273671),
             side: const BorderSide(color: Color(0xFF273671)),
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
           ),
           child: const Text('Cancel'),
         ),
@@ -200,17 +226,20 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
   Widget _buildSuccess(BuildContext context) {
     return _buildCard(
       title: 'Complete',
-      description: 'HCE session activated. You can continue to the next setup step.',
+      description:
+          'HCE session activated. You can continue to the next setup step.',
       icon: Icons.check_circle,
       iconColor: Colors.green,
       actions: [
         ElevatedButton(
-          onPressed: () => Navigator.pop(context, true),
+          onPressed: _popWithCurrentResult,
           style: ElevatedButton.styleFrom(
             backgroundColor: const Color(0xFF273671),
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
           ),
           child: const Text('Close'),
         ),
@@ -221,7 +250,8 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
   Widget _buildError(BuildContext context) {
     return _buildCard(
       title: 'Something went wrong',
-      description: _errorMessage ?? 'Could not complete the flow. Please try again.',
+      description:
+          _errorMessage ?? 'Could not complete the flow. Please try again.',
       icon: Icons.error_outline,
       iconColor: Colors.red,
       actions: [
@@ -231,7 +261,9 @@ class _MasterCardFlowScreenState extends State<MasterCardFlowScreen> {
             backgroundColor: const Color(0xFF273671),
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
           ),
           child: const Text('Try again'),
         ),

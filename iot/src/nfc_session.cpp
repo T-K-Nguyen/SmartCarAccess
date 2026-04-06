@@ -790,8 +790,9 @@ namespace NfcSession {
             return;
         }
 
-        // Wait for card; if none, try to refresh SAMConfig occasionally
-        if (!waitForCard(15000, 2, 60)) {
+        // Wait for card; use 1 stable read for snappier HCE pickup on first tap.
+        // SELECT response validation still filters non-matching/noisy targets.
+        if (!waitForCard(15000, 1, 60)) {
             if (!samConfigured) {
                 Serial.println("Re-attempting SAMConfig...");
                 samConfigured = ensureSAMConfig(3, 200);
