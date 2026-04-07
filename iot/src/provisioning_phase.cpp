@@ -18,7 +18,7 @@ namespace {
   const char* kOneShotForce = "oneshot_force";
   const char* kCertChain = "cert_chain";
 
-  // Authentication relies on Android-keystore-held private key; ECU stores phone public key.
+  // Authentication stores phone public key and relies on CCC mailbox vehicle keypair.
 }
 
 namespace ProvisioningPhase {
@@ -26,7 +26,7 @@ namespace ProvisioningPhase {
 void begin() {
   // Ensure CCC mailbox is initialized and loaded at boot.
   CCCMailbox::begin();
-  Serial.println("[ProvisioningPhase] CCC mailbox ready; ECU stores phone pubkey only");
+  Serial.println("[ProvisioningPhase] CCC mailbox ready; phone pubkey + vehicle keypair available");
 }
 
 bool isProvisioned() {
@@ -207,7 +207,7 @@ bool runOnceWithHce(PN532& nfc, const uint8_t* aid, size_t aidLen, uint32_t wait
 }
 
 size_t getDevicePrivateKeyPEM(uint8_t* out, size_t maxLen) {
-  // Deprecated: device does not hold a private key anymore.
+  // Deprecated: private key is stored as raw scalar in CCC mailbox, not PEM.
   (void)out; (void)maxLen;
   return 0;
 }

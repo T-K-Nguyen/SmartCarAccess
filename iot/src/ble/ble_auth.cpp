@@ -12,6 +12,7 @@
 #include "ble/utils/crypto_utils.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/queue.h>
 
 #include "ble/ble_auth.h"
 #include "provisioning_phase.h"
@@ -24,18 +25,32 @@
 
 namespace {
   // Phase B Authentication service
-  const char* kAuthServiceUUID        = "0000aaaa-1234-5678-9abc-def012345678";
-  const char* kCharHandshakeWriteUUID = "0000aaab-1234-5678-9abc-def012345678"; // Write: phone sends ephemeral+sig
-  const char* kCharHandshakeReadUUID  = "0000aaac-1234-5678-9abc-def012345678"; // Read/Notify: ECU sends ephemeral+sig  
-  const char* kCharStatusUUID         = "0000aaad-1234-5678-9abc-def012345678"; // Notify: auth status
-  const char* kCharChallengeReadUUID  = "0000aaae-1234-5678-9abc-def012345678"; // Read/Notify: ECU sends {vehicleId||nonce}
-  const char* kCharChallengeWriteUUID = "0000aaaf-1234-5678-9abc-def012345678"; // Write: phone sends DER signature over challenge
-  const char* kCharGpsDataUUID        = "0000aab0-1234-5678-9abc-def012345678"; // Write: phone sends encrypted GPS data
+  const char* kAuthServiceUUID = "0000aaaa-1234-5678-9abc-def012345678";
+  const char* kCharCCCRxUUID   = "0000aac1-1234-5678-9abc-def012345678"; // Write: phone sends APDU-like commands
+  const char* kCharCCCTxUUID   = "0000aac2-1234-5678-9abc-def012345678"; // Read/Notify: ESP sends responses/events
+
+  // APDU-like tunnel instructions
+  static constexpr uint8_t kInsAuth0       = 0x80;
+  static constexpr uint8_t kInsAuth1       = 0x81;
+  static constexpr uint8_t kInsExchange    = 0x82;
+  static constexpr uint8_t kInsControlFlow = 0x83;
+
+  // SW status words
+  static constexpr uint8_t kSw1Ok = 0x90;
+  static constexpr uint8_t kSw2Ok = 0x00;
+  static constexpr uint8_t kSw1WrongData = 0x6A;
+  static constexpr uint8_t kSw2WrongData = 0x80;
+  static constexpr uint8_t kSw1WrongP1P2 = 0x6A;
+  static constexpr uint8_t kSw2WrongP1P2 = 0x86;
+  static constexpr uint8_t kSw1Conditions = 0x69;
+  static constexpr uint8_t kSw2Conditions = 0x85;
+  static constexpr uint8_t kSw1Unsupported = 0x6A;
+  static constexpr uint8_t kSw2Unsupported = 0x81;
+  static constexpr uint8_t kSw1Internal = 0x6F;
+  static constexpr uint8_t kSw2Internal = 0x00;
 
   // GATT characteristic handles
-  NimBLECharacteristic* g_cHandshakeRead = nullptr;
-  NimBLECharacteristic* g_cStatus = nullptr;
-  NimBLECharacteristic* g_cChallengeRead = nullptr;
+  NimBLECharacteristic* g_cTunnelTx = nullptr;
 
   // RNG context
   mbedtls_ctr_drbg_context* s_drbg = nullptr;
@@ -106,6 +121,32 @@ namespace {
 #endif
   }
 
+  bool sendTunnelResponse(uint8_t ins, uint8_t sw1, uint8_t sw2,
+                          const uint8_t* payload = nullptr, size_t payloadLen = 0) {
+    if (!g_cTunnelTx) {
+      Serial.println("[AUTH] ERROR: CCC_TX characteristic not available");
+      return false;
+    }
+    if (payloadLen > 255) {
+      Serial.println("[AUTH] ERROR: Tunnel payload too large");
+      return false;
+    }
+
+    std::string frame;
+    frame.reserve(4 + payloadLen);
+    frame.push_back((char)ins);
+    frame.push_back((char)sw1);
+    frame.push_back((char)sw2);
+    frame.push_back((char)payloadLen);
+    if (payload && payloadLen > 0) {
+      frame.append((const char*)payload, payloadLen);
+    }
+
+    g_cTunnelTx->setValue(frame);
+    g_cTunnelTx->notify();
+    return true;
+  }
+
   void reset_auth_state() {
     Serial.println("[AUTH] Resetting authentication state");
     
@@ -173,35 +214,54 @@ namespace {
   }
 
   bool sign_ephemeral_with_device_key() {
-    Serial.println("[AUTH] Step B: Sending unsigned ECU ephemeral (Android-keystore owns identity)");
+    Serial.println("[AUTH] Step B: Sending AUTH1 payload signed by vehicle key");
 
     if (!ProvisioningPhase::isProvisioned()) {
       Serial.println("[AUTH] ERROR: Device not provisioned - cannot continue");
       return false;
     }
 
-    // Build handshake packet: [ephemeral_pub(65)] + [sig_len(2)=0] + [no signature]
+    if (!CCCMailbox::hasVehiclePriv()) {
+      Serial.println("[AUTH] ERROR: Vehicle private key missing");
+      return false;
+    }
+
+    uint8_t signature_der[96];
+    size_t signature_len = 0;
+    if (!CCCMailbox::signVehicleDataP256(
+            s_ecu_ephemeral_pub_bytes,
+            sizeof(s_ecu_ephemeral_pub_bytes),
+            signature_der,
+            sizeof(signature_der),
+            &signature_len)) {
+      Serial.println("[AUTH] ERROR: Failed to sign AUTH1 payload with vehicle key");
+      return false;
+    }
+
+    // Build handshake packet: [ephemeral_pub(65)] + [sig_len(2,LE)] + [DER signature]
     std::string handshake_packet;
-    handshake_packet.reserve(65 + 2);
+    handshake_packet.reserve(65 + 2 + signature_len);
 
     // Add ephemeral public key
     handshake_packet.append((char*)s_ecu_ephemeral_pub_bytes, 65);
 
-    // Add zero signature length (little endian)
-    uint16_t sig_len_le = 0;
+    // Add signature length (little endian)
+    uint16_t sig_len_le = (uint16_t)signature_len;
     handshake_packet.push_back((char)(sig_len_le & 0xFF));
     handshake_packet.push_back((char)(sig_len_le >> 8));
+    handshake_packet.append((const char*)signature_der, signature_len);
 
-    // Update handshake read characteristic
-    if (g_cHandshakeRead) {
-      g_cHandshakeRead->setValue(handshake_packet);
-      g_cHandshakeRead->notify();
-      Serial.printf("[AUTH] ✓ ECU handshake (unsigned) sent (%u bytes)\n", (unsigned)handshake_packet.length());
-      print_hex("ECU Handshake Packet", (uint8_t*)handshake_packet.data(), handshake_packet.length());
-    } else {
-      Serial.println("[AUTH] ERROR: Handshake read characteristic not available");
+    // Send AUTH1 payload via tunnel TX.
+    if (!sendTunnelResponse(kInsAuth1, kSw1Ok, kSw2Ok,
+                            (const uint8_t*)handshake_packet.data(), handshake_packet.length())) {
+      Serial.println("[AUTH] ERROR: Failed to send AUTH1 payload over tunnel");
       return false;
     }
+
+    Serial.printf("[AUTH] ✓ AUTH1 payload sent (%u bytes, sig=%u)\n",
+            (unsigned)handshake_packet.length(), (unsigned)signature_len);
+    print_hex("AUTH1 payload", (uint8_t*)handshake_packet.data(), handshake_packet.length());
+    FSMIntegration::BLE::onAuth1Sent();
 
     s_authState = AUTH_WAITING_FOR_PHONE;
     Serial.println("[AUTH] ✓ ECU ephemeral ready; waiting for phone handshake");
@@ -433,23 +493,12 @@ namespace {
     print_hex("Session MAC Key", s_session_key_mac, 32);
 
     s_session_keys_ready = true;
-    s_authState = AUTH_SESSION_READY;
-    s_auth_successes++;
     
     Serial.println("[AUTH] ✓ Phase B authentication completed successfully!");
     Serial.printf("[AUTH] Stats: Attempts=%u, Successes=%u, Failures=%u\n", 
                   s_auth_attempts, s_auth_successes, s_auth_failures);
 
-    // Trigger FSM auth success event
-    FSMIntegration::BLE::onAuthVerified();
-
-    // Notify status
-    if (g_cStatus) {
-      g_cStatus->setValue("AUTH_SUCCESS");
-      g_cStatus->notify();
-    }
-
-    // Prepare challenge: use CCC vehicleId and fresh nonce; publish to characteristic
+    // Prepare challenge: use CCC vehicleId and fresh nonce; publish via EXCHANGE frame.
     const char* vid = CCCMailbox::vehicleId();
     bool vidOk = vid && strlen(vid) == 8;
     if (vidOk) {
@@ -465,11 +514,8 @@ namespace {
     print_hex("Nonce", s_nonce, 16);
     print_hex("Challenge", s_challenge, 24);
 
-    if (g_cChallengeRead) {
-      g_cChallengeRead->setValue((uint8_t*)s_challenge, sizeof(s_challenge));
-      g_cChallengeRead->notify();
-      Serial.println("[AUTH] ✓ Challenge published; awaiting phone signature");
-    }
+    sendTunnelResponse(kInsExchange, kSw1Ok, kSw2Ok, s_challenge, sizeof(s_challenge));
+    Serial.println("[AUTH] ✓ Challenge published over tunnel; awaiting EXCHANGE signature response");
     s_authState = AUTH_CHALLENGE_READY;
     return true;
   }
@@ -493,8 +539,137 @@ namespace {
       s_authState = AUTH_SIGNING_SENT;
       Serial.println("[AUTH] ✓ Phone signature received; verifying response");
       s_authState = AUTH_VERIFYING_RESPONSE;
-      if (g_cStatus) { g_cStatus->setValue("VERIFYING_RESPONSE"); g_cStatus->notify(); }
+      sendTunnelResponse(kInsExchange, kSw1Ok, kSw2Ok);
       if (s_authWorkerTask) xTaskNotifyGive(s_authWorkerTask);
+    }
+  };
+
+  // Unified CCC tunnel command callback (single RX write endpoint)
+  class CCCCommandWriteCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
+      (void)connInfo;
+      std::string value = pCharacteristic->getValue();
+      if (value.size() < 5) {
+        sendTunnelResponse(0x00, kSw1WrongData, kSw2WrongData);
+        return;
+      }
+
+      const uint8_t* frame = (const uint8_t*)value.data();
+      const uint8_t cla = frame[0];
+      const uint8_t ins = frame[1];
+      const uint8_t p1 = frame[2];
+      const uint8_t p2 = frame[3];
+      const uint8_t lc = frame[4];
+      (void)cla;
+      (void)p2;
+
+      if (value.size() < (size_t)(5 + lc)) {
+        sendTunnelResponse(ins, kSw1WrongData, kSw2WrongData);
+        return;
+      }
+      const uint8_t* data = frame + 5;
+
+      switch (ins) {
+        case kInsAuth0: {
+          FSMIntegration::BLE::onAuth0Received();
+          if (p1 == 0x01) {
+            // Fast path deferred by product decision for this release.
+            sendTunnelResponse(ins, kSw1Unsupported, kSw2Unsupported);
+            break;
+          }
+          if (p1 != 0x11) {
+            sendTunnelResponse(ins, kSw1WrongP1P2, kSw2WrongP1P2);
+            break;
+          }
+          if (!ProvisioningPhase::isProvisioned()) {
+            sendTunnelResponse(ins, kSw1Conditions, kSw2Conditions);
+            break;
+          }
+          if (!generate_ephemeral_keypair()) {
+            sendTunnelResponse(ins, kSw1Internal, kSw2Internal);
+            break;
+          }
+          sendTunnelResponse(ins, kSw1Ok, kSw2Ok, s_ecu_ephemeral_pub_bytes, sizeof(s_ecu_ephemeral_pub_bytes));
+          FSMIntegration::BLE::onAuth0ResponseSent();
+          // Prevent back-to-back notify coalescing on some BLE stacks.
+          vTaskDelay(pdMS_TO_TICKS(20));
+          s_authState = AUTH_EPHEMERAL_READY;
+          if (s_authWorkerTask) {
+            xTaskNotifyGive(s_authWorkerTask);
+          } else {
+            sendTunnelResponse(kInsAuth1, kSw1Internal, kSw2Internal);
+          }
+          break;
+        }
+
+        case kInsAuth1: {
+          FSMIntegration::BLE::onAuth1ResponseReceived();
+          s_auth_attempts++;
+
+          if (lc < 67) {
+            sendTunnelResponse(ins, kSw1WrongData, kSw2WrongData);
+            break;
+          }
+
+          memcpy(s_phone_ephemeral_pub, data, 65);
+          uint16_t sig_len = data[65] | (data[66] << 8);
+          if ((size_t)(67 + sig_len) != lc || sig_len > sizeof(s_phone_signature)) {
+            sendTunnelResponse(ins, kSw1WrongData, kSw2WrongData);
+            break;
+          }
+          memcpy(s_phone_signature, data + 67, sig_len);
+          s_phone_sig_len = sig_len;
+          s_phone_data_received = true;
+          s_authState = AUTH_VERIFYING_PHONE;
+          if (s_authWorkerTask) {
+            xTaskNotifyGive(s_authWorkerTask);
+          }
+          break;
+        }
+
+        case kInsExchange: {
+          FSMIntegration::BLE::onExchangeReceived();
+          // During standard auth flow, EXCHANGE carries challenge signature.
+          if (s_authState == AUTH_CHALLENGE_READY) {
+            if (lc == 0 || lc > sizeof(s_sig_buf)) {
+              sendTunnelResponse(ins, kSw1WrongData, kSw2WrongData);
+              break;
+            }
+            memcpy(s_sig_buf, data, lc);
+            s_sig_len = lc;
+            s_authState = AUTH_VERIFYING_RESPONSE;
+            if (s_authWorkerTask) {
+              xTaskNotifyGive(s_authWorkerTask);
+            }
+            break;
+          }
+
+          // Post-auth secure channel EXCHANGE acknowledgement (time sync payload handling TODO).
+          if (!s_session_keys_ready) {
+            sendTunnelResponse(ins, kSw1Conditions, kSw2Conditions);
+            break;
+          }
+          sendTunnelResponse(ins, kSw1Ok, kSw2Ok);
+          FSMIntegration::BLE::onExchangeResponseSent();
+          break;
+        }
+
+        case kInsControlFlow: {
+          FSMIntegration::BLE::onControlFlowReceived();
+          if (!s_session_keys_ready) {
+            sendTunnelResponse(ins, kSw1Conditions, kSw2Conditions);
+            break;
+          }
+          FSMIntegration::BLE::onUnlockRequested();
+          sendTunnelResponse(ins, kSw1Ok, kSw2Ok);
+          FSMIntegration::BLE::onControlFlowResponseSent();
+          break;
+        }
+
+        default:
+          sendTunnelResponse(ins, kSw1Unsupported, kSw2Unsupported);
+          break;
+      }
     }
   };
 
@@ -590,7 +765,6 @@ namespace {
     bool ok = ProvisioningPhase::verifySignatureP256(phone_pub, s_challenge, sizeof(s_challenge), s_sig_buf, s_sig_len);
     Serial.printf("[AUTH] Challenge signature verify: %s\n", ok?"OK":"FAIL");
     if (!ok) { s_auth_failures++; return false; }
-    if (g_cStatus) { g_cStatus->setValue("AUTH_GRANTED"); g_cStatus->notify(); }
     Serial.println("[AUTH] ✓ Authentication granted. Ready to unlock relay.");
     return true;
   }
@@ -605,48 +779,37 @@ namespace {
       Serial.printf("[AUTH] Processing state: %d\n", s_authState);
       
       switch (s_authState) {
-        case AUTH_WAITING_FOR_PHONE:
+          case AUTH_EPHEMERAL_READY:
           // Sign ECU ephemeral and send handshake packet to phone
           if (!sign_ephemeral_with_device_key()) {
             s_authState = AUTH_FAILED;
-            if (g_cStatus) {
-              g_cStatus->setValue("SIGN_FAILED");
-              g_cStatus->notify();
-            }
           } else {
-            // remain in AUTH_WAITING_FOR_PHONE; phone will write its handshake
-            if (g_cStatus) {
-              g_cStatus->setValue("ECU_HANDSHAKE_SENT");
-              g_cStatus->notify();
-            }
+            // remain in AUTH_WAITING_FOR_PHONE; phone will write AUTH1 response
           }
           break;
         case AUTH_VERIFYING_PHONE:
           if (verify_phone_signature()) {
             if (!compute_shared_secret_and_session_keys()) {
               s_authState = AUTH_FAILED;
-              if (g_cStatus) {
-                g_cStatus->setValue("AUTH_FAILED");
-                g_cStatus->notify();
-              }
+              sendTunnelResponse(kInsAuth1, kSw1Conditions, kSw2Conditions);
             }
           } else {
             s_authState = AUTH_FAILED;
             FSMIntegration::BLE::onAuthFailed();
-            if (g_cStatus) {
-              g_cStatus->setValue("AUTH_FAILED");
-              g_cStatus->notify();
-            }
+            sendTunnelResponse(kInsAuth1, kSw1Conditions, kSw2Conditions);
           }
           break;
         case AUTH_VERIFYING_RESPONSE:
           if (verify_challenge_signature_and_finalize()) {
-            // stay in CHALLENGE_READY or mark complete; here we keep session ready
             s_authState = AUTH_SESSION_READY;
+            s_auth_successes++;
+            FSMIntegration::BLE::onAuthVerified();
+            sendTunnelResponse(kInsExchange, kSw1Ok, kSw2Ok);
+            FSMIntegration::BLE::onExchangeResponseSent();
           } else {
             s_authState = AUTH_FAILED;
             FSMIntegration::BLE::onAuthFailed();
-            if (g_cStatus) { g_cStatus->setValue("AUTH_FAILED"); g_cStatus->notify(); }
+            sendTunnelResponse(kInsExchange, kSw1Conditions, kSw2Conditions);
           }
           break;
           
@@ -660,50 +823,31 @@ namespace {
   // Connection callbacks
   class AuthServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
-      Serial.println("[AUTH] Client connected - starting Phase B authentication");
+      Serial.println("[AUTH] Client connected - waiting for AUTH0 over tunnel");
       
       // Reset state
       reset_auth_state();
+
+      uint8_t addr[6] = {0};
+      FSMIntegration::BLE::onClientConnected(addr);
       
       // Check prerequisites
       if (!ProvisioningPhase::isProvisioned()) {
         Serial.println("[AUTH] ERROR: Device not provisioned, cannot authenticate");
         s_authState = AUTH_FAILED;
-        if (g_cStatus) {
-          g_cStatus->setValue("NOT_PROVISIONED");
-          g_cStatus->notify();
-        }
+        sendTunnelResponse(kInsAuth0, kSw1Conditions, kSw2Conditions);
         return;
       }
 
-      // Generate ephemeral keypair
-      if (!generate_ephemeral_keypair()) {
-        Serial.println("[AUTH] ERROR: Failed to generate ephemeral keypair");
-        s_authState = AUTH_FAILED;
-        if (g_cStatus) {
-          g_cStatus->setValue("AUTH_FAILED");
-          g_cStatus->notify();
-        }
-        return;
-      }
-
-      // Send our ephemeral (no device signature; identity is verified on phone side separately)
-      if (!sign_ephemeral_with_device_key()) {
-        Serial.println("[AUTH] ERROR: Failed to sign ephemeral key");
-        s_authState = AUTH_FAILED;
-        if (g_cStatus) {
-          g_cStatus->setValue("AUTH_FAILED");
-          g_cStatus->notify();
-        }
-        return;
-      }
-      Serial.println("[AUTH] ✓ Ephemeral generated; worker will sign and send handshake");
+      s_authState = AUTH_IDLE;
+      Serial.println("[AUTH] ✓ Tunnel session initialized");
     }
 
     void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
       (void)connInfo;
       Serial.printf("[AUTH] Client disconnected (reason=%d)\n", reason);
       reset_auth_state();
+      FSMIntegration::BLE::onClientDisconnected();
       
       // CRITICAL: Restart advertising so device can be discovered again
       Serial.println("[AUTH] Restarting BLE advertising...");
@@ -726,47 +870,18 @@ namespace BLEAuth {
       pAuth = server->createService(kAuthServiceUUID);
     }
 
-    // Handshake Write characteristic (phone -> ECU)
-    NimBLECharacteristic* cHandshakeWrite = pAuth->createCharacteristic(
-        kCharHandshakeWriteUUID, 
+    // CCC tunnel RX/TX characteristics
+    NimBLECharacteristic* cCccRx = pAuth->createCharacteristic(
+        kCharCCCRxUUID,
         NIMBLE_PROPERTY::WRITE
     );
-    static HandshakeWriteCallbacks handshakeWriteCb;
-    cHandshakeWrite->setCallbacks(&handshakeWriteCb);
+    static CCCCommandWriteCallbacks cccRxCb;
+    cCccRx->setCallbacks(&cccRxCb);
 
-    // Handshake Read characteristic (ECU -> phone)
-    g_cHandshakeRead = pAuth->createCharacteristic(
-        kCharHandshakeReadUUID,
+    g_cTunnelTx = pAuth->createCharacteristic(
+        kCharCCCTxUUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
     );
-
-    // Status characteristic
-    g_cStatus = pAuth->createCharacteristic(
-        kCharStatusUUID,
-        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
-    );
-
-    // Challenge Read characteristic
-    g_cChallengeRead = pAuth->createCharacteristic(
-      kCharChallengeReadUUID,
-      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
-    );
-
-    // Challenge Write characteristic
-    NimBLECharacteristic* cChallengeWrite = pAuth->createCharacteristic(
-      kCharChallengeWriteUUID,
-      NIMBLE_PROPERTY::WRITE
-    );
-    static ChallengeWriteCallbacks challengeWriteCb;
-    cChallengeWrite->setCallbacks(&challengeWriteCb);
-
-    // GPS Data characteristic (phone sends encrypted GPS location)
-    NimBLECharacteristic* cGpsData = pAuth->createCharacteristic(
-      kCharGpsDataUUID,
-      NIMBLE_PROPERTY::WRITE
-    );
-    static GpsDataCallbacks gpsDataCb;
-    cGpsData->setCallbacks(&gpsDataCb);
 
     // Set server callbacks
     static AuthServerCallbacks serverCb;
@@ -780,12 +895,8 @@ namespace BLEAuth {
     
     Serial.println("[AUTH] ✓ Phase B service registered");
     Serial.printf("[AUTH] Service UUID: %s\n", kAuthServiceUUID);
-    Serial.printf("[AUTH] Handshake Write: %s\n", kCharHandshakeWriteUUID);
-    Serial.printf("[AUTH] Handshake Read: %s\n", kCharHandshakeReadUUID);
-    Serial.printf("[AUTH] Status: %s\n", kCharStatusUUID);
-    Serial.printf("[AUTH] Challenge Read: %s\n", kCharChallengeReadUUID);
-    Serial.printf("[AUTH] Challenge Write: %s\n", kCharChallengeWriteUUID);
-    Serial.printf("[AUTH] GPS Data: %s\n", kCharGpsDataUUID);
+    Serial.printf("[AUTH] CCC RX: %s\n", kCharCCCRxUUID);
+    Serial.printf("[AUTH] CCC TX: %s\n", kCharCCCTxUUID);
   }
 
   bool isSessionReady() { 

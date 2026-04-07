@@ -11,7 +11,13 @@ enum State {
   PROVISIONING_SELECT_AID,      // Phase A: Đang SELECT AID (kết nối HCE app)
   PROVISIONING_EXCHANGE_KEYS,   // Phase A: Đang trao đổi public key
   PROVISIONING_STORE_CREDS,     // Phase A: Đang lưu credentials vào NVS
-  AUTH_WAIT_CONNECT,            // Phase B: Chờ điện thoại kết nối BLE
+  AUTH_WAIT_AUTH0,              // Phase B (CCC tunnel): Chờ AUTH0 từ điện thoại
+  AUTH_PROCESSING_AUTH0_STD,    // Phase B (CCC tunnel): Đang xử lý AUTH0 chuẩn (P1=0x11)
+  AUTH_WAIT_AUTH1_RESP,         // Phase B (CCC tunnel): Đã gửi AUTH1, chờ AUTH1 response
+  AUTH_SECURE_CHANNEL_READY,    // Phase B (CCC tunnel): Kênh bảo mật đã sẵn sàng
+
+  // Legacy auth states (kept for backward compatibility during migration)
+  AUTH_WAIT_CONNECT,            // Legacy: Chờ điện thoại kết nối BLE
   AUTH_HANDSHAKE,               // Phase B: Đang bắt tay (trao đổi ephemeral keys)
   AUTH_VERIFY_KEYS,             // Phase B: Đang xác minh chữ ký và tạo session keys
   AUTH_SESSION_READY,           // Phase B: Xác thực xong, session sẵn sàng
@@ -39,6 +45,17 @@ enum Event {
   CREDENTIALS_STORED,           // Đã lưu credentials vào NVS
   BLE_CLIENT_CONNECTED,         // Điện thoại kết nối BLE
   BLE_CLIENT_DISCONNECTED,      // Điện thoại ngắt kết nối BLE
+
+  // CCC tunnel step events
+  BLE_AUTH0_RECEIVED,           // Đã nhận AUTH0
+  BLE_AUTH0_RESP_SENT,          // Đã gửi AUTH0 response
+  BLE_AUTH1_SENT,               // Đã gửi AUTH1 challenge/command
+  BLE_AUTH1_RESP_RECEIVED,      // Đã nhận AUTH1 response
+  BLE_EXCHANGE_RECEIVED,        // Đã nhận EXCHANGE
+  BLE_EXCHANGE_RESP_SENT,       // Đã gửi EXCHANGE response
+  BLE_CONTROL_FLOW_RECEIVED,    // Đã nhận CONTROL FLOW
+  BLE_CONTROL_FLOW_RESP_SENT,   // Đã gửi CONTROL FLOW response
+
   CLIENT_HELLO_RECEIVED,        // Nhận CLIENT_HELLO từ điện thoại
   SERVER_HELLO_SENT,            // Đã gửi SERVER_HELLO cho điện thoại
   CLIENT_CONFIRM_RECEIVED,      // Nhận xác nhận từ điện thoại

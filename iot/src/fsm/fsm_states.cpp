@@ -14,6 +14,10 @@ const char* stateToString(State state) {
     case State::PROVISIONING_SELECT_AID: return "PROV_SELECT_AID";
     case State::PROVISIONING_EXCHANGE_KEYS: return "PROV_EXCHANGE_KEYS";
     case State::PROVISIONING_STORE_CREDS: return "PROV_STORE_CREDS";
+    case State::AUTH_WAIT_AUTH0: return "AUTH_WAIT_AUTH0";
+    case State::AUTH_PROCESSING_AUTH0_STD: return "AUTH_PROCESSING_AUTH0_STD";
+    case State::AUTH_WAIT_AUTH1_RESP: return "AUTH_WAIT_AUTH1_RESP";
+    case State::AUTH_SECURE_CHANNEL_READY: return "AUTH_SECURE_CHANNEL_READY";
     case State::AUTH_WAIT_CONNECT: return "AUTH_WAIT_CONNECT";
     case State::AUTH_HANDSHAKE: return "AUTH_HANDSHAKE";
     case State::AUTH_VERIFY_KEYS: return "AUTH_VERIFY_KEYS";
@@ -42,6 +46,14 @@ const char* eventToString(Event event) {
     case Event::CREDENTIALS_STORED: return "CREDENTIALS_STORED";
     case Event::BLE_CLIENT_CONNECTED: return "BLE_CLIENT_CONNECTED";
     case Event::BLE_CLIENT_DISCONNECTED: return "BLE_CLIENT_DISCONNECTED";
+    case Event::BLE_AUTH0_RECEIVED: return "BLE_AUTH0_RECEIVED";
+    case Event::BLE_AUTH0_RESP_SENT: return "BLE_AUTH0_RESP_SENT";
+    case Event::BLE_AUTH1_SENT: return "BLE_AUTH1_SENT";
+    case Event::BLE_AUTH1_RESP_RECEIVED: return "BLE_AUTH1_RESP_RECEIVED";
+    case Event::BLE_EXCHANGE_RECEIVED: return "BLE_EXCHANGE_RECEIVED";
+    case Event::BLE_EXCHANGE_RESP_SENT: return "BLE_EXCHANGE_RESP_SENT";
+    case Event::BLE_CONTROL_FLOW_RECEIVED: return "BLE_CONTROL_FLOW_RECEIVED";
+    case Event::BLE_CONTROL_FLOW_RESP_SENT: return "BLE_CONTROL_FLOW_RESP_SENT";
     case Event::CLIENT_HELLO_RECEIVED: return "CLIENT_HELLO_RECEIVED";
     case Event::SERVER_HELLO_SENT: return "SERVER_HELLO_SENT";
     case Event::AUTH_VERIFIED: return "AUTH_VERIFIED";

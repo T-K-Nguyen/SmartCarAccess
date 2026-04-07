@@ -31,12 +31,8 @@ class BlePhaseTestService {
   static const _keystoreChannel = MethodChannel('smartcar/keystore');
   // Phase B Authentication Service UUIDs
   static const String authServiceUUID = "0000aaaa-1234-5678-9abc-def012345678";
-  static const String charHandshakeWriteUUID = "0000aaab-1234-5678-9abc-def012345678";
-  static const String charHandshakeReadUUID = "0000aaac-1234-5678-9abc-def012345678";
-  static const String charStatusUUID = "0000aaad-1234-5678-9abc-def012345678";
-  static const String charChallengeReadUUID = "0000aaae-1234-5678-9abc-def012345678";
-  static const String charChallengeWriteUUID = "0000aaaf-1234-5678-9abc-def012345678";
-  static const String charGpsDataUUID = "0000aab0-1234-5678-9abc-def012345678";
+  static const String charCccRxUUID = "0000aac1-1234-5678-9abc-def012345678";
+  static const String charCccTxUUID = "0000aac2-1234-5678-9abc-def012345678";
 
   // State machine for Phase B
   PhaseB_State _stateBLE = PhaseB_State.PHONE_IDLE;
@@ -52,16 +48,10 @@ class BlePhaseTestService {
   
   // BLE connection
   BluetoothDevice? _device;
-  BluetoothCharacteristic? _cHandshakeRead;
-  BluetoothCharacteristic? _cHandshakeWrite;
-  BluetoothCharacteristic? _cStatus;
-  BluetoothCharacteristic? _cChallengeRead;
-  BluetoothCharacteristic? _cChallengeWrite;
-  BluetoothCharacteristic? _cGpsData;
+  BluetoothCharacteristic? _cCccRx;
+  BluetoothCharacteristic? _cCccTx;
   
-  StreamSubscription? _handshakeSubscription;
-  StreamSubscription? _statusSubscription;
-  StreamSubscription? _challengeSubscription;
+  StreamSubscription? _cccTxSubscription;
 
   bool get hasActiveSession =>
       _sessionEncKey != null && _sessionMacKey != null && _device != null;
@@ -142,205 +132,162 @@ class BlePhaseTestService {
     }
     
     try {
-      // Step 1: Connect to device
+      const int insAuth0 = 0x80;
+      const int insAuth1 = 0x81;
+      const int insExchange = 0x82;
+      const int insControlFlow = 0x83;
+
       _stateBLE = PhaseB_State.PHONE_CONNECTING;
       reportProgress('Step 1', 'Connecting to BLE device...');
-      
+
       if (device != null && device.isConnected) {
         _device = device;
-        reportProgress('Step 1', '✓ Using existing connection');
       } else {
-        final devices = await FlutterBluePlus.connectedDevices;
+        final devices = FlutterBluePlus.connectedDevices;
         _device = devices.firstWhere(
           (d) => d.remoteId.str.toUpperCase() == deviceAddress.toUpperCase(),
           orElse: () => device ?? BluetoothDevice.fromId(deviceAddress),
         );
-        
         if (_device!.isDisconnected) {
           await _device!.connect(timeout: timeout);
           await Future.delayed(const Duration(milliseconds: 200));
         }
-        reportProgress('Step 1', '✓ Connected to ${_device!.platformName}');
       }
-      
-      // Step 1.5: Request larger MTU for better throughput
-      reportProgress('Step 1.5', 'Requesting MTU increase...');
+      reportProgress('Step 1', '✓ Connected to ${_device!.platformName}');
+
       try {
         final mtu = await _device!.requestMtu(512);
         reportProgress('Step 1.5', '✓ MTU negotiated: $mtu bytes');
-      } catch (e) {
+      } catch (_) {
         reportProgress('Step 1.5', '⚠ MTU request failed (using default)');
       }
-      
-      // Step 2: Discover services
+
       reportProgress('Step 2', 'Discovering BLE services...');
       final services = await _device!.discoverServices();
-      reportProgress('Step 2', '✓ Found ${services.length} services');
-      
       final authService = services.firstWhere(
         (s) => s.uuid.toString().toLowerCase() == authServiceUUID.toLowerCase(),
         orElse: () => throw Exception('Auth service not found'),
       );
-      
-      reportProgress('Step 2', '✓ Found auth service');
-      
-      // Get characteristics
-      _cHandshakeRead = authService.characteristics.firstWhere(
-        (c) => c.uuid.toString().toLowerCase() == charHandshakeReadUUID.toLowerCase(),
-      );
-      _cHandshakeWrite = authService.characteristics.firstWhere(
-        (c) => c.uuid.toString().toLowerCase() == charHandshakeWriteUUID.toLowerCase(),
-      );
-      _cStatus = authService.characteristics.firstWhere(
-        (c) => c.uuid.toString().toLowerCase() == charStatusUUID.toLowerCase(),
-      );
-      _cChallengeRead = authService.characteristics.firstWhere(
-        (c) => c.uuid.toString().toLowerCase() == charChallengeReadUUID.toLowerCase(),
-      );
-      _cChallengeWrite = authService.characteristics.firstWhere(
-        (c) => c.uuid.toString().toLowerCase() == charChallengeWriteUUID.toLowerCase(),
-      );
-      
-      // GPS data characteristic (optional, may not be available on older firmware)
-      try {
-        _cGpsData = authService.characteristics.firstWhere(
-          (c) => c.uuid.toString().toLowerCase() == charGpsDataUUID.toLowerCase(),
-        );
-        reportProgress('Step 2', '✓ GPS data characteristic found');
-      } catch (e) {
-        reportProgress('Step 2', '⚠ GPS characteristic not available (older firmware)');
-      }
 
-      reportProgress('Step 2', '✓ All characteristics found');
-      
-      // Step 3: Subscribe to notifications
-      reportProgress('Step 3', 'Subscribing to notifications...');
-      
-      _stateBLE = PhaseB_State.PHONE_WAITING_FOR_ECU_HANDSHAKE;
-      
-      // Set up listeners BEFORE enabling notifications
-      final handshakeCompleter = Completer<Uint8List>();
-      final statusCompleter = Completer<String>();
-      final challengeCompleter = Completer<Uint8List>();
-      
-      _handshakeSubscription = _cHandshakeRead!.lastValueStream.listen((value) {
-        if (value.isNotEmpty && !handshakeCompleter.isCompleted) {
-          debugPrint('[Notification] Received ECU handshake: ${value.length} bytes');
-          handshakeCompleter.complete(Uint8List.fromList(value));
+      _cCccRx = authService.characteristics.firstWhere(
+        (c) => c.uuid.toString().toLowerCase() == charCccRxUUID.toLowerCase(),
+      );
+      _cCccTx = authService.characteristics.firstWhere(
+        (c) => c.uuid.toString().toLowerCase() == charCccTxUUID.toLowerCase(),
+      );
+      reportProgress('Step 2', '✓ Found CCC RX/TX characteristics');
+
+      final auth0RespCompleter = Completer<Uint8List>();
+      final auth1CmdCompleter = Completer<Uint8List>();
+      final exchangeChallengeCompleter = Completer<Uint8List>();
+      final exchangeAckCompleter = Completer<void>();
+      final controlAckCompleter = Completer<void>();
+
+      _cccTxSubscription = _cCccTx!.lastValueStream.listen((value) {
+        if (value.isEmpty) return;
+        final frame = _parseTunnelFrame(Uint8List.fromList(value));
+        if (frame == null) {
+          debugPrint('[Tunnel] Ignored malformed TX frame (${value.length} bytes)');
+          return;
         }
-      });
-      
-      _statusSubscription = _cStatus!.lastValueStream.listen((value) {
-        if (value.isNotEmpty) {
-          final status = utf8.decode(value);
-          debugPrint('[Notification] Status: $status');
-          if (!statusCompleter.isCompleted && 
-              (status == 'AUTH_SUCCESS' || status == 'AUTH_FAILED')) {
-            statusCompleter.complete(status);
+
+        final ins = frame.ins;
+        debugPrint(
+          '[Tunnel] RX INS=0x${ins.toRadixString(16)} SW=${frame.sw1.toRadixString(16)}${frame.sw2.toRadixString(16)} Lc=${frame.data.length}',
+        );
+        final swOk = frame.sw1 == 0x90 && frame.sw2 == 0x00;
+        if (!swOk) {
+          final err = Exception('INS=0x${ins.toRadixString(16)} SW=${frame.sw1.toRadixString(16)}${frame.sw2.toRadixString(16)}');
+          if (!auth0RespCompleter.isCompleted) auth0RespCompleter.completeError(err);
+          if (!auth1CmdCompleter.isCompleted) auth1CmdCompleter.completeError(err);
+          if (!exchangeChallengeCompleter.isCompleted) exchangeChallengeCompleter.completeError(err);
+          if (!exchangeAckCompleter.isCompleted) exchangeAckCompleter.completeError(err);
+          if (!controlAckCompleter.isCompleted) controlAckCompleter.completeError(err);
+          return;
+        }
+
+        if (ins == insAuth0 && !auth0RespCompleter.isCompleted) {
+          auth0RespCompleter.complete(frame.data);
+          return;
+        }
+        if (ins == insAuth1) {
+          if (!auth1CmdCompleter.isCompleted) {
+            auth1CmdCompleter.complete(frame.data);
+          }
+          if (!auth0RespCompleter.isCompleted && frame.data.length >= 65) {
+            debugPrint('[Tunnel] AUTH0 fallback using AUTH1 payload');
+            auth0RespCompleter.complete(frame.data);
+          }
+          return;
+        }
+        if (ins == insExchange) {
+          if (frame.data.length == 24 && !exchangeChallengeCompleter.isCompleted) {
+            exchangeChallengeCompleter.complete(frame.data);
+            return;
+          }
+          if (!exchangeAckCompleter.isCompleted) {
+            exchangeAckCompleter.complete();
+            return;
           }
         }
-      });
-      
-      _challengeSubscription = _cChallengeRead!.lastValueStream.listen((value) {
-        if (value.isNotEmpty && !challengeCompleter.isCompleted) {
-          debugPrint('[Notification] Received challenge: ${value.length} bytes');
-          challengeCompleter.complete(Uint8List.fromList(value));
+        if (ins == insControlFlow && !controlAckCompleter.isCompleted) {
+          controlAckCompleter.complete();
         }
       });
-      
-      // Now enable notifications
-      await _cHandshakeRead!.setNotifyValue(true);
-      await _cStatus!.setNotifyValue(true);
-      await _cChallengeRead!.setNotifyValue(true);
-      
-      reportProgress('Step 3', '✓ Notifications enabled');
-      
-      // Check if handshake was already sent (cached value)
-      // ESP32 may have sent handshake during connection, before notifications enabled
-      final cachedHandshake = await _cHandshakeRead!.read();
-      if (cachedHandshake.isNotEmpty && !handshakeCompleter.isCompleted) {
-        reportProgress('Step 3', '✓ Found cached handshake');
-        handshakeCompleter.complete(Uint8List.fromList(cachedHandshake));
+
+      await _cCccTx!.setNotifyValue(true);
+      reportProgress('Step 3', '✓ CCC_TX notifications enabled');
+
+      _stateBLE = PhaseB_State.PHONE_SENDING_AUTH0;
+      reportProgress('Step 4', 'Sending AUTH0 (standard transaction)...');
+      await _sendApdu(ins: insAuth0, p1: 0x11, data: Uint8List(0));
+
+      _stateBLE = PhaseB_State.PHONE_WAITING_AUTH0_RESP;
+      final auth0Data = await auth0RespCompleter.future.timeout(const Duration(seconds: 10));
+      if (auth0Data.length < 65) {
+        throw Exception('AUTH0 response too short: ${auth0Data.length}');
       }
-      
-      // Step 4: Wait for ECU handshake
-      reportProgress('Step 4', 'Waiting for ECU handshake...');
-      final ecuHandshake = await handshakeCompleter.future
-          .timeout(Duration(seconds: 10));
-      
-      // Parse ECU handshake: [ephemeral_pub(65) + sig_len(2) + signature]
-      if (ecuHandshake.length < 67) {
-        throw Exception('ECU handshake too short: ${ecuHandshake.length} bytes');
+      _ecuEphemeralPublicKey = auth0Data.sublist(0, 65);
+      reportProgress('Step 4', '✓ AUTH0 response received');
+
+      // Optional AUTH1 command payload from ECU (contains ecu ephemeral + siglen + signature)
+      try {
+        final auth1Cmd = await auth1CmdCompleter.future.timeout(const Duration(seconds: 5));
+        if (auth1Cmd.length >= 65) {
+          _ecuEphemeralPublicKey = auth1Cmd.sublist(0, 65);
+        }
+        _stateBLE = PhaseB_State.PHONE_WAITING_AUTH1;
+        reportProgress('Step 5', '✓ AUTH1 payload received from ECU');
+      } catch (_) {
+        reportProgress('Step 5', '⚠ AUTH1 payload not received, using AUTH0 ephemeral');
       }
-      
-      _ecuEphemeralPublicKey = ecuHandshake.sublist(0, 65);
-      final sigLen = ecuHandshake[65] | (ecuHandshake[66] << 8);
-      
-      reportProgress('Step 4', '✓ ECU handshake received ($sigLen byte signature)');
-      
-      // Step 5: Generate phone ephemeral keypair (via Android)
-      _stateBLE = PhaseB_State.PHONE_EPHEMERAL_GENERATING;
-      reportProgress('Step 5', 'Generating phone ephemeral keypair...');
-      
+
+      reportProgress('Step 6', 'Generating phone ephemeral keypair...');
       final keypairResult = await _handshakeChannel.invokeMethod('generateEphemeralKeypair');
       _phoneEphemeralPublicKey = Uint8List.fromList(List<int>.from(keypairResult['publicKey']));
       _phoneEphemeralPrivateKey = Uint8List.fromList(List<int>.from(keypairResult['privateKey']));
-      
-      reportProgress('Step 5', '✓ Phone keypair generated');
-      
-      // Step 6: Sign ephemeral public key with phone identity key (Android Keystore)
-      _stateBLE = PhaseB_State.PHONE_SIGNING_EPHEMERAL;
-      reportProgress('Step 6', 'Signing with identity key...');
-      
-      final signatureResult = await _handshakeChannel.invokeMethod(
-        'signEphemeralWithIdentity',
-        _phoneEphemeralPublicKey,
-      );
+
+      reportProgress('Step 7', 'Signing phone ephemeral with identity key...');
+      final signatureResult = await _handshakeChannel.invokeMethod('signEphemeralWithIdentity', _phoneEphemeralPublicKey);
       final signature = Uint8List.fromList(List<int>.from(signatureResult));
-      
-      reportProgress('Step 6', '✓ Signature generated (${signature.length} bytes)');
-      
-      // Step 7: Send phone handshake to ECU
-      _stateBLE = PhaseB_State.PHONE_SENT_HANDSHAKE;
-      reportProgress('Step 7', 'Sending phone handshake...');
-      
-      // Build packet: [ephemeral_pub(65) + sig_len(2,LE) + signature]
+
       final handshakePacket = BytesBuilder();
       handshakePacket.add(_phoneEphemeralPublicKey!);
       handshakePacket.addByte(signature.length & 0xFF);
       handshakePacket.addByte((signature.length >> 8) & 0xFF);
       handshakePacket.add(signature);
-      
-      await _cHandshakeWrite!.write(handshakePacket.toBytes(), withoutResponse: false);
-      reportProgress('Step 7', '✓ Phone handshake sent');
-      
-      // Step 8: Wait for authentication status
-      _stateBLE = PhaseB_State.PHONE_WAITING_FOR_STATUS;
-      reportProgress('Step 8', 'Waiting for ECU verification...');
-      
-      final status = await statusCompleter.future
-          .timeout(Duration(seconds: 10));
-      
-      if (status != 'AUTH_SUCCESS') {
-        throw Exception('Authentication failed: $status');
-      }
-      
-      reportProgress('Step 8', '✓ ECU verified phone');
-      
-      // Step 9: Compute ECDH shared secret (via Android)
+
+      _stateBLE = PhaseB_State.PHONE_SENDING_AUTH1_RESP;
+      reportProgress('Step 8', 'Sending AUTH1 response...');
+      await _sendApdu(ins: insAuth1, p1: 0x00, data: handshakePacket.toBytes());
+
       reportProgress('Step 9', 'Computing ECDH shared secret...');
-      
       final sharedSecretResult = await _handshakeChannel.invokeMethod(
         'computeECDH',
         {'ecuPublicKey': _ecuEphemeralPublicKey},
       );
       _sharedSecret = Uint8List.fromList(List<int>.from(sharedSecretResult));
-      
-      reportProgress('Step 9', '✓ Shared secret computed');
-      
-      // Step 10: Derive session keys with HKDF-SHA256 (via Android)
-      reportProgress('Step 10', 'Deriving session keys...');
-      
+
       final keysResult = await _handshakeChannel.invokeMethod(
         'deriveSessionKeys',
         {
@@ -349,42 +296,29 @@ class BlePhaseTestService {
           'ecuEphemeralPub': _ecuEphemeralPublicKey,
         },
       );
-      
       _sessionEncKey = Uint8List.fromList(List<int>.from(keysResult['encKey']));
       _sessionMacKey = Uint8List.fromList(List<int>.from(keysResult['macKey']));
-      
-      reportProgress('Step 10', '✓ Session keys derived');
-      
-      // Step 11: Wait for challenge
-      reportProgress('Step 11', 'Waiting for challenge...');
-      
-      _challenge = await challengeCompleter.future
-          .timeout(Duration(seconds: 10));
-      
+      reportProgress('Step 9', '✓ Session keys derived');
+
+      reportProgress('Step 10', 'Waiting for EXCHANGE challenge...');
+      _challenge = await exchangeChallengeCompleter.future.timeout(const Duration(seconds: 12));
       if (_challenge!.length != 24) {
         throw Exception('Invalid challenge length: ${_challenge!.length}');
       }
-      
-      final vehicleId = _challenge!.sublist(0, 8);
-      final nonce = _challenge!.sublist(8, 24);
-      
-      reportProgress('Step 11', '✓ Challenge received');
-      
-      // Step 12: Sign challenge and send back (via Android Keystore)
-      reportProgress('Step 12', 'Signing challenge...');
-      
-      final challengeSigResult = await _handshakeChannel.invokeMethod(
-        'signChallenge',
-        _challenge,
-      );
+
+      final challengeSigResult = await _handshakeChannel.invokeMethod('signChallenge', _challenge);
       final challengeSignature = Uint8List.fromList(List<int>.from(challengeSigResult));
-      
-      await _cChallengeWrite!.write(challengeSignature, withoutResponse: false);
-      reportProgress('Step 12', '✓ Challenge signature sent');
-      
-      _stateBLE = PhaseB_State.PHONE_AUTH_SUCCESS;
-      reportProgress('Complete', '✓✓✓ Authentication successful!');
-      
+      await _sendApdu(ins: insExchange, p1: 0x00, data: challengeSignature);
+      await exchangeAckCompleter.future.timeout(const Duration(seconds: 10));
+      reportProgress('Step 10', '✓ EXCHANGE signature accepted');
+
+      await _sendApdu(ins: insControlFlow, p1: 0x00, data: Uint8List.fromList(utf8.encode('Success')));
+      await controlAckCompleter.future.timeout(const Duration(seconds: 6));
+      reportProgress('Step 11', '✓ CONTROL FLOW acknowledged');
+
+      _stateBLE = PhaseB_State.PHONE_SECURE_CHANNEL_READY;
+      reportProgress('Complete', '✓✓✓ Authentication successful through CCC tunnel');
+
       return PhaseB_Result(
         success: true,
         message: 'Authentication successful',
@@ -393,7 +327,6 @@ class BlePhaseTestService {
         sessionMacKey: _sessionMacKey,
         challenge: _challenge,
       );
-      
     } catch (e, stackTrace) {
       reportProgress('Error', '✗ Authentication failed: $e');
       debugPrint('Stack trace: $stackTrace');
@@ -405,18 +338,13 @@ class BlePhaseTestService {
         message: 'Authentication failed: $e',
       );
     } finally {
-      // Cleanup subscriptions
-      await _handshakeSubscription?.cancel();
-      await _statusSubscription?.cancel();
-      await _challengeSubscription?.cancel();
+      await _cccTxSubscription?.cancel();
     }
   }
 
   /// Cleanup and disconnect
   Future<void> disconnect() async {
-    await _handshakeSubscription?.cancel();
-    await _statusSubscription?.cancel();
-    await _challengeSubscription?.cancel();
+    await _cccTxSubscription?.cancel();
     
     if (_device != null && _device!.isConnected) {
       await _device!.disconnect();
@@ -449,30 +377,9 @@ class BlePhaseTestService {
       return false;
     }
     
-    // Check if GPS characteristic is available
-    if (_cGpsData == null) {
-      debugPrint('[GPS] ERROR: GPS characteristic not found. Discovering...');
-      
-      if (_device == null) {
-        debugPrint('[GPS] ERROR: No device connected');
-        return false;
-      }
-      
-      try {
-        final services = await _device!.discoverServices();
-        final authService = services.firstWhere(
-          (s) => s.uuid.toString().toLowerCase() == authServiceUUID.toLowerCase(),
-        );
-        
-        _cGpsData = authService.characteristics.firstWhere(
-          (c) => c.uuid.toString().toLowerCase() == charGpsDataUUID.toLowerCase(),
-        );
-        
-        debugPrint('[GPS] ✓ GPS characteristic found');
-      } catch (e) {
-        debugPrint('[GPS] ERROR: Failed to find GPS characteristic: $e');
-        return false;
-      }
+    if (_cCccRx == null) {
+      debugPrint('[GPS] ERROR: CCC RX characteristic not available. Run Phase B first.');
+      return false;
     }
     
     try {
@@ -500,41 +407,23 @@ class BlePhaseTestService {
   }
 
   Future<bool> sendGpsPacket(GpsDataPacket gpsPacket) async {
+    const int insExchange = 0x82;
+
     if (_sessionEncKey == null || _sessionMacKey == null) {
       debugPrint('[GPS] ERROR: Session keys not available. Run Phase B authentication first.');
       return false;
     }
 
-    if (_cGpsData == null) {
-      debugPrint('[GPS] ERROR: GPS characteristic not found. Discovering...');
-
-      if (_device == null) {
-        debugPrint('[GPS] ERROR: No device connected');
-        return false;
-      }
-
-      try {
-        final services = await _device!.discoverServices();
-        final authService = services.firstWhere(
-          (s) => s.uuid.toString().toLowerCase() == authServiceUUID.toLowerCase(),
-        );
-
-        _cGpsData = authService.characteristics.firstWhere(
-          (c) => c.uuid.toString().toLowerCase() == charGpsDataUUID.toLowerCase(),
-        );
-
-        debugPrint('[GPS] ✓ GPS characteristic found');
-      } catch (e) {
-        debugPrint('[GPS] ERROR: Failed to find GPS characteristic: $e');
-        return false;
-      }
+    if (_cCccRx == null) {
+      debugPrint('[GPS] ERROR: CCC RX characteristic not available. Run Phase B first.');
+      return false;
     }
 
     try {
       debugPrint('[GPS] Location: ${gpsPacket.locationString}');
       debugPrint('[GPS] Encrypted packet size: ${gpsPacket.encryptedData.length} bytes');
-      await _cGpsData!.write(gpsPacket.encryptedData.toList(), withoutResponse: false);
-      debugPrint('[GPS] ✓ GPS data sent successfully to ESP32');
+      await _sendApdu(ins: insExchange, p1: 0x20, data: gpsPacket.encryptedData);
+      debugPrint('[GPS] ✓ GPS packet sent on CCC tunnel');
       return true;
     } catch (e) {
       debugPrint('[GPS] ERROR: $e');
@@ -551,10 +440,55 @@ class BlePhaseTestService {
     _sessionEncKey = null;
     _sessionMacKey = null;
     _challenge = null;
+    _cCccRx = null;
+    _cCccTx = null;
+    _cccTxSubscription = null;
     _device = null;
   }
 
   // ========== Helper Functions ==========
+
+  Future<void> _sendApdu({
+    required int ins,
+    int cla = 0x00,
+    int p1 = 0,
+    int p2 = 0,
+    Uint8List? data,
+  }) async {
+    if (_cCccRx == null) {
+      throw Exception('CCC RX characteristic not initialized');
+    }
+    final payload = data ?? Uint8List(0);
+    if (payload.length > 255) {
+      throw Exception('APDU payload too large (${payload.length} > 255)');
+    }
+
+    final frame = BytesBuilder();
+    frame.addByte(cla & 0xFF);
+    frame.addByte(ins & 0xFF);
+    frame.addByte(p1 & 0xFF);
+    frame.addByte(p2 & 0xFF);
+    frame.addByte(payload.length & 0xFF);
+    frame.add(payload);
+    await _cCccRx!.write(frame.toBytes(), withoutResponse: false);
+  }
+
+  _TunnelFrame? _parseTunnelFrame(Uint8List raw) {
+    if (raw.length < 4) {
+      return null;
+    }
+
+    final ins = raw[0];
+    final sw1 = raw[1];
+    final sw2 = raw[2];
+    final lc = raw[3];
+    if (raw.length < 4 + lc) {
+      return null;
+    }
+
+    final data = lc > 0 ? raw.sublist(4, 4 + lc) : Uint8List(0);
+    return _TunnelFrame(ins: ins, sw1: sw1, sw2: sw2, data: data);
+  }
 
   /// Convert bytes to hex string
   String _bytesToHex(Uint8List bytes) {
@@ -567,6 +501,11 @@ class BlePhaseTestService {
 enum PhaseB_State {
   PHONE_IDLE,
   PHONE_CONNECTING,
+  PHONE_SENDING_AUTH0,
+  PHONE_WAITING_AUTH0_RESP,
+  PHONE_WAITING_AUTH1,
+  PHONE_SENDING_AUTH1_RESP,
+  PHONE_SECURE_CHANNEL_READY,
   PHONE_WAITING_FOR_ECU_HANDSHAKE,
   PHONE_VERIFY_ECU_SIGNATURE,
   PHONE_EPHEMERAL_GENERATING,
@@ -575,6 +514,20 @@ enum PhaseB_State {
   PHONE_WAITING_FOR_STATUS,
   PHONE_AUTH_SUCCESS,
   PHONE_AUTH_FAILED,
+}
+
+class _TunnelFrame {
+  final int ins;
+  final int sw1;
+  final int sw2;
+  final Uint8List data;
+
+  _TunnelFrame({
+    required this.ins,
+    required this.sw1,
+    required this.sw2,
+    required this.data,
+  });
 }
 
 // ========== Result Classes ==========

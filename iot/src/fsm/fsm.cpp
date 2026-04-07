@@ -71,7 +71,7 @@ const struct {
   {State::IDLE, Event::PROVISION_START, State::PROVISIONING_WAIT_TAP, nullptr},
   
   // IDLE → AUTH on BLE connect (if provisioned)
-  {State::IDLE, Event::BLE_CLIENT_CONNECTED, State::AUTH_WAIT_CONNECT, guardProvisioned},
+  {State::IDLE, Event::BLE_CLIENT_CONNECTED, State::AUTH_WAIT_AUTH0, guardProvisioned},
 
   // Accept credentials stored while idle (NFC flow can run outside FSM)
   {State::IDLE, Event::CREDENTIALS_STORED, State::IDLE, nullptr},
@@ -92,19 +92,39 @@ const struct {
   {State::PROVISIONING_STORE_CREDS, Event::CREDENTIALS_STORED, State::IDLE, nullptr},
   {State::PROVISIONING_STORE_CREDS, Event::ERROR_OCCURRED, State::ERROR_HANDLER, nullptr},
   
-  // AUTH flow
-  {State::AUTH_WAIT_CONNECT, Event::BLE_CLIENT_CONNECTED, State::AUTH_HANDSHAKE, nullptr},
-  {State::AUTH_WAIT_CONNECT, Event::TIMEOUT, State::IDLE, nullptr},
-  
-  {State::AUTH_HANDSHAKE, Event::CLIENT_HELLO_RECEIVED, State::AUTH_VERIFY_KEYS, nullptr},
-  {State::AUTH_HANDSHAKE, Event::SERVER_HELLO_SENT, State::AUTH_HANDSHAKE, nullptr},  // Stay in handshake
-  {State::AUTH_HANDSHAKE, Event::TIMEOUT, State::ERROR_HANDLER, nullptr},
-  {State::AUTH_HANDSHAKE, Event::BLE_CLIENT_DISCONNECTED, State::IDLE, nullptr},
-  
-  {State::AUTH_VERIFY_KEYS, Event::AUTH_VERIFIED, State::AUTH_SESSION_READY, guardSessionReady},
+  // AUTH flow (CCC tunnel)
+  {State::AUTH_WAIT_AUTH0, Event::BLE_AUTH0_RECEIVED, State::AUTH_PROCESSING_AUTH0_STD, nullptr},
+  {State::AUTH_WAIT_AUTH0, Event::TIMEOUT, State::IDLE, nullptr},
+  {State::AUTH_WAIT_AUTH0, Event::BLE_CLIENT_DISCONNECTED, State::IDLE, nullptr},
+
+  {State::AUTH_PROCESSING_AUTH0_STD, Event::BLE_AUTH0_RESP_SENT, State::AUTH_WAIT_AUTH1_RESP, nullptr},
+  {State::AUTH_PROCESSING_AUTH0_STD, Event::AUTH_FAILED, State::ERROR_HANDLER, nullptr},
+  {State::AUTH_PROCESSING_AUTH0_STD, Event::TIMEOUT, State::ERROR_HANDLER, nullptr},
+  {State::AUTH_PROCESSING_AUTH0_STD, Event::BLE_CLIENT_DISCONNECTED, State::IDLE, nullptr},
+
+  {State::AUTH_WAIT_AUTH1_RESP, Event::BLE_AUTH1_RESP_RECEIVED, State::AUTH_VERIFY_KEYS, nullptr},
+  {State::AUTH_WAIT_AUTH1_RESP, Event::BLE_AUTH1_SENT, State::AUTH_WAIT_AUTH1_RESP, nullptr},
+  {State::AUTH_WAIT_AUTH1_RESP, Event::AUTH_VERIFIED, State::AUTH_SECURE_CHANNEL_READY, guardSessionReady},
+  {State::AUTH_WAIT_AUTH1_RESP, Event::AUTH_FAILED, State::ERROR_HANDLER, nullptr},
+  {State::AUTH_WAIT_AUTH1_RESP, Event::TIMEOUT, State::ERROR_HANDLER, nullptr},
+  {State::AUTH_WAIT_AUTH1_RESP, Event::BLE_CLIENT_DISCONNECTED, State::IDLE, nullptr},
+
+  // keep legacy VERIFY_KEYS gate but land in new secure-ready state
+  {State::AUTH_VERIFY_KEYS, Event::BLE_EXCHANGE_RECEIVED, State::AUTH_VERIFY_KEYS, nullptr},
+  {State::AUTH_VERIFY_KEYS, Event::AUTH_VERIFIED, State::AUTH_SECURE_CHANNEL_READY, guardSessionReady},
   {State::AUTH_VERIFY_KEYS, Event::AUTH_FAILED, State::ERROR_HANDLER, nullptr},
   {State::AUTH_VERIFY_KEYS, Event::TIMEOUT, State::ERROR_HANDLER, nullptr},
-  
+
+  {State::AUTH_SECURE_CHANNEL_READY, Event::BLE_EXCHANGE_RECEIVED, State::AUTH_SECURE_CHANNEL_READY, nullptr},
+  {State::AUTH_SECURE_CHANNEL_READY, Event::BLE_EXCHANGE_RESP_SENT, State::AUTH_SECURE_CHANNEL_READY, nullptr},
+  {State::AUTH_SECURE_CHANNEL_READY, Event::BLE_CONTROL_FLOW_RECEIVED, State::AUTH_SECURE_CHANNEL_READY, nullptr},
+  {State::AUTH_SECURE_CHANNEL_READY, Event::BLE_CONTROL_FLOW_RESP_SENT, State::AUTH_SECURE_CHANNEL_READY, nullptr},
+  {State::AUTH_SECURE_CHANNEL_READY, Event::UNLOCK_REQUESTED, State::UNLOCKING_CHECK_PROXIMITY, nullptr},
+  {State::AUTH_SECURE_CHANNEL_READY, Event::BLE_CLIENT_DISCONNECTED, State::IDLE, nullptr},
+  {State::AUTH_SECURE_CHANNEL_READY, Event::TIMEOUT, State::IDLE, nullptr},
+  {State::AUTH_SECURE_CHANNEL_READY, Event::AUTH_SESSION_EXPIRED, State::IDLE, nullptr},
+
+  // Legacy session-ready path kept during migration
   {State::AUTH_SESSION_READY, Event::UNLOCK_REQUESTED, State::UNLOCKING_CHECK_PROXIMITY, nullptr},
   {State::AUTH_SESSION_READY, Event::BLE_CLIENT_DISCONNECTED, State::IDLE, nullptr},
   {State::AUTH_SESSION_READY, Event::TIMEOUT, State::IDLE, nullptr},
@@ -112,6 +132,7 @@ const struct {
   
   // UNLOCKING flow
   {State::UNLOCKING_CHECK_PROXIMITY, Event::PROXIMITY_OK, State::UNLOCKING_VERIFY_AUTH, nullptr},
+  {State::UNLOCKING_CHECK_PROXIMITY, Event::BLE_CONTROL_FLOW_RESP_SENT, State::UNLOCKING_CHECK_PROXIMITY, nullptr},
   {State::UNLOCKING_CHECK_PROXIMITY, Event::PROXIMITY_TOO_FAR, State::AUTH_SESSION_READY, nullptr},
   {State::UNLOCKING_CHECK_PROXIMITY, Event::TIMEOUT, State::AUTH_SESSION_READY, nullptr},
   
@@ -235,10 +256,12 @@ void tick() {
       // NFCSession polls in its own loop
       break;
       
+    case State::AUTH_WAIT_AUTH0:
     case State::AUTH_WAIT_CONNECT:
       // BLE advertising should already be active
       break;
       
+    case State::AUTH_SECURE_CHANNEL_READY:
     case State::AUTH_SESSION_READY:
       // Monitor session timeout
       if (context.session_keys_ready) {
@@ -521,8 +544,19 @@ bool isProvisioning() {
 }
 
 bool isAuthenticating() {
-  return currentState >= State::AUTH_WAIT_CONNECT && 
-         currentState <= State::AUTH_SESSION_READY;
+  switch (currentState) {
+    case State::AUTH_WAIT_AUTH0:
+    case State::AUTH_PROCESSING_AUTH0_STD:
+    case State::AUTH_WAIT_AUTH1_RESP:
+    case State::AUTH_VERIFY_KEYS:
+    case State::AUTH_SECURE_CHANNEL_READY:
+    case State::AUTH_WAIT_CONNECT:
+    case State::AUTH_HANDSHAKE:
+    case State::AUTH_SESSION_READY:
+      return true;
+    default:
+      return false;
+  }
 }
 
 bool isUnlocking() {

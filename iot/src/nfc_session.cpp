@@ -21,6 +21,7 @@ namespace {
     bool targetActive = false;
     uint32_t removalWaitStartedMs = 0;
     uint32_t lastRemovalWaitLogMs = 0;
+    uint32_t nextCardPollAllowedMs = 0;
 
     // Startup guard to ignore early serial noise
     uint32_t bootMillis = 0;
@@ -332,55 +333,83 @@ namespace {
         return ok;
     }
 
-    // Wait for a card to appear using adaptive polling. Returns true when stable detected.
-    bool waitForCard(uint32_t timeoutMs = 15000, uint8_t stableReads = 2, uint16_t pollMs = 60) {
-        // Ensure previous sessions are fully released before starting a new poll loop
-        releaseTarget();
+    // Non-blocking card poll. Call once per tick; returns true only when stable card presence is reached.
+    bool pollCardPresenceNonBlocking(uint32_t timeoutMs, uint8_t stableReads, uint16_t pollMs, bool& timedOut) {
+        static bool waiting = false;
+        static uint32_t waitStartMs = 0;
+        static uint32_t lastPollMs = 0;
+        static uint32_t lastDotMs = 0;
+        static uint8_t stableCount = 0;
 
-        const uint32_t start = millis();
-        uint8_t stableCount = 0;
-        uint32_t lastDot = 0;
-        Serial.println("Waiting for card (adaptive poll)...");
-        while (true) {
-            bool present = nfc->inListPassiveTarget();
-            if (present) {
-                if (++stableCount >= stableReads) {
-                    Serial.println("Card detected (stable)");
-                    targetActive = true;
-                    return true;
-                }
-            } else {
-                stableCount = 0;
-            }
-            uint32_t now = millis();
-            if (now - lastDot >= 2000) { Serial.print('.'); lastDot = now; }
-            if (timeoutMs && now - start >= timeoutMs) {
-                Serial.println("\nTimeout waiting for card");
-                return false;
-            }
-            delay(pollMs);
+        timedOut = false;
+        const uint32_t now = millis();
+
+        if (!waiting) {
+            releaseTarget();
+            waiting = true;
+            waitStartMs = now;
+            lastPollMs = 0;
+            lastDotMs = 0;
+            stableCount = 0;
+            Serial.println("Waiting for card (adaptive poll)...");
         }
+
+        if (pollMs > 0 && (now - lastPollMs) < pollMs) {
+            return false;
+        }
+        lastPollMs = now;
+
+        bool present = nfc->inListPassiveTarget();
+        if (present) {
+            if (++stableCount >= stableReads) {
+                Serial.println("Card detected (stable)");
+                waiting = false;
+                stableCount = 0;
+                targetActive = true;
+                return true;
+            }
+        } else {
+            stableCount = 0;
+        }
+
+        if (lastDotMs == 0 || (now - lastDotMs) >= 2000) {
+            Serial.print('.');
+            lastDotMs = now;
+        }
+
+        if (timeoutMs && (now - waitStartMs) >= timeoutMs) {
+            Serial.println("\nTimeout waiting for card");
+            waiting = false;
+            stableCount = 0;
+            timedOut = true;
+            return false;
+        }
+
+        return false;
     }
 
-    // Wait for a card to be removed. Returns true when stable absent detected.
-    bool waitForRemoval(uint32_t timeoutMs = 8000, uint8_t stableAbsentReads = 3, uint16_t pollMs = 80) {
-        const uint32_t start = millis();
-        uint8_t absentCount = 0;
-        while (true) {
-            bool present = nfc->inListPassiveTarget();
-            if (!present) {
-                if (++absentCount >= stableAbsentReads) {
-                    Serial.println("Card removed (stable)\n");
-                    return true;
-                }
-            } else {
-                absentCount = 0;
-            }
-            if (timeoutMs && millis() - start >= timeoutMs) {
-                return false;
-            }
-            delay(pollMs);
+    // Non-blocking card removal poll. Call once per tick while waitingForRemoval is true.
+    bool pollCardRemovalNonBlocking(uint8_t stableAbsentReads, uint16_t pollMs) {
+        static uint32_t lastPollMs = 0;
+        static uint8_t absentCount = 0;
+
+        const uint32_t now = millis();
+        if (pollMs > 0 && (now - lastPollMs) < pollMs) {
+            return false;
         }
+        lastPollMs = now;
+
+        bool present = nfc->inListPassiveTarget();
+        if (!present) {
+            if (++absentCount >= stableAbsentReads) {
+                absentCount = 0;
+                Serial.println("Card removed (stable)\n");
+                return true;
+            }
+        } else {
+            absentCount = 0;
+        }
+        return false;
     }
 
     bool selectAid(uint8_t& sw1, uint8_t& sw2, int& payloadLen);
@@ -418,8 +447,8 @@ namespace {
             lastRemovalWaitLogMs = 0;
             return;
         }
-        // Wrong tag / SELECT failed: small backoff to avoid tight loop
-        delay(200);
+        // Wrong tag / SELECT failed: small backoff to avoid tight loop (non-blocking)
+        nextCardPollAllowedMs = millis() + 200;
         // Release just in case there is a half-open session
         removalWaitStartedMs = 0;
         lastRemovalWaitLogMs = 0;
@@ -827,7 +856,7 @@ namespace NfcSession {
         handleSerialCommands();
 
         if (waitingForRemoval) {
-            bool removed = waitForRemoval(1500, 2, 80);
+            bool removed = pollCardRemovalNonBlocking(2, 80);
             if (removed) {
                 waitingForRemoval = false;
                 removalWaitStartedMs = 0;
@@ -857,10 +886,15 @@ namespace NfcSession {
             return;
         }
 
-        // Wait for card; use 1 stable read for snappier HCE pickup on first tap.
-        // SELECT response validation still filters non-matching/noisy targets.
-        if (!waitForCard(15000, 1, 60)) {
-            if (!samConfigured) {
+        if (nextCardPollAllowedMs != 0 && millis() < nextCardPollAllowedMs) {
+            return;
+        }
+        nextCardPollAllowedMs = 0;
+
+        // Non-blocking wait for card; SELECT validation still filters non-matching/noisy targets.
+        bool cardPollTimedOut = false;
+        if (!pollCardPresenceNonBlocking(15000, 1, 60, cardPollTimedOut)) {
+            if (cardPollTimedOut && !samConfigured) {
                 Serial.println("Re-attempting SAMConfig...");
                 samConfigured = ensureSAMConfig(3, 200);
                 if (samConfigured) Serial.println("SAM configured successfully");

@@ -4,8 +4,10 @@
 #include <esp_system.h>
 #include <cstring>
 #include <mbedtls/ecp.h>
+#include <mbedtls/ecdsa.h>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
+#include <mbedtls/sha256.h>
 
 namespace {
   Preferences prefs;
@@ -13,6 +15,9 @@ namespace {
 
   CCCMailbox::CCC_Mailbox g_mailbox{};
   bool g_loaded = false;
+  mbedtls_entropy_context g_vsign_entropy;
+  mbedtls_ctr_drbg_context g_vsign_drbg;
+  bool g_vsign_rng_ready = false;
 
   bool isValidPub(const uint8_t* pub65) {
     return pub65 && pub65[0] == 0x04;
@@ -39,7 +44,7 @@ namespace {
     out[8] = '\0';
   }
 
-  bool generateVehiclePub(uint8_t outPub[65]) {
+  bool generateVehicleKeypair(uint8_t outPub[65], uint8_t outPriv[32]) {
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context drbg;
     mbedtls_ecp_group grp;
@@ -87,6 +92,9 @@ namespace {
     size_t olen = 0;
     rc = mbedtls_ecp_point_write_binary(&grp, &q, MBEDTLS_ECP_PF_UNCOMPRESSED,
                                         &olen, outPub, 65);
+    if (rc == 0) {
+      rc = mbedtls_mpi_write_binary(&d, outPriv, 32);
+    }
 
     mbedtls_ecp_point_free(&q);
     mbedtls_mpi_free(&d);
@@ -95,6 +103,40 @@ namespace {
     mbedtls_entropy_free(&entropy);
 
     return rc == 0 && olen == 65;
+  }
+
+  bool validateVehicleKeypair(const uint8_t pub[65], const uint8_t priv[32]) {
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d;
+    mbedtls_ecp_point q;
+    mbedtls_ecp_point qCalc;
+
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_ecp_point_init(&q);
+    mbedtls_ecp_point_init(&qCalc);
+
+    int rc = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
+    if (rc == 0) rc = mbedtls_mpi_read_binary(&d, priv, 32);
+    if (rc == 0) rc = mbedtls_ecp_point_read_binary(&grp, &q, pub, 65);
+    if (rc == 0) {
+      rc = mbedtls_ecp_mul(&grp, &qCalc, &d, &grp.G, nullptr, nullptr);
+    }
+
+    unsigned char qBuf[65];
+    size_t qLen = 0;
+    if (rc == 0) {
+      rc = mbedtls_ecp_point_write_binary(&grp, &qCalc, MBEDTLS_ECP_PF_UNCOMPRESSED,
+                                          &qLen, qBuf, sizeof(qBuf));
+    }
+
+    bool ok = (rc == 0 && qLen == 65 && memcmp(qBuf, pub, 65) == 0);
+
+    mbedtls_ecp_point_free(&qCalc);
+    mbedtls_ecp_point_free(&q);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    return ok;
   }
 
   void loadMailbox() {
@@ -111,6 +153,12 @@ namespace {
     if (vPubLen == 65) {
       prefs.getBytes("v_pub", g_mailbox.vehicle_pub, 65);
       g_mailbox.vehicle_pub_valid = isValidPub(g_mailbox.vehicle_pub);
+    }
+
+    size_t vPrivLen = prefs.getBytesLength("v_priv");
+    if (vPrivLen == 32) {
+      prefs.getBytes("v_priv", g_mailbox.vehicle_priv, 32);
+      g_mailbox.vehicle_priv_valid = true;
     }
 
     size_t epPubLen = prefs.getBytesLength("ep_pub");
@@ -139,6 +187,7 @@ namespace {
     prefs.begin(kNs, false);
     prefs.putString("v_id", g_mailbox.vehicle_id);
     prefs.putBytes("v_pub", g_mailbox.vehicle_pub, 65);
+    prefs.putBytes("v_priv", g_mailbox.vehicle_priv, 32);
     prefs.putUShort("sig_bmp", g_mailbox.signaling_bitmap);
     prefs.putUChar("slot_bmp", g_mailbox.slot_bitmap);
     prefs.end();
@@ -152,16 +201,26 @@ bool begin() {
 
   loadMailbox();
 
-  bool missingRoot = (strlen(g_mailbox.vehicle_id) != 8) || !g_mailbox.vehicle_pub_valid;
+  bool invalidVehiclePair = g_mailbox.vehicle_pub_valid && g_mailbox.vehicle_priv_valid
+      ? !validateVehicleKeypair(g_mailbox.vehicle_pub, g_mailbox.vehicle_priv)
+      : false;
+  bool missingRoot = (strlen(g_mailbox.vehicle_id) != 8)
+      || !g_mailbox.vehicle_pub_valid
+      || !g_mailbox.vehicle_priv_valid
+      || invalidVehiclePair;
   if (missingRoot) {
+    if (g_mailbox.vehicle_pub_valid && !g_mailbox.vehicle_priv_valid) {
+      Serial.println("[CCC] Vehicle private key missing; rekeying vehicle identity and clearing provisioned data");
+    }
     clearLegacyProvisioning();
     clearAll();
     generateVehicleId(g_mailbox.vehicle_id);
-    if (!generateVehiclePub(g_mailbox.vehicle_pub)) {
-      Serial.println("[CCC] ERROR: Failed to generate vehicle public key");
+    if (!generateVehicleKeypair(g_mailbox.vehicle_pub, g_mailbox.vehicle_priv)) {
+      Serial.println("[CCC] ERROR: Failed to generate vehicle keypair");
       return false;
     }
     g_mailbox.vehicle_pub_valid = true;
+    g_mailbox.vehicle_priv_valid = true;
     g_mailbox.signaling_bitmap = 0;
     g_mailbox.slot_bitmap = 0;
     persistRoot();
@@ -172,6 +231,17 @@ bool begin() {
   }
 
   g_loaded = true;
+
+  mbedtls_entropy_init(&g_vsign_entropy);
+  mbedtls_ctr_drbg_init(&g_vsign_drbg);
+  const char* pers = "ccc_vsig";
+  int seedRc = mbedtls_ctr_drbg_seed(&g_vsign_drbg, mbedtls_entropy_func, &g_vsign_entropy,
+                                     (const unsigned char*)pers, strlen(pers));
+  g_vsign_rng_ready = (seedRc == 0);
+  if (!g_vsign_rng_ready) {
+    Serial.printf("[CCC] WARNING: vehicle signing RNG seed failed rc=%d\n", seedRc);
+  }
+
   return true;
 }
 
@@ -187,9 +257,56 @@ bool hasVehiclePub() {
   return g_mailbox.vehicle_pub_valid;
 }
 
+bool hasVehiclePriv() {
+  return g_mailbox.vehicle_priv_valid;
+}
+
 bool getVehiclePub(uint8_t* out, size_t max) {
   if (!out || max < 65 || !g_mailbox.vehicle_pub_valid) return false;
   memcpy(out, g_mailbox.vehicle_pub, 65);
+  return true;
+}
+
+bool signVehicleDataP256(const uint8_t* data, size_t dataLen,
+                        uint8_t* sigDerOut, size_t sigDerMax,
+                        size_t* sigDerLenOut) {
+  if (!data || dataLen == 0 || !sigDerOut || sigDerMax == 0 || !sigDerLenOut) return false;
+  if (!g_mailbox.vehicle_priv_valid) return false;
+  if (!g_vsign_rng_ready) return false;
+
+  unsigned char hash[32];
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts(&sha, 0);
+  mbedtls_sha256_update(&sha, data, dataLen);
+  mbedtls_sha256_finish(&sha, hash);
+  mbedtls_sha256_free(&sha);
+
+  mbedtls_ecdsa_context ecdsa;
+  mbedtls_ecdsa_init(&ecdsa);
+  int rc = 0;
+  if (rc == 0) rc = mbedtls_ecp_group_load(&ecdsa.grp, MBEDTLS_ECP_DP_SECP256R1);
+  if (rc == 0) rc = mbedtls_mpi_read_binary(&ecdsa.d, g_mailbox.vehicle_priv, 32);
+  if (rc == 0) {
+    rc = mbedtls_ecp_mul(&ecdsa.grp, &ecdsa.Q, &ecdsa.d, &ecdsa.grp.G,
+                         mbedtls_ctr_drbg_random, &g_vsign_drbg);
+  }
+
+  size_t sigLen = 0;
+  if (rc == 0) {
+    rc = mbedtls_ecdsa_write_signature(&ecdsa, MBEDTLS_MD_SHA256,
+                                       hash, sizeof(hash),
+                                       sigDerOut, &sigLen,
+                                       mbedtls_ctr_drbg_random, &g_vsign_drbg);
+  }
+
+  mbedtls_ecdsa_free(&ecdsa);
+
+  if (rc != 0 || sigLen == 0 || sigLen > sigDerMax) {
+    return false;
+  }
+
+  *sigDerLenOut = sigLen;
   return true;
 }
 

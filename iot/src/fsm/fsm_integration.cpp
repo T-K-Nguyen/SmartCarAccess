@@ -83,6 +83,46 @@ void onClientDisconnected() {
   FSM::triggerEvent(Event::BLE_CLIENT_DISCONNECTED);
 }
 
+void onAuth0Received() {
+  Serial.println("[FSMIntegration::BLE] AUTH0 received");
+  FSM::triggerEvent(Event::BLE_AUTH0_RECEIVED);
+}
+
+void onAuth0ResponseSent() {
+  Serial.println("[FSMIntegration::BLE] AUTH0 response sent");
+  FSM::triggerEvent(Event::BLE_AUTH0_RESP_SENT);
+}
+
+void onAuth1Sent() {
+  Serial.println("[FSMIntegration::BLE] AUTH1 sent");
+  FSM::triggerEvent(Event::BLE_AUTH1_SENT);
+}
+
+void onAuth1ResponseReceived() {
+  Serial.println("[FSMIntegration::BLE] AUTH1 response received");
+  FSM::triggerEvent(Event::BLE_AUTH1_RESP_RECEIVED);
+}
+
+void onExchangeReceived() {
+  Serial.println("[FSMIntegration::BLE] EXCHANGE received");
+  FSM::triggerEvent(Event::BLE_EXCHANGE_RECEIVED);
+}
+
+void onExchangeResponseSent() {
+  Serial.println("[FSMIntegration::BLE] EXCHANGE response sent");
+  FSM::triggerEvent(Event::BLE_EXCHANGE_RESP_SENT);
+}
+
+void onControlFlowReceived() {
+  Serial.println("[FSMIntegration::BLE] CONTROL FLOW received");
+  FSM::triggerEvent(Event::BLE_CONTROL_FLOW_RECEIVED);
+}
+
+void onControlFlowResponseSent() {
+  Serial.println("[FSMIntegration::BLE] CONTROL FLOW response sent");
+  FSM::triggerEvent(Event::BLE_CONTROL_FLOW_RESP_SENT);
+}
+
 void onClientHelloReceived(const uint8_t client_ephemeral_pub[65]) {
   Serial.println("[FSMIntegration::BLE] CLIENT_HELLO received");
   storePhoneEphemeralKey(client_ephemeral_pub);

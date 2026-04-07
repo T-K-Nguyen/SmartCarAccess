@@ -368,18 +368,31 @@ class _DashboardState extends State<Dashboard> {
                         onDelete: () => _confirmDeleteVehicle(car),
                         isProvisioned: provisioned,
                       ),
-                      if (!provisioned && pendingPayload != null) ...[
+                      if (!provisioned && carId != null) ...[
                         Padding(
                           padding: const EdgeInsets.only(bottom: 16),
                           child: SizedBox(
                             width: double.infinity,
                             child: ElevatedButton.icon(
-                              onPressed: () => _startProvisionForVehicle(
-                                car,
-                                pendingPayload,
-                              ),
+                              onPressed: () async {
+                                if (pendingPayload != null) {
+                                  await _startProvisionForVehicle(
+                                    car,
+                                    pendingPayload,
+                                  );
+                                  return;
+                                }
+                                await _scanMasterCardForVehicle(
+                                  carId,
+                                  car['name']?.toString() ?? 'Vehicle',
+                                );
+                              },
                               icon: const Icon(Icons.nfc),
-                              label: const Text('Provision for this vehicle'),
+                              label: Text(
+                                pendingPayload != null
+                                    ? 'Provision for this vehicle'
+                                    : 'Scan master card',
+                              ),
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: const Color(0xFF273671),
                                 foregroundColor: Colors.white,
@@ -1166,24 +1179,26 @@ class _DashboardState extends State<Dashboard> {
                   color: selectedColor,
                 );
 
-                await _carService.addCar(carData);
+                final createdCarId = await _carService.addCar(carData);
+
+                if (!mounted) return;
 
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(this.context).showSnackBar(
                   const SnackBar(
                     content: Text('Vehicle added successfully!'),
                     backgroundColor: Color(0xFF273671),
                   ),
                 );
 
-                final cars = await _carService.getUserCars().first;
-                final created = cars.isNotEmpty ? cars.first : null;
-                if (created != null && created['id'] != null) {
-                  await _scanMasterCardForVehicle(
-                    created['id'].toString(),
-                    created['name']?.toString() ?? 'Vehicle',
-                  );
-                }
+                // Wait for dialog pop transition before opening the scanner dialog.
+                await Future.delayed(const Duration(milliseconds: 150));
+                if (!mounted) return;
+
+                await _scanMasterCardForVehicle(
+                  createdCarId,
+                  nameController.text,
+                );
               } catch (e) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(

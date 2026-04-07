@@ -7,11 +7,13 @@ namespace CCCMailbox {
 struct CCC_Mailbox {
   char vehicle_id[9];
   uint8_t vehicle_pub[65];
+  uint8_t vehicle_priv[32];
   uint8_t endpoint_pub[65];
   uint16_t signaling_bitmap;
   uint8_t slot_bitmap;
   uint8_t immobilizer_tokens[8][32];
   bool vehicle_pub_valid;
+  bool vehicle_priv_valid;
   bool endpoint_pub_valid;
   bool token_valid[8];
 };
@@ -22,6 +24,10 @@ const CCC_Mailbox& get();
 const char* vehicleId();
 bool hasVehiclePub();
 bool getVehiclePub(uint8_t* out, size_t max);
+bool hasVehiclePriv();
+bool signVehicleDataP256(const uint8_t* data, size_t dataLen,
+                         uint8_t* sigDerOut, size_t sigDerMax,
+                         size_t* sigDerLenOut);
 
 bool hasEndpointPub();
 bool getEndpointPub(uint8_t* out, size_t max);

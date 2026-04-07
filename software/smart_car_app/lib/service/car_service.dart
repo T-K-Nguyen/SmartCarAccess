@@ -15,14 +15,15 @@ class CarService {
   String? get _currentUserId => _auth.currentUser?.uid;
 
   // Car Management
-  Future<void> addCar(Map<String, dynamic> carData) async {
+  Future<String> addCar(Map<String, dynamic> carData) async {
     if (_currentUserId == null) throw Exception('User not authenticated');
 
     carData['ownerId'] = _currentUserId;
     carData['createdAt'] = FieldValue.serverTimestamp();
     carData['updatedAt'] = FieldValue.serverTimestamp();
 
-    await _carsCollection.add(carData);
+    final doc = await _carsCollection.add(carData);
+    return doc.id;
   }
 
   Future<void> updateCar(String carId, Map<String, dynamic> updates) async {
@@ -41,10 +42,12 @@ class CarService {
   }) async {
     if (_currentUserId == null) throw Exception('User not authenticated');
     if (vehicleId.length != 8) throw Exception('vehicleId must be 8 bytes');
-    if (vehiclePubKey.length != 65)
+    if (vehiclePubKey.length != 65) {
       throw Exception('vehiclePubKey must be 65 bytes');
-    if (devicePubKey.length != 65)
+    }
+    if (devicePubKey.length != 65) {
       throw Exception('devicePubKey must be 65 bytes');
+    }
 
     final vehicleIdHex = _bytesToHex(vehicleId);
     final vehiclePubHex = _bytesToHex(vehiclePubKey);

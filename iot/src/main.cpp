@@ -6,6 +6,29 @@
 #include "fsm/fsm.h"
 #include "fsm/fsm_integration.h"
 #include "test/test_fsm.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+namespace {
+TaskHandle_t g_fsmTaskHandle = nullptr;
+TaskHandle_t g_nfcTaskHandle = nullptr;
+
+void fsmTask(void* parameter) {
+  (void)parameter;
+  for (;;) {
+    FSM::tick();
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+
+void nfcTask(void* parameter) {
+  (void)parameter;
+  for (;;) {
+    NfcSession::tick();
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+}
+}
 
 void setup() {
   Serial.begin(115200);
@@ -33,27 +56,15 @@ void setup() {
   
   // UART2 on ESP32-S3: RX=44, TX=43 for PN532 (HSU)
   NfcSession::begin(Serial2, 44, 43, 115200);
+
+  // Run FSM and NFC in dedicated tasks so BLE callbacks are not delayed by NFC work.
+  xTaskCreatePinnedToCore(fsmTask, "FSMTask", 4096, nullptr, 6, &g_fsmTaskHandle, 1);
+  xTaskCreatePinnedToCore(nfcTask, "NFCTask", 6144, nullptr, 4, &g_nfcTaskHandle, 1);
   
   Serial.println("\n[System] Ready. FSM active, waiting for events...\n");
 }
 
 void loop() {
-  // Check for test command
-  // if (Serial.available()) {
-  //   char cmd = Serial.read();
-  //   if (cmd == 't' || cmd == 'T') {
-  //     Serial.println("\n[Test] Running FSM unit tests...");
-  //     run_fsm_tests();
-  //     Serial.println("[Test] Tests completed. Press 't' to run again.\n");
-  //   }
-  // }
-  
-  // FSM tick - processes events and manages state transitions
-  FSM::tick();
-  
-  // NFC tick - handles card detection and APDU exchanges
-  NfcSession::tick();
-  
-  // Small yield to prevent watchdog issues
-  yield();
+  // Main loop remains idle; FSM/NFC run in dedicated tasks.
+  vTaskDelay(pdMS_TO_TICKS(50));
 }

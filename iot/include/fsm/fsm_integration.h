@@ -75,6 +75,16 @@ namespace BLE {
    * Called when BLE client disconnects
    */
   void onClientDisconnected();
+
+  // CCC tunnel step wrappers
+  void onAuth0Received();
+  void onAuth0ResponseSent();
+  void onAuth1Sent();
+  void onAuth1ResponseReceived();
+  void onExchangeReceived();
+  void onExchangeResponseSent();
+  void onControlFlowReceived();
+  void onControlFlowResponseSent();
   
   /**
    * Called when CLIENT_HELLO is received (handshake init)

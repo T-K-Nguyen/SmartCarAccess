@@ -4,7 +4,7 @@
 class PN532; // forward decl
 
 namespace ProvisioningPhase {
-  // Initialize provisioning. No device keypair is generated; Android Keystore holds private key.
+  // Initialize provisioning and CCC mailbox bindings.
   void begin();
 
   // True if a phone public key has already been stored.
@@ -48,6 +48,6 @@ namespace ProvisioningPhase {
   // Deprecated: provisioning via HCE helper is not supported under CCC flow.
   bool runOnceWithHce(PN532& nfc, const uint8_t* aid, size_t aidLen, uint32_t waitMs = 15000);
   
-  // Deprecated: device does not hold a private key under CCC flow.
+  // Deprecated legacy API.
   size_t getDevicePrivateKeyPEM(uint8_t* out, size_t maxLen);
 }
