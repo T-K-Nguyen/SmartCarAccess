@@ -108,6 +108,76 @@ namespace {
   // GPS data callback
   BLEAuth::GpsDataCallback s_gps_callback = nullptr;
 
+  struct AuthLatencyCounters {
+    uint32_t run_id = 0;
+    uint32_t t_connect_ms = 0;
+    uint32_t t_auth0_rx_ms = 0;
+    uint32_t t_auth1_tx_ms = 0;
+    uint32_t t_auth_verified_ms = 0;
+    uint32_t t_control_flow_ack_ms = 0;
+    bool has_connect = false;
+    bool has_auth0_rx = false;
+    bool has_auth1_tx = false;
+    bool has_auth_verified = false;
+    bool has_control_flow_ack = false;
+    bool reported = false;
+  };
+
+  AuthLatencyCounters s_latency;
+
+  static uint32_t delta_ms(uint32_t start, uint32_t end) {
+    return end - start;
+  }
+
+  static uint32_t offset_from_connect(const AuthLatencyCounters& c, bool hasMark, uint32_t markMs) {
+    if (!c.has_connect || !hasMark) return 0;
+    return delta_ms(c.t_connect_ms, markMs);
+  }
+
+  static void clear_latency_marks() {
+    s_latency.t_connect_ms = 0;
+    s_latency.t_auth0_rx_ms = 0;
+    s_latency.t_auth1_tx_ms = 0;
+    s_latency.t_auth_verified_ms = 0;
+    s_latency.t_control_flow_ack_ms = 0;
+    s_latency.has_connect = false;
+    s_latency.has_auth0_rx = false;
+    s_latency.has_auth1_tx = false;
+    s_latency.has_auth_verified = false;
+    s_latency.has_control_flow_ack = false;
+    s_latency.reported = false;
+  }
+
+  static void start_latency_run() {
+    s_latency.run_id++;
+    clear_latency_marks();
+    s_latency.t_connect_ms = millis();
+    s_latency.has_connect = true;
+  }
+
+  static void print_latency_report_if_ready() {
+    if (s_latency.reported || !s_latency.has_control_flow_ack) return;
+    s_latency.reported = true;
+
+    Serial.printf("[AUTH-LAT] run=%lu counters_ms AUTH0_rx=%lu AUTH1_tx=%lu AUTH_VERIFIED=%lu CONTROL_FLOW_ack=%lu\n",
+                  (unsigned long)s_latency.run_id,
+                  (unsigned long)offset_from_connect(s_latency, s_latency.has_auth0_rx, s_latency.t_auth0_rx_ms),
+                  (unsigned long)offset_from_connect(s_latency, s_latency.has_auth1_tx, s_latency.t_auth1_tx_ms),
+                  (unsigned long)offset_from_connect(s_latency, s_latency.has_auth_verified, s_latency.t_auth_verified_ms),
+                  (unsigned long)offset_from_connect(s_latency, s_latency.has_control_flow_ack, s_latency.t_control_flow_ack_ms));
+
+    if (s_latency.has_auth0_rx && s_latency.has_control_flow_ack) {
+      Serial.printf("[AUTH-LAT] run=%lu door_open_path_ms(AUTH0_rx->CONTROL_FLOW_ack)=%lu\n",
+                    (unsigned long)s_latency.run_id,
+                    (unsigned long)delta_ms(s_latency.t_auth0_rx_ms, s_latency.t_control_flow_ack_ms));
+    }
+    if (s_latency.has_auth_verified && s_latency.has_control_flow_ack) {
+      Serial.printf("[AUTH-LAT] run=%lu unlock_ack_after_verified_ms=%lu\n",
+                    (unsigned long)s_latency.run_id,
+                    (unsigned long)delta_ms(s_latency.t_auth_verified_ms, s_latency.t_control_flow_ack_ms));
+    }
+  }
+
   void print_hex(const char* label, const uint8_t* data, size_t len) {
 #ifdef BLE_AUTH_VERBOSE_DEBUG
     Serial.printf("[AUTH-DEBUG] %s (%u bytes): ", label, (unsigned)len);
@@ -167,6 +237,7 @@ namespace {
     memset(s_challenge, 0, sizeof(s_challenge));
     memset(s_sig_buf, 0, sizeof(s_sig_buf));
     s_sig_len = 0;
+    clear_latency_marks();
 
     // Clean up mbedTLS contexts
     mbedtls_ecp_group_free(&s_grp);
@@ -260,6 +331,8 @@ namespace {
 
     Serial.printf("[AUTH] ✓ AUTH1 payload sent (%u bytes, sig=%u)\n",
             (unsigned)handshake_packet.length(), (unsigned)signature_len);
+        s_latency.t_auth1_tx_ms = millis();
+        s_latency.has_auth1_tx = true;
     print_hex("AUTH1 payload", (uint8_t*)handshake_packet.data(), handshake_packet.length());
     FSMIntegration::BLE::onAuth1Sent();
 
@@ -571,6 +644,8 @@ namespace {
 
       switch (ins) {
         case kInsAuth0: {
+          s_latency.t_auth0_rx_ms = millis();
+          s_latency.has_auth0_rx = true;
           FSMIntegration::BLE::onAuth0Received();
           if (p1 == 0x01) {
             // Fast path deferred by product decision for this release.
@@ -661,7 +736,11 @@ namespace {
             break;
           }
           FSMIntegration::BLE::onUnlockRequested();
-          sendTunnelResponse(ins, kSw1Ok, kSw2Ok);
+          if (sendTunnelResponse(ins, kSw1Ok, kSw2Ok)) {
+            s_latency.t_control_flow_ack_ms = millis();
+            s_latency.has_control_flow_ack = true;
+            print_latency_report_if_ready();
+          }
           FSMIntegration::BLE::onControlFlowResponseSent();
           break;
         }
@@ -803,6 +882,8 @@ namespace {
           if (verify_challenge_signature_and_finalize()) {
             s_authState = AUTH_SESSION_READY;
             s_auth_successes++;
+            s_latency.t_auth_verified_ms = millis();
+            s_latency.has_auth_verified = true;
             FSMIntegration::BLE::onAuthVerified();
             sendTunnelResponse(kInsExchange, kSw1Ok, kSw2Ok);
             FSMIntegration::BLE::onExchangeResponseSent();
@@ -827,6 +908,7 @@ namespace {
       
       // Reset state
       reset_auth_state();
+      start_latency_run();
 
       uint8_t addr[6] = {0};
       FSMIntegration::BLE::onClientConnected(addr);
