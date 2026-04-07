@@ -21,7 +21,7 @@ Core security rules:
 - APDU: Command/response packet format for smart card style communication.
 - Provisioning: First-time pairing of owner phone and vehicle.
 - Endpoint key (`ep_pub`): Owner phone public key.
-- Vehicle key (`v_pub`): Vehicle public key.
+- Vehicle keypair (`v_pub`, `v_priv`): Vehicle public and private key stored in CCC mailbox.
 - Attestation package: Signed key-share package that proves owner approval.
 
 ---
@@ -50,15 +50,17 @@ Main components:
 Stored in ESP32 NVS (`ccc_dk`) and mirrored in RAM:
 - `v_id` (8 bytes): Vehicle ID generated once.
 - `v_pub` (65 bytes): Vehicle public key generated once.
+- `v_priv` (32 bytes): Vehicle private key scalar used for strict AUTH1 signing.
 - `ep_pub` (65 bytes): Owner public key from successful provisioning.
 - `slot_bmp` (8 bits): Active slots bitmap.
 - `sig_bmp` (16 bits): Signaling flags bitmap.
 - `tok_0..tok_7` (32 bytes each): Immobilizer tokens.
 
 Current behavior:
-1. First boot creates `v_id` and `v_pub`.
-2. Owner provisioning fills slot 0 and ensures `tok_0` exists.
-3. Share slots (1..7) remain inactive until key sharing activation is enabled.
+1. First boot creates `v_id`, `v_pub`, and `v_priv`.
+2. On boot, if vehicle keypair is incomplete or invalid, mailbox is re-keyed fail-closed.
+3. Owner provisioning fills slot 0 and ensures `tok_0` exists.
+4. Share slots (1..7) remain inactive until key sharing activation is enabled.
 
 ---
 
@@ -148,12 +150,58 @@ This is what was updated and why it matters:
 Purpose:
 - After provisioning, prove phone owns the enrolled key and establish a secure session.
 
-High-level steps:
-1. Exchange ephemeral public keys.
-2. Verify phone signature using stored owner key.
-3. Derive shared session keys via ECDH.
-4. Perform challenge-response bound to `vehicle_id`.
-5. Notify FSM and open encrypted command path.
+Current implementation uses a single APDU-like CCC tunnel.
+
+Service and characteristics:
+- Service UUID: `0000aaaa-1234-5678-9abc-def012345678`
+- CCC RX (phone -> ESP write): `0000aac1-1234-5678-9abc-def012345678`
+- CCC TX (ESP -> phone notify): `0000aac2-1234-5678-9abc-def012345678`
+
+Tunnel frame format:
+1. RX frame (phone -> ESP):
+- `[CLA, INS, P1, P2, Lc, payload...]`
+
+2. TX frame (ESP -> phone):
+- `[INS, SW1, SW2, Lc, payload...]`
+
+Current command flow:
+1. AUTH0 (`INS=0x80`, `P1=0x11`)
+- Phone requests standard transaction.
+- ESP generates ephemeral keypair and returns ephemeral pub in AUTH0 response.
+
+2. AUTH1 payload from ESP (`INS=0x81` notify)
+- ESP signs its ephemeral public key using stored vehicle private key (`v_priv`) in mailbox.
+- Payload format: `[ecu_ephemeral(65) | sig_len_le(2) | der_signature]`.
+
+3. AUTH1 response from phone (`INS=0x81` write)
+- Phone sends its ephemeral public key and signature.
+- ESP verifies signature using provisioned owner public key (`ep_pub`).
+
+4. EXCHANGE (`INS=0x82`)
+- ESP sends challenge (`vehicle_id || nonce`, 24 bytes).
+- Phone signs challenge and returns signature.
+- ESP verifies and marks auth verified.
+
+5. CONTROL FLOW (`INS=0x83`)
+- Phone sends success control signal.
+- ESP acknowledges and queues unlock request into FSM.
+
+Reliability and timing hardening now in place:
+1. AUTH1 signing is performed in worker task (not BLE callback) to avoid callback watchdog/panic risk.
+2. NFC polling/removal in `NfcSession::tick()` is non-blocking.
+3. FSM and NFC run in dedicated FreeRTOS tasks, so BLE/FSM events are processed in real time.
+4. FSM transition table includes tunnel bookkeeping events to avoid dropped-event warnings.
+
+Automatic per-run latency counters:
+- ESP prints `[AUTH-LAT]` lines at CONTROL_FLOW ack with:
+  - `AUTH0_rx`
+  - `AUTH1_tx`
+  - `AUTH_VERIFIED`
+  - `CONTROL_FLOW_ack`
+- Door-open path metric:
+  - `door_open_path_ms(AUTH0_rx->CONTROL_FLOW_ack)`
+
+This gives a direct on-device measurement of authentication-to-open latency for each run.
 
 ---
 
@@ -223,6 +271,7 @@ Current app behavior:
 1. On success, dashboard marks car as provisioned.
 2. `ownerProvisioning` record is written into the `cars` document.
 3. Optional mirror write to `Vehicles/<vehicle_id_hex>` may be blocked by Firestore rules and is treated as non-fatal.
+4. Add-car flow now reliably triggers master-card scan, and unprovisioned vehicles always show scan/provision action.
 
 If you still see Firestore permission warnings for `Vehicles`, provisioning can still be healthy as long as:
 - car doc has `provisioned: true`
@@ -273,6 +322,7 @@ Time source options:
 1. Slots 1..7 are verified but intentionally not activated yet.
 2. Token MAC binding for share payload is not yet implemented in the current 147-byte format.
 3. `Vehicles` collection write may require Firestore rule updates (optional path).
+4. Latency counters use `millis()` deltas (good for per-run timing, not absolute wall-clock audit).
 
 ---
 
@@ -280,32 +330,53 @@ Time source options:
 
 This section explains recent updates in simple terms and the roadmap.
 
-### What we just updated
+### What has been completed
 
-1. Provisioning trust flow got stricter:
-- Added explicit vehicle-to-phone WRITE DATA (`0xD4`).
-- Authentication now runs earlier.
-- Signature verification is strict fail-closed.
-- Commit step (`0x3C`) now gates persistence.
+1. Provisioning (Phase A)
+- SELECT payload validation (stale-frame protection).
+- SPAKE2+ shell authentication before key exchange.
+- Base GET DATA parse with `7F24` unwrap support.
+- Vehicle WRITE DATA (`0xD4`) push path implemented.
+- Signature proof (`GET DATA` with challenge) fail-closed.
+- OP CONTROL (`0x3C`) commit gate required before persist.
+- Result notify (`0xDA`) integrated.
 
-2. NFC user experience improved:
-- Better first tap reliability.
-- Bounded removal wait with less log spam.
+2. Mailbox and key material
+- Vehicle keypair persistence (`v_pub`, `v_priv`) added to CCC mailbox.
+- Strict AUTH1 now uses vehicle private key signature.
+- Defensive re-key path if mailbox keypair is incomplete/corrupt.
 
-3. App consistency improved:
-- Success no longer flips to timeout by accident.
-- Cloud write fallback avoids false failure experience when optional collection is blocked.
+3. BLE Authentication (Phase B)
+- Migrated from multi-characteristic legacy flow to single CCC tunnel (`AAC1`/`AAC2`).
+- APDU-like command model implemented (`AUTH0`, `AUTH1`, `EXCHANGE`, `CONTROL FLOW`).
+- Step-level FSM integration added for tunnel events.
+- App-side parser/encoder aligned with firmware frame formats.
+
+4. Runtime stability and timing
+- Expensive AUTH1 signing moved out of BLE callback into worker task.
+- NFC loops converted to non-blocking polling in tick path.
+- FSM/NFC moved to dedicated tasks to remove queue processing lag.
+- Missing FSM transition entries for tunnel bookkeeping events added.
+
+5. App-side workflow reliability
+- Add-vehicle flow now uses returned car doc id directly.
+- Master-card scan/provision button always available on unprovisioned cars.
+- Provisioning/cloud write path hardened with best-effort mirror semantics.
+
+6. Observability
+- Added ESP automatic latency report (`[AUTH-LAT]`) for each successful auth run.
+- Door-open-path latency is now printed automatically.
 
 ### Why this is important
 
 1. Security:
-- Better guarantees that only verified data becomes persistent owner state.
+- Verified provisioning and strict signed-auth path from phone and vehicle sides.
 
 2. Reliability:
-- Fewer transport edge-case failures and better recovery.
+- Real-time FSM processing (no delayed queue drain under NFC load).
 
 3. Product readiness:
-- Strong provisioning foundation makes the next phases much easier and safer.
+- Repeatable timing telemetry for performance tuning and acceptance criteria.
 
 ### What next we can do
 
@@ -339,9 +410,10 @@ This section explains recent updates in simple terms and the roadmap.
 ## 14) Security Notes
 
 1. Owner private key remains in Android Keystore.
-2. ESP32 stores owner public key and verifies locally.
-3. Cloud must never store immobilizer tokens.
-4. Debug/test bypass features must be disabled in production.
+2. ESP32 stores owner public key and vehicle keypair in CCC mailbox.
+3. ESP32 verifies signatures locally and does not rely on cloud trust for unlock secrets.
+4. Cloud must never store immobilizer tokens.
+5. Debug/test bypass features must be disabled in production.
 
 
 
