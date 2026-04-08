@@ -8,10 +8,12 @@
 
 #include "ble/ble.h"
 #include "ble/ble_rollout.h"
+#include "ble/pke_telemetry.h"
 #include "ble/ble_admin.h"
 #include "ble/ble_auth.h"
 #include "ble/ble_attestation.h"
 #include "ble/ble_echo.h"
+#include "ccc_mailbox.h"
 
 namespace {
   // Device name and services
@@ -80,6 +82,8 @@ namespace BLEMod {
     class ServerCallbacks : public NimBLEServerCallbacks {
       void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
         Serial.println("[BLE] Central connected. Keeping advertising active.");
+        PKETelemetry::startAttempt(CCCMailbox::vehicleId());
+        PKETelemetry::emit(PKETelemetry::Event::Connect);
         Serial.printf(
           "[BLE][SEC] onConnect peer=%s id=%s bonded=%u enc=%u auth=%u\n",
           connInfo.getAddress().toString().c_str(),

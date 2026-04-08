@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'dart:convert';
 import 'gps_service.dart';
+import 'pke_telemetry.dart';
 
 /// Callback for reporting progress during authentication
 typedef ProgressCallback = void Function(String step, String message);
@@ -52,6 +53,7 @@ class BlePhaseTestService {
   BluetoothCharacteristic? _cCccTx;
   
   StreamSubscription? _cccTxSubscription;
+  final PkeTelemetry _telemetry = PkeTelemetry(source: 'app');
 
   bool get hasActiveSession =>
       _sessionEncKey != null && _sessionMacKey != null && _device != null;
@@ -125,6 +127,7 @@ class BlePhaseTestService {
   }) async {
     debugPrint('=== Phase B: BLE Authentication Test ===');
     debugPrint('Target device: $deviceAddress');
+    _telemetry.startAttempt();
     
     void reportProgress(String step, String message) {
       debugPrint('[$step] $message');
@@ -154,6 +157,14 @@ class BlePhaseTestService {
         }
       }
       reportProgress('Step 1', '✓ Connected to ${_device!.platformName}');
+      _telemetry.emit(event: PkeTelemetryEvent.connect, details: _device!.platformName);
+
+      try {
+        final rssi = await _device!.readRssi();
+        _telemetry.emit(event: PkeTelemetryEvent.rssiSnapshot, rssiDbm: rssi, details: 'post_connect');
+      } catch (_) {
+        _telemetry.emit(event: PkeTelemetryEvent.rssiSnapshot, details: 'rssi_read_failed');
+      }
 
       try {
         final mtu = await _device!.requestMtu(512);
@@ -249,6 +260,7 @@ class BlePhaseTestService {
       }
       _ecuEphemeralPublicKey = auth0Data.sublist(0, 65);
       reportProgress('Step 4', '✓ AUTH0 response received');
+      _telemetry.emit(event: PkeTelemetryEvent.auth0Received);
 
       // Optional AUTH1 command payload from ECU (contains ecu ephemeral + siglen + signature)
       try {
@@ -280,6 +292,7 @@ class BlePhaseTestService {
       _stateBLE = PhaseB_State.PHONE_SENDING_AUTH1_RESP;
       reportProgress('Step 8', 'Sending AUTH1 response...');
       await _sendApdu(ins: insAuth1, p1: 0x00, data: handshakePacket.toBytes());
+      _telemetry.emit(event: PkeTelemetryEvent.auth1Sent);
 
       reportProgress('Step 9', 'Computing ECDH shared secret...');
       final sharedSecretResult = await _handshakeChannel.invokeMethod(
@@ -311,10 +324,20 @@ class BlePhaseTestService {
       await _sendApdu(ins: insExchange, p1: 0x00, data: challengeSignature);
       await exchangeAckCompleter.future.timeout(const Duration(seconds: 10));
       reportProgress('Step 10', '✓ EXCHANGE signature accepted');
+      String? challengeVehicleIdHex;
+      if (_challenge != null && _challenge!.length >= 8) {
+        challengeVehicleIdHex = _challenge!.sublist(0, 8).map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join();
+      }
+      _telemetry.emit(
+        event: PkeTelemetryEvent.authVerified,
+        vehicleId: challengeVehicleIdHex,
+      );
 
       await _sendApdu(ins: insControlFlow, p1: 0x00, data: Uint8List.fromList(utf8.encode('Success')));
       await controlAckCompleter.future.timeout(const Duration(seconds: 6));
       reportProgress('Step 11', '✓ CONTROL FLOW acknowledged');
+      _telemetry.emit(event: PkeTelemetryEvent.controlFlowAck);
+      _telemetry.emit(event: PkeTelemetryEvent.unlockDecision, unlockDecision: 'allow', details: 'control_flow_ack_ok');
 
       _stateBLE = PhaseB_State.PHONE_SECURE_CHANNEL_READY;
       reportProgress('Complete', '✓✓✓ Authentication successful through CCC tunnel');
@@ -330,6 +353,11 @@ class BlePhaseTestService {
     } catch (e, stackTrace) {
       reportProgress('Error', '✗ Authentication failed: $e');
       debugPrint('Stack trace: $stackTrace');
+      _telemetry.emit(
+        event: PkeTelemetryEvent.unlockDecision,
+        unlockDecision: 'deny',
+        details: 'auth_exception',
+      );
       
       _stateBLE = PhaseB_State.PHONE_AUTH_FAILED;
       

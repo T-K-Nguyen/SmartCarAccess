@@ -16,6 +16,7 @@
 
 #include "ble/ble_auth.h"
 #include "ble/ble_rollout.h"
+#include "ble/pke_telemetry.h"
 #include "provisioning_phase.h"
 #include "ccc_mailbox.h"
 #include "fsm/fsm.h"
@@ -334,6 +335,7 @@ namespace {
             (unsigned)handshake_packet.length(), (unsigned)signature_len);
         s_latency.t_auth1_tx_ms = millis();
         s_latency.has_auth1_tx = true;
+    PKETelemetry::emit(PKETelemetry::Event::Auth1Sent);
     print_hex("AUTH1 payload", (uint8_t*)handshake_packet.data(), handshake_packet.length());
     FSMIntegration::BLE::onAuth1Sent();
 
@@ -648,11 +650,17 @@ namespace {
           s_latency.t_auth0_rx_ms = millis();
           s_latency.has_auth0_rx = true;
           FSMIntegration::BLE::onAuth0Received();
+          PKETelemetry::setVehicleId(CCCMailbox::vehicleId());
+          PKETelemetry::emit(PKETelemetry::Event::Auth0Received);
 
           BLERollout::Flags flags = BLERollout::flags();
           if (!connInfo.isBonded()) {
             if (flags.bondingEnforce) {
               Serial.println("[AUTH][SEC] Rejecting AUTH0: peer is unbonded while bonding_enforce=1");
+              PKETelemetry::emit(PKETelemetry::Event::UnlockDecision,
+                                PKETelemetry::kRssiUnknown,
+                                "deny",
+                                "bonding_enforced_unbonded");
               sendTunnelResponse(ins, kSw1Conditions, kSw2Conditions);
               break;
             }
@@ -753,6 +761,11 @@ namespace {
           if (sendTunnelResponse(ins, kSw1Ok, kSw2Ok)) {
             s_latency.t_control_flow_ack_ms = millis();
             s_latency.has_control_flow_ack = true;
+            PKETelemetry::emit(PKETelemetry::Event::ControlFlowAck);
+            PKETelemetry::emit(PKETelemetry::Event::UnlockDecision,
+                              PKETelemetry::kRssiUnknown,
+                              "allow",
+                              "control_flow_ack_ok");
             print_latency_report_if_ready();
           }
           FSMIntegration::BLE::onControlFlowResponseSent();
@@ -898,6 +911,7 @@ namespace {
             s_auth_successes++;
             s_latency.t_auth_verified_ms = millis();
             s_latency.has_auth_verified = true;
+            PKETelemetry::emit(PKETelemetry::Event::AuthVerified);
             FSMIntegration::BLE::onAuthVerified();
             sendTunnelResponse(kInsExchange, kSw1Ok, kSw2Ok);
             FSMIntegration::BLE::onExchangeResponseSent();
