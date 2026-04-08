@@ -2,6 +2,7 @@ import 'package:smart_car_app/screen/dashboard.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:smart_car_app/service/nfc_provisioning_service.dart';
+import 'package:smart_car_app/service/pke_rollout_flags.dart';
 
 // import 'package:firebase_auth/firebase_auth.dart';
 
@@ -9,6 +10,7 @@ void main() async{
   WidgetsFlutterBinding.ensureInitialized();
   // Initialize HCE MethodChannel handler early so background engines can query data fast
   await NfcProvisioningService.initialize(ownerIdHint: 'app');
+  await PkeRolloutFlagsService().ensureDefaults();
   await Firebase.initializeApp();
   // FirebaseAuth.instance.setLanguageCode('vi');
   

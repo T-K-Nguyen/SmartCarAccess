@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:smart_car_app/screen/location.dart';
 import 'package:smart_car_app/screen/profile.dart';
 import 'package:smart_car_app/screen/test_phase_ab.dart';
@@ -975,6 +976,7 @@ class _DashboardState extends State<Dashboard> {
   ) async {
     final carId = car['id']?.toString();
     final carName = car['name']?.toString() ?? 'Vehicle';
+    final flowStartedAtMs = DateTime.now().millisecondsSinceEpoch;
     final result = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) =>
@@ -983,17 +985,98 @@ class _DashboardState extends State<Dashboard> {
     );
 
     if (result == true && carId != null) {
+      ProvisioningVehicleBinding? binding;
       try {
-        final binding = await _masterCardService
-            .getProvisioningVehicleBinding();
-        if (binding != null) {
-          await _carService.registerOwnerProvisioningRecord(
-            carDocId: carId,
-            vehicleId: binding.vehicleId,
-            vehiclePubKey: binding.vehiclePubKey,
-            devicePubKey: binding.devicePubKey,
+        binding = await _masterCardService.getProvisioningVehicleBinding();
+        if (binding == null) {
+          throw StateError('No local vehicle binding found after provisioning');
+        }
+
+        final validBinding = _masterCardService.validateBindingConsistency(binding);
+        if (!validBinding) {
+          throw StateError(
+            'Provisioning WRITE DATA payload integrity check failed',
           );
         }
+
+        final vehicleIdMatches = listEquals(binding.vehicleId, payload.vehicleId);
+        if (!vehicleIdMatches) {
+          final scannedIdHex = _bytesToHex(payload.vehicleId);
+          final boundIdHex = _bytesToHex(binding.vehicleId);
+          debugPrint(
+            '[Provision] Vehicle ID mismatch: scanned=$scannedIdHex bound=$boundIdHex',
+          );
+
+          if (!mounted) return;
+          final proceed = await showDialog<bool>(
+            context: context,
+            barrierDismissible: false,
+            builder: (dialogContext) {
+              return AlertDialog(
+                title: const Text('Vehicle ID mismatch detected'),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Scanned master-card vehicle ID does not match the ECU binding from WRITE DATA.',
+                    ),
+                    const SizedBox(height: 12),
+                    Text('Scanned ID: $scannedIdHex'),
+                    const SizedBox(height: 6),
+                    Text('ECU bound ID: $boundIdHex'),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Continue to provision with ECU binding and record both IDs?',
+                    ),
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(false),
+                    child: const Text('Cancel'),
+                  ),
+                  ElevatedButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(true),
+                    child: const Text('Continue'),
+                  ),
+                ],
+              );
+            },
+          );
+
+          if (proceed != true) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Provisioning canceled due to vehicle ID mismatch.'),
+                  backgroundColor: Colors.orange,
+                ),
+              );
+            }
+            return;
+          }
+        }
+
+        final updatedAtMs = binding.updatedAtMs;
+        if (updatedAtMs != null) {
+          const staleToleranceMs = 5 * 1000;
+          if (updatedAtMs < (flowStartedAtMs - staleToleranceMs)) {
+            throw StateError(
+              'Provisioning binding is stale; please run provisioning again',
+            );
+          }
+        }
+
+        await _carService.registerOwnerProvisioningRecord(
+          carDocId: carId,
+          vehicleId: binding.vehicleId,
+          vehiclePubKey: binding.vehiclePubKey,
+          devicePubKey: binding.devicePubKey,
+          writeDataPayload: binding.writeDataPayload,
+          writeDataUpdatedAtMs: binding.updatedAtMs,
+          scannedVehicleId: payload.vehicleId,
+        );
       } on FirebaseException catch (e) {
         if (mounted) {
           final msg = e.message ?? 'unknown firebase error';
@@ -1010,16 +1093,28 @@ class _DashboardState extends State<Dashboard> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(
-                'Provisioned locally, but cloud registration failed: $e',
-              ),
-              backgroundColor: Colors.orange,
+              content: Text('Provisioning integrity check failed: $e'),
+              backgroundColor: Colors.red,
             ),
           );
         }
+        return;
+      }
+
+      if (binding == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Provisioning binding missing after successful flow.'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
       }
 
       await _carService.updateCar(carId, {'provisioned': true});
+      await _masterCardService.clearProvisioningVehicleBinding();
       await _masterCardService.clearPendingPayload(carId);
       if (!mounted) return;
       setState(() {
@@ -1053,6 +1148,14 @@ class _DashboardState extends State<Dashboard> {
     }
 
     return '${date.day}/${date.month}/${date.year}';
+  }
+
+  String _bytesToHex(List<int> bytes) {
+    final sb = StringBuffer();
+    for (final b in bytes) {
+      sb.write(b.toRadixString(16).padLeft(2, '0').toUpperCase());
+    }
+    return sb.toString();
   }
 
   Future<void> _refreshPendingProvision(List<Map<String, dynamic>> cars) async {

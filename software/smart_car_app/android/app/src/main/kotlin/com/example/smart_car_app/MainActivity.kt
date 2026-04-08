@@ -106,6 +106,8 @@ class MainActivity : FlutterActivity() {
                     "getProvisioningVehicleBinding" -> {
                         val vid = DataStoreUtil.getProvisionedVehicleId(this)
                         val vpub = DataStoreUtil.getProvisionedVehiclePub(this)
+                        val writeDataPayload = DataStoreUtil.getProvisionedWriteDataPayload(this)
+                        val updatedAtMs = DataStoreUtil.getProvisionedUpdatedAtMs(this)
                         val epub = KeystoreBridge.getPhaseAPublicKey65()
                         if (vid == null || vpub == null || epub == null) {
                             result.success(null)
@@ -117,7 +119,17 @@ class MainActivity : FlutterActivity() {
                             "vehiclePubKey" to vpub,
                             "devicePubKey" to epub,
                         )
+                        if (writeDataPayload != null) {
+                            map["writeDataPayload"] = writeDataPayload
+                        }
+                        if (updatedAtMs != null) {
+                            map["updatedAtMs"] = updatedAtMs
+                        }
                         result.success(map)
+                    }
+                    "clearProvisioningVehicleBinding" -> {
+                        val ok = DataStoreUtil.clearProvisioningVehicleBinding(this)
+                        result.success(ok)
                     }
                     else -> result.notImplemented()
                 }

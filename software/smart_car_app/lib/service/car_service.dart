@@ -39,6 +39,9 @@ class CarService {
     required Uint8List vehicleId,
     required Uint8List vehiclePubKey,
     required Uint8List devicePubKey,
+    Uint8List? writeDataPayload,
+    int? writeDataUpdatedAtMs,
+    Uint8List? scannedVehicleId,
   }) async {
     if (_currentUserId == null) throw Exception('User not authenticated');
     if (vehicleId.length != 8) throw Exception('vehicleId must be 8 bytes');
@@ -48,13 +51,23 @@ class CarService {
     if (devicePubKey.length != 65) {
       throw Exception('devicePubKey must be 65 bytes');
     }
+    if (writeDataPayload != null && writeDataPayload.length != 77) {
+      throw Exception('writeDataPayload must be 77 bytes when provided');
+    }
+    if (scannedVehicleId != null && scannedVehicleId.length != 8) {
+      throw Exception('scannedVehicleId must be 8 bytes when provided');
+    }
 
     final vehicleIdHex = _bytesToHex(vehicleId);
     final vehiclePubHex = _bytesToHex(vehiclePubKey);
     final devicePubHex = _bytesToHex(devicePubKey);
+    final writeDataPayloadHex =
+        writeDataPayload != null ? _bytesToHex(writeDataPayload) : null;
+    final scannedVehicleIdHex =
+        scannedVehicleId != null ? _bytesToHex(scannedVehicleId) : null;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
 
-    final ownerRecord = {
+    final ownerRecord = <String, dynamic>{
       'vehicle_id': vehicleIdHex,
       'owner_uid': _currentUserId,
       'device_pub_key': devicePubHex,
@@ -73,6 +86,15 @@ class CarService {
       'updatedAt': FieldValue.serverTimestamp(),
       'createdAt': FieldValue.serverTimestamp(),
     };
+    if (writeDataPayloadHex != null) {
+      ownerRecord['write_data_payload'] = writeDataPayloadHex;
+    }
+    if (writeDataUpdatedAtMs != null) {
+      ownerRecord['write_data_updated_at_ms'] = writeDataUpdatedAtMs;
+    }
+    if (scannedVehicleIdHex != null) {
+      ownerRecord['scanned_vehicle_id'] = scannedVehicleIdHex;
+    }
 
     // Primary write path: existing authorized cars document.
     await _carsCollection.doc(carDocId).set({

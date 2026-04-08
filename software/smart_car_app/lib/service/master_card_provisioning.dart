@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nfc_manager/nfc_manager.dart';
@@ -28,11 +27,15 @@ class ProvisioningVehicleBinding {
     required this.vehicleId,
     required this.vehiclePubKey,
     required this.devicePubKey,
+    this.writeDataPayload,
+    this.updatedAtMs,
   });
 
   final Uint8List vehicleId;
   final Uint8List vehiclePubKey;
   final Uint8List devicePubKey;
+  final Uint8List? writeDataPayload;
+  final int? updatedAtMs;
 }
 
 /// Master card provisioning helper.
@@ -153,6 +156,11 @@ class MasterCardProvisioningService {
     return result == true;
   }
 
+  Future<bool> clearProvisioningVehicleBinding() async {
+    final result = await _channel.invokeMethod('clearProvisioningVehicleBinding');
+    return result == true;
+  }
+
   Future<ProvisioningVehicleBinding?> getProvisioningVehicleBinding() async {
     final raw = await _channel.invokeMethod('getProvisioningVehicleBinding');
     if (raw is! Map) return null;
@@ -160,6 +168,8 @@ class MasterCardProvisioningService {
     final vehicleId = _asBytes(raw['vehicleId']);
     final vehiclePubKey = _asBytes(raw['vehiclePubKey']);
     final devicePubKey = _asBytes(raw['devicePubKey']);
+    final writeDataPayload = _asBytes(raw['writeDataPayload']);
+    final updatedAtMs = _asInt(raw['updatedAtMs']);
     if (vehicleId == null || vehiclePubKey == null || devicePubKey == null) {
       return null;
     }
@@ -168,12 +178,68 @@ class MasterCardProvisioningService {
         devicePubKey.length != 65) {
       return null;
     }
+    if (writeDataPayload != null && writeDataPayload.length != 77) {
+      return null;
+    }
 
     return ProvisioningVehicleBinding(
       vehicleId: vehicleId,
       vehiclePubKey: vehiclePubKey,
       devicePubKey: devicePubKey,
+      writeDataPayload: writeDataPayload,
+      updatedAtMs: updatedAtMs,
     );
+  }
+
+  bool validateBindingConsistency(
+    ProvisioningVehicleBinding binding, {
+    Uint8List? expectedVehicleId,
+  }) {
+    if (binding.vehicleId.length != 8 ||
+        binding.vehiclePubKey.length != 65 ||
+        binding.devicePubKey.length != 65) {
+      return false;
+    }
+
+    if (expectedVehicleId != null && !_bytesEqual(binding.vehicleId, expectedVehicleId)) {
+      return false;
+    }
+
+    final payload = binding.writeDataPayload;
+    if (payload != null) {
+      final expectedPayload = buildWriteDataPayload(
+        vehicleId: binding.vehicleId,
+        vehiclePubKey: binding.vehiclePubKey,
+      );
+      if (!_bytesEqual(payload, expectedPayload)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  Uint8List buildWriteDataPayload({
+    required Uint8List vehicleId,
+    required Uint8List vehiclePubKey,
+  }) {
+    if (vehicleId.length != 8) {
+      throw ArgumentError('vehicleId must be 8 bytes');
+    }
+    if (vehiclePubKey.length != 65) {
+      throw ArgumentError('vehiclePubKey must be 65 bytes');
+    }
+
+    final payload = Uint8List(77);
+    var offset = 0;
+    payload[offset++] = 0x80;
+    payload[offset++] = 0x08;
+    payload.setRange(offset, offset + vehicleId.length, vehicleId);
+    offset += vehicleId.length;
+    payload[offset++] = 0x81;
+    payload[offset++] = 0x41;
+    payload.setRange(offset, offset + vehiclePubKey.length, vehiclePubKey);
+    return payload;
   }
 
   String _extractPayloadText(List<NdefRecord> records) {
@@ -272,5 +338,19 @@ class MasterCardProvisioningService {
       }
     }
     return null;
+  }
+
+  int? _asInt(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return null;
+  }
+
+  bool _bytesEqual(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 }
