@@ -7,6 +7,7 @@ import 'package:smart_car_app/screen/master_card_flow.dart';
 import 'package:smart_car_app/widgets/car_dialogs.dart';
 import 'package:smart_car_app/widgets/dashboard_widgets.dart';
 import 'package:smart_car_app/service/car_service.dart';
+import 'package:smart_car_app/service/ble_runtime_permissions.dart';
 import 'package:smart_car_app/service/initial_data_helper.dart';
 import 'package:smart_car_app/service/master_card_provisioning.dart';
 import 'package:flutter/services.dart';
@@ -24,22 +25,64 @@ class _DashboardState extends State<Dashboard> {
   final CarService _carService = CarService();
   final MasterCardProvisioningService _masterCardService =
       MasterCardProvisioningService();
+  final BleRuntimePermissionService _blePermissionService =
+      BleRuntimePermissionService();
 
   List<Map<String, dynamic>> _cars = [];
   List<Map<String, dynamic>> _digitalKeys = [];
   bool _isLoading = true;
+  bool _permissionCheckRunning = false;
+  bool _permissionWarningShown = false;
+  BleRuntimePermissionStatus? _blePermissionStatus;
   final Map<String, MasterCardPayload> _pendingVehicleProvision = {};
 
   @override
   void initState() {
     super.initState();
     _loadData();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkBleRuntimePermissions(requestIfNeeded: true);
+    });
     // Show sample data dialog after a short delay
     Future.delayed(const Duration(milliseconds: 500), () {
       if (mounted) {
         InitialDataHelper.addSampleDataIfNeeded(context);
       }
     });
+  }
+
+  Future<void> _checkBleRuntimePermissions({
+    bool requestIfNeeded = false,
+  }) async {
+    if (_permissionCheckRunning) {
+      return;
+    }
+
+    _permissionCheckRunning = true;
+    try {
+      final status = await _blePermissionService.ensureReady(
+        requestIfNeeded: requestIfNeeded,
+      );
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _blePermissionStatus = status;
+      });
+
+      if (status.isDegraded && !_permissionWarningShown) {
+        _permissionWarningShown = true;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(status.toUserMessage()),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } finally {
+      _permissionCheckRunning = false;
+    }
   }
 
   void _loadData() {
@@ -214,6 +257,10 @@ class _DashboardState extends State<Dashboard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (_blePermissionStatus?.isDegraded == true) ...[
+            _buildBlePermissionWarningCard(),
+            const SizedBox(height: 16),
+          ],
           if (_currentIndex == 0) ...[
             _buildQuickStats(),
             const SizedBox(height: 24),
@@ -280,6 +327,70 @@ class _DashboardState extends State<Dashboard> {
           ],
         ),
       ],
+    );
+  }
+
+  Widget _buildBlePermissionWarningCard() {
+    final status = _blePermissionStatus;
+    if (status == null || !status.isDegraded) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.orange.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange.withOpacity(0.6)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.orange),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Background BLE is in degraded mode',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF273671),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            status.toUserMessage(),
+            style: const TextStyle(color: Color(0xFF273671)),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ElevatedButton.icon(
+                onPressed: () =>
+                    _checkBleRuntimePermissions(requestIfNeeded: true),
+                icon: const Icon(Icons.security),
+                label: const Text('Grant permissions'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF273671),
+                  foregroundColor: Colors.white,
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: _blePermissionService.openSettings,
+                icon: const Icon(Icons.settings),
+                label: const Text('Open settings'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -992,14 +1103,19 @@ class _DashboardState extends State<Dashboard> {
           throw StateError('No local vehicle binding found after provisioning');
         }
 
-        final validBinding = _masterCardService.validateBindingConsistency(binding);
+        final validBinding = _masterCardService.validateBindingConsistency(
+          binding,
+        );
         if (!validBinding) {
           throw StateError(
             'Provisioning WRITE DATA payload integrity check failed',
           );
         }
 
-        final vehicleIdMatches = listEquals(binding.vehicleId, payload.vehicleId);
+        final vehicleIdMatches = listEquals(
+          binding.vehicleId,
+          payload.vehicleId,
+        );
         if (!vehicleIdMatches) {
           final scannedIdHex = _bytesToHex(payload.vehicleId);
           final boundIdHex = _bytesToHex(binding.vehicleId);
@@ -1049,7 +1165,9 @@ class _DashboardState extends State<Dashboard> {
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text('Provisioning canceled due to vehicle ID mismatch.'),
+                  content: Text(
+                    'Provisioning canceled due to vehicle ID mismatch.',
+                  ),
                   backgroundColor: Colors.orange,
                 ),
               );
@@ -1105,7 +1223,9 @@ class _DashboardState extends State<Dashboard> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Provisioning binding missing after successful flow.'),
+              content: Text(
+                'Provisioning binding missing after successful flow.',
+              ),
               backgroundColor: Colors.red,
             ),
           );

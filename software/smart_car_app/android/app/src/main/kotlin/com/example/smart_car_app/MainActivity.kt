@@ -19,6 +19,7 @@ class MainActivity : FlutterActivity() {
         private const val CHANNEL = "smartcar/keystore"
         private const val MASTER_CHANNEL = "smartcar/mastercard"
         private const val NFC_READER_CHANNEL = "smartcar/nfc_reader"
+        private const val DEVICE_INFO_CHANNEL = "smartcar/device_info"
     }
 
     private var readerModeEnabled = false
@@ -157,6 +158,13 @@ class MainActivity : FlutterActivity() {
             } catch (e: Exception) {
                 Log.e(TAG, "NFC reader channel error", e)
                 result.error("NFC_READER_ERROR", e.message, null)
+            }
+        }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_INFO_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getAndroidSdkInt" -> result.success(android.os.Build.VERSION.SDK_INT)
+                else -> result.notImplemented()
             }
         }
     }

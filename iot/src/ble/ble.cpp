@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <cstring>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 
@@ -22,6 +23,7 @@ namespace {
   constexpr uint8_t kSmIoCapNoIo = 0x03;
   constexpr uint8_t kSmKeyDistEnc = 0x01;
   constexpr uint8_t kSmKeyDistId = 0x02;
+  constexpr uint32_t kAdvDiagPeriodMs = 5000;
 
   bool s_bleStarted = false;
 
@@ -33,7 +35,11 @@ namespace {
   struct AdvState {
     AdvProfile profile = AdvProfile::Slow;
     uint32_t fastWindowDeadlineMs = 0;
+    uint32_t profileSinceMs = 0;
+    uint32_t lastDiagMs = 0;
+    uint32_t transitionCount = 0;
     bool profileInitialized = false;
+    char lastReason[40] = "unset";
   };
 
   AdvState s_advState;
@@ -56,22 +62,66 @@ namespace {
     return static_cast<int32_t>(s_advState.fastWindowDeadlineMs - nowMs) > 0;
   }
 
-  void applyAdvertisingProfile(NimBLEAdvertising* advertising, const BLERollout::Flags& flags, AdvProfile profile, const char* reason) {
+  void logAdvertisingDiagnostics(const BLERollout::Flags& flags, uint32_t nowMs, const char* trigger) {
+    if (!s_advState.profileInitialized) {
+      return;
+    }
+
+    const bool useFast = s_advState.profile == AdvProfile::Fast;
+    const uint16_t minMs = useFast ? flags.advFastMinMs : flags.advSlowMinMs;
+    const uint16_t maxMs = useFast ? flags.advFastMaxMs : flags.advSlowMaxMs;
+    const uint32_t elapsedMs = nowMs - s_advState.profileSinceMs;
+    const bool fastWindowIsActive = fastWindowActive(nowMs);
+    const uint32_t fastWindowRemainingMs = fastWindowIsActive
+      ? (s_advState.fastWindowDeadlineMs - nowMs)
+      : 0;
+    const char* safeTrigger = (trigger != nullptr) ? trigger : "unspecified";
+
+    Serial.printf(
+      "[BLE][ADV][DIAG] trigger=%s profile=%s interval_ms=%u-%u elapsed_ms=%lu fast_window_active=%u fast_window_remaining_ms=%lu transitions=%lu last_reason=%s\n",
+      safeTrigger,
+      useFast ? "fast" : "slow",
+      minMs,
+      maxMs,
+      static_cast<unsigned long>(elapsedMs),
+      fastWindowIsActive ? 1 : 0,
+      static_cast<unsigned long>(fastWindowRemainingMs),
+      static_cast<unsigned long>(s_advState.transitionCount),
+      s_advState.lastReason
+    );
+  }
+
+  void applyAdvertisingProfile(
+    NimBLEAdvertising* advertising,
+    const BLERollout::Flags& flags,
+    AdvProfile profile,
+    const char* reason,
+    uint32_t nowMs
+  ) {
     const bool useFast = profile == AdvProfile::Fast;
     const uint16_t minMs = useFast ? flags.advFastMinMs : flags.advSlowMinMs;
     const uint16_t maxMs = useFast ? flags.advFastMaxMs : flags.advSlowMaxMs;
+    const bool profileChanged = !s_advState.profileInitialized || s_advState.profile != profile;
+    const char* safeReason = (reason != nullptr) ? reason : "unspecified";
 
     advertising->setMinInterval(advMsToUnits(minMs));
     advertising->setMaxInterval(advMsToUnits(maxMs));
 
-    if (!s_advState.profileInitialized || s_advState.profile != profile) {
+    if (profileChanged) {
       Serial.printf(
         "[BLE][ADV] profile=%s reason=%s interval_ms=%u-%u\n",
         useFast ? "fast" : "slow",
-        reason,
+        safeReason,
         minMs,
         maxMs
       );
+
+      s_advState.profileSinceMs = nowMs;
+      s_advState.transitionCount++;
+      strncpy(s_advState.lastReason, safeReason, sizeof(s_advState.lastReason) - 1);
+      s_advState.lastReason[sizeof(s_advState.lastReason) - 1] = '\0';
+
+      logAdvertisingDiagnostics(flags, nowMs, "transition");
     }
 
     s_advState.profile = profile;
@@ -107,8 +157,12 @@ namespace {
     }
 
     const AdvProfile targetProfile = fastWindowActive(nowMs) ? AdvProfile::Fast : AdvProfile::Slow;
-    applyAdvertisingProfile(advertising, flags, targetProfile, safeReason);
+    applyAdvertisingProfile(advertising, flags, targetProfile, safeReason, nowMs);
     NimBLEDevice::startAdvertising();
+
+    if (s_advState.lastDiagMs == 0) {
+      s_advState.lastDiagMs = nowMs;
+    }
   }
 
   void logRolloutFlags() {
@@ -265,7 +319,14 @@ namespace BLEMod {
       return;
     }
 
+    BLERollout::Flags flags = BLERollout::flags();
     const uint32_t nowMs = millis();
+
+    if (s_advState.profileInitialized && (nowMs - s_advState.lastDiagMs) >= kAdvDiagPeriodMs) {
+      logAdvertisingDiagnostics(flags, nowMs, "periodic");
+      s_advState.lastDiagMs = nowMs;
+    }
+
     if (!fastWindowActive(nowMs) && s_advState.profileInitialized && s_advState.profile == AdvProfile::Fast) {
       applyAdvertisingPolicy(false, "fast_window_elapsed");
     }

@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../service/ble_phase_test.dart';
+import '../service/ble_runtime_permissions.dart';
 import '../service/gps_service.dart';
 
 class LocationContent extends StatefulWidget {
@@ -19,8 +20,11 @@ class _LocationContentState extends State<LocationContent> {
   static const _deviceAddressKey = 'location_ble_device_address';
 
   final BlePhaseTestService _bleService = BlePhaseTestService();
+  final BleRuntimePermissionService _blePermissionService =
+      BleRuntimePermissionService();
   final GpsService _gpsService = GpsService();
-  final TextEditingController _deviceAddressController = TextEditingController();
+  final TextEditingController _deviceAddressController =
+      TextEditingController();
 
   Timer? _autoSyncTimer;
   Position? _lastPosition;
@@ -98,6 +102,20 @@ class _LocationContentState extends State<LocationContent> {
       return;
     }
 
+    final permissionStatus = await _blePermissionService.ensureReady(
+      requestIfNeeded: true,
+    );
+    if (!permissionStatus.ready) {
+      if (mounted) {
+        setState(() {
+          _bleStatus = 'Missing runtime permissions';
+          _statusMessage = permissionStatus.toUserMessage();
+        });
+      }
+      _showSnackBar(permissionStatus.toUserMessage(), Colors.orange);
+      return;
+    }
+
     await _saveDeviceAddress(showFeedback: false);
 
     setState(() {
@@ -119,14 +137,18 @@ class _LocationContentState extends State<LocationContent> {
 
       setState(() {
         _isAuthenticated = result.success;
-        _bleStatus = result.success ? 'Authenticated and ready' : 'Authentication failed';
+        _bleStatus = result.success
+            ? 'Authenticated and ready'
+            : 'Authentication failed';
         _statusMessage = result.success
             ? 'BLE ready. GPS will sync to ESP32 every 30 seconds.'
             : result.message;
       });
 
       _showSnackBar(
-        result.success ? 'BLE connected successfully' : 'BLE authentication failed',
+        result.success
+            ? 'BLE connected successfully'
+            : 'BLE authentication failed',
         result.success ? Colors.green : Colors.red,
       );
 
@@ -164,7 +186,9 @@ class _LocationContentState extends State<LocationContent> {
     if (mounted) {
       setState(() {
         _isBusy = true;
-        _statusMessage = silent ? 'Refreshing location in background...' : 'Getting current location...';
+        _statusMessage = silent
+            ? 'Refreshing location in background...'
+            : 'Getting current location...';
       });
     }
 
@@ -174,7 +198,8 @@ class _LocationContentState extends State<LocationContent> {
         if (mounted) {
           setState(() {
             _statusMessage = 'Location permission denied';
-            _locationInfo = 'Enable location permission to keep GPS sync active';
+            _locationInfo =
+                'Enable location permission to keep GPS sync active';
           });
         }
         if (!silent) {
@@ -199,7 +224,8 @@ class _LocationContentState extends State<LocationContent> {
         return;
       }
 
-      final address = await _gpsService.getAddressFromPosition(position) ?? 'Unknown area';
+      final address =
+          await _gpsService.getAddressFromPosition(position) ?? 'Unknown area';
       final refreshedAt = DateTime.now();
 
       if (mounted) {
@@ -207,7 +233,8 @@ class _LocationContentState extends State<LocationContent> {
           _lastPosition = position;
           _address = address;
           _lastRefreshAt = refreshedAt;
-          _locationInfo = 'Place:     $address\n'
+          _locationInfo =
+              'Place:     $address\n'
               'Latitude:  ${position.latitude.toStringAsFixed(6)}\n'
               'Longitude: ${position.longitude.toStringAsFixed(6)}\n'
               'Altitude:  ${position.altitude.toStringAsFixed(1)} m\n'
@@ -311,10 +338,7 @@ class _LocationContentState extends State<LocationContent> {
 
   void _showSnackBar(String message, Color backgroundColor) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: backgroundColor,
-      ),
+      SnackBar(content: Text(message), backgroundColor: backgroundColor),
     );
   }
 
@@ -377,7 +401,10 @@ class _LocationContentState extends State<LocationContent> {
             runSpacing: 8,
             children: [
               _buildInfoChip('Auto refresh', '30s'),
-              _buildInfoChip('BLE', _isAuthenticated ? 'Ready' : 'Disconnected'),
+              _buildInfoChip(
+                'BLE',
+                _isAuthenticated ? 'Ready' : 'Disconnected',
+              ),
               _buildInfoChip('Packets sent', '$_sentPacketCount'),
             ],
           ),
@@ -476,9 +503,19 @@ class _LocationContentState extends State<LocationContent> {
           const SizedBox(height: 12),
           Row(
             children: [
-              Expanded(child: _buildMetaTile('Last refresh', _formatDateTime(_lastRefreshAt))),
+              Expanded(
+                child: _buildMetaTile(
+                  'Last refresh',
+                  _formatDateTime(_lastRefreshAt),
+                ),
+              ),
               const SizedBox(width: 12),
-              Expanded(child: _buildMetaTile('Last BLE sync', _formatDateTime(_lastBleSyncAt))),
+              Expanded(
+                child: _buildMetaTile(
+                  'Last BLE sync',
+                  _formatDateTime(_lastBleSyncAt),
+                ),
+              ),
             ],
           ),
         ],
@@ -564,7 +601,10 @@ class _LocationContentState extends State<LocationContent> {
       ),
       child: Text(
         '$label: $value',
-        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w600,
+        ),
       ),
     );
   }
@@ -579,10 +619,7 @@ class _LocationContentState extends State<LocationContent> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            label,
-            style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-          ),
+          Text(label, style: TextStyle(fontSize: 12, color: Colors.grey[600])),
           const SizedBox(height: 4),
           Text(
             value,
