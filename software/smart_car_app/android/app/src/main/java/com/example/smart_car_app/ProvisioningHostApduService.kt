@@ -24,10 +24,35 @@ class ProvisioningHostApduService : HostApduService() {
         private const val INS_OP_CONTROL = 0x3C.toByte()
         private const val INS_READ_BINARY = 0xB0.toByte()
         private const val INS_PROVISION_RESULT = 0xDA.toByte()
+        private const val SPAKE2_CHALLENGE_TTL_MS = 15000L
         private val SELECT_OK = byteArrayOf(
             0x5A.toByte(), 0x03.toByte(), 0x02.toByte(), 0x00.toByte(), 0x00.toByte(),
             0x5C.toByte(), 0x04.toByte(), 0x01.toByte(), 0x00.toByte(), 0x01.toByte(), 0x00.toByte()
         )
+
+        @Volatile private var pendingSpake2Challenge: ByteArray? = null
+        @Volatile private var pendingSpake2ChallengeTsMs: Long = 0L
+
+        private fun storePendingSpake2Challenge(challenge: ByteArray) {
+            pendingSpake2Challenge = challenge.copyOf()
+            pendingSpake2ChallengeTsMs = SystemClock.elapsedRealtime()
+        }
+
+        private fun readPendingSpake2Challenge(): ByteArray? {
+            val challenge = pendingSpake2Challenge ?: return null
+            val ageMs = SystemClock.elapsedRealtime() - pendingSpake2ChallengeTsMs
+            if (ageMs > SPAKE2_CHALLENGE_TTL_MS) {
+                pendingSpake2Challenge = null
+                pendingSpake2ChallengeTsMs = 0L
+                return null
+            }
+            return challenge.copyOf()
+        }
+
+        private fun clearPendingSpake2Challenge() {
+            pendingSpake2Challenge = null
+            pendingSpake2ChallengeTsMs = 0L
+        }
     }
 
     // Track selection
@@ -185,14 +210,15 @@ class ProvisioningHostApduService : HostApduService() {
             Log.w(TAG, "[PhaseA] SPAKE2+ request missing tag 0x50")
             return SW_UNKNOWN
         }
-        spake2Challenge = challenge
+        spake2Challenge = challenge.copyOf()
+        storePendingSpake2Challenge(challenge)
         Log.i(TAG, "[PhaseA] SPAKE2+ request stored challenge len=${challenge.size}")
         return SW_SUCCESS
     }
 
     private fun handleSpake2Verify(): ByteArray {
         if (!aidSelected) return SW_UNKNOWN
-        val challenge = spake2Challenge ?: return SW_SECURITY_STATUS_NOT_SATISFIED
+        val challenge = spake2Challenge ?: readPendingSpake2Challenge() ?: return SW_SECURITY_STATUS_NOT_SATISFIED
         if (!MasterCardSession.isActive()) return SW_SECURITY_STATUS_NOT_SATISFIED
         val masterSecret = MasterCardSession.getMasterSecret() ?: return SW_SECURITY_STATUS_NOT_SATISFIED
 
@@ -201,6 +227,7 @@ class ProvisioningHostApduService : HostApduService() {
         val macOut = mac.doFinal(challenge)
         val tlv = buildTlv(0x58.toByte(), macOut)
         spake2Challenge = null
+        clearPendingSpake2Challenge()
         Log.i(TAG, "[PhaseA] SPAKE2+ verify returning MAC len=${macOut.size}")
         return tlv + SW_SUCCESS
     }
@@ -285,7 +312,7 @@ class ProvisioningHostApduService : HostApduService() {
 
     override fun onDeactivated(reason: Int) {
         aidSelected = false
-        spake2Challenge = null
+        // Keep pending SPAKE2 challenge for a short TTL to survive LINK_LOSS reselection.
         val reasonStr = when (reason) {
             DEACTIVATION_DESELECTED -> "DESELECTED"
             DEACTIVATION_LINK_LOSS -> "LINK_LOSS"

@@ -128,7 +128,7 @@ namespace {
     bool sendSpake2Mastercard(const uint8_t* challenge, size_t challengeLen) {
         if (!challenge || challengeLen == 0 || challengeLen > 32) return false;
 
-        delay(150); // give HCE a moment to settle between APDUs
+        delay(90);
 
         // SPAKE2+ REQUEST (INS 0x30) with TLV tag 0x50 carrying the challenge
         uint8_t reqApdu[5 + 2 + 32 + 1];
@@ -141,42 +141,76 @@ namespace {
         memcpy(reqApdu + idx, challenge, challengeLen); idx += (uint8_t)challengeLen;
         reqApdu[idx++] = 0x00; // Le
 
-        uint8_t reqResp[64]; uint8_t reqLen = sizeof(reqResp);
-        bool reqOk = apduRetryWithReselect(reqApdu, idx, reqResp, &reqLen, 4, 120, 5000, 2)
-            && reqLen >= 2 && reqResp[reqLen - 2] == 0x90 && reqResp[reqLen - 1] == 0x00;
-        if (!reqOk) {
-            Serial.println("[PhaseA] SPAKE2+ REQUEST failed");
-            return false;
-        }
-
-        // SPAKE2+ VERIFY (INS 0x32) expects TLV tag 0x58 with MAC
-        delay(120);
+        // SPAKE2+ challenge state may be session-scoped on some devices.
+        // Retry as full REQUEST->VERIFY rounds after any reselection.
         uint8_t verApdu[] = {0x00, kInsSpake2Verify, 0x00, 0x00, 0x00};
-        uint8_t verResp[96]; uint8_t verLen = sizeof(verResp);
-        bool verOk = apduRetryWithReselect(verApdu, sizeof(verApdu), verResp, &verLen, 5, 200, 6000, 1)
-            && verLen >= 2 && verResp[verLen - 2] == 0x90 && verResp[verLen - 1] == 0x00;
-        if (!verOk) {
-            Serial.println("[PhaseA] SPAKE2+ VERIFY failed");
-            return false;
+
+        for (uint8_t round = 1; round <= 4; ++round) {
+            if (round > 1) {
+                Serial.printf("[PhaseA] SPAKE2+ round %u: reselection\n", round);
+                releaseTarget();
+                delay(140);
+                if (!ensureSelected(4000)) {
+                    Serial.println("[PhaseA] SPAKE2+ reselect failed");
+                    continue;
+                }
+                delay(130);
+            }
+
+            uint8_t reqResp[64];
+            uint8_t reqLen = sizeof(reqResp);
+            bool reqOk = apduRetry(reqApdu, idx, reqResp, &reqLen, 3, 120)
+                && reqLen >= 2 && reqResp[reqLen - 2] == 0x90 && reqResp[reqLen - 1] == 0x00;
+
+            if (!reqOk) {
+                // Recover REQUEST first; do not send VERIFY without a confirmed challenge write.
+                reqLen = sizeof(reqResp);
+                reqOk = apduRetryWithReselect(reqApdu, idx, reqResp, &reqLen, 2, 140, 3500, 1)
+                    && reqLen >= 2 && reqResp[reqLen - 2] == 0x90 && reqResp[reqLen - 1] == 0x00;
+            }
+
+            if (!reqOk) {
+                Serial.printf("[PhaseA] SPAKE2+ round %u: REQUEST failed\n", round);
+                continue;
+            }
+
+            uint8_t verResp[96];
+            uint8_t verLen = sizeof(verResp);
+            // Even with REQUEST=9000, many phones momentarily drop RF before VERIFY.
+            // Use reselect-capable retries in the same round to avoid dead-ending.
+            delay(140);
+            bool verOk = apduRetryWithReselect(verApdu, sizeof(verApdu), verResp, &verLen, 3, 180, 3500, 1)
+                && verLen >= 2 && verResp[verLen - 2] == 0x90 && verResp[verLen - 1] == 0x00;
+
+            if (!verOk) {
+                Serial.printf("[PhaseA] SPAKE2+ round %u: VERIFY failed\n", round);
+                continue;
+            }
+
+            int payloadLen = verLen - 2;
+            const uint8_t* payload = verResp;
+            const uint8_t* mac = nullptr;
+            int macLen = 0;
+            if (!extractTlv(kTlvTagMac, payload, payloadLen, &mac, &macLen) || macLen != 32) {
+                Serial.printf("[PhaseA] SPAKE2+ round %u: VERIFY missing MAC tag 0x58\n", round);
+                continue;
+            }
+
+            uint8_t macExpect[32];
+            if (!hmacSha256(MASTER_SECRET, sizeof(MASTER_SECRET), challenge, challengeLen, macExpect)) {
+                Serial.println("[PhaseA] SPAKE2+ HMAC compute failed");
+                return false;
+            }
+
+            bool macOk = (memcmp(mac, macExpect, 32) == 0);
+            Serial.printf("[PhaseA] SPAKE2+ MAC verify=%s (round=%u)\n", macOk ? "OK" : "FAIL", round);
+            if (macOk) {
+                return true;
+            }
         }
 
-        int payloadLen = verLen - 2;
-        const uint8_t* payload = verResp;
-        const uint8_t* mac = nullptr;
-        int macLen = 0;
-        if (!extractTlv(kTlvTagMac, payload, payloadLen, &mac, &macLen) || macLen != 32) {
-            Serial.println("[PhaseA] SPAKE2+ VERIFY missing MAC tag 0x58");
-            return false;
-        }
-
-        uint8_t macExpect[32];
-        if (!hmacSha256(MASTER_SECRET, sizeof(MASTER_SECRET), challenge, challengeLen, macExpect)) {
-            Serial.println("[PhaseA] SPAKE2+ HMAC compute failed");
-            return false;
-        }
-        bool macOk = (memcmp(mac, macExpect, 32) == 0);
-        Serial.printf("[PhaseA] SPAKE2+ MAC verify=%s\n", macOk ? "OK" : "FAIL");
-        return macOk;
+        Serial.println("[PhaseA] SPAKE2+ REQUEST/VERIFY rounds exhausted");
+        return false;
     }
 
     bool sendOpControlFlowSuccess() {
@@ -246,7 +280,7 @@ namespace {
 
         uint8_t resp[16];
         uint8_t rlen = sizeof(resp);
-        bool ok = apduRetryWithReselect(apdu, idx, resp, &rlen, 4, 120, 4000, 2)
+        bool ok = apduRetryWithReselect(apdu, idx, resp, &rlen, 6, 140, 5000, 2)
             && rlen >= 2 && resp[rlen - 2] == 0x90 && resp[rlen - 1] == 0x00;
         if (!ok) {
             Serial.println("[PhaseA] WRITE DATA (vehicle key push) failed");
@@ -415,24 +449,37 @@ namespace {
     bool selectAid(uint8_t& sw1, uint8_t& sw2, int& payloadLen);
 
     bool ensureSelected(uint32_t timeoutMs = 2500) {
-        // Fast path: try SELECT immediately in case target is already active.
+        // Fast path only when we already have an active target.
         uint8_t sw1 = 0, sw2 = 0; int payloadLen = 0;
-        if (selectAid(sw1, sw2, payloadLen) && sw1 == 0x90 && sw2 == 0x00) {
-            return true;
+        if (targetActive) {
+            if (selectAid(sw1, sw2, payloadLen) && sw1 == 0x90 && sw2 == 0x00) {
+                return true;
+            }
         }
 
         const uint32_t start = millis();
+        uint8_t stablePresentReads = 0;
         while (millis() - start < timeoutMs) {
             if (!nfc->inListPassiveTarget()) {
+                stablePresentReads = 0;
                 delay(50);
                 continue;
             }
+
+            // Require a short stable presence window after reselection to reduce 0x27/invalid-frame bursts.
+            if (++stablePresentReads < 2) {
+                delay(35);
+                continue;
+            }
+
+            targetActive = true;
             sw1 = 0; sw2 = 0; payloadLen = 0;
             if (selectAid(sw1, sw2, payloadLen) && sw1 == 0x90 && sw2 == 0x00) {
                 return true;
             }
             releaseTarget();
-            delay(80);
+            stablePresentReads = 0;
+            delay(120);
         }
         return false;
     }
@@ -469,7 +516,7 @@ namespace {
         if (kDebugApdu) {
             Serial.print("[APDU] SELECT cmd: "); printHex(sel, idx);
         }
-        if (!apduRetry(sel, idx, resp, &rlen, 1, 0)) {
+        if (!apduRetry(sel, idx, resp, &rlen, 2, 40)) {
             if (kDebugApdu) Serial.println("[APDU] SELECT failed (no response)");
             return false;
         }
@@ -547,18 +594,18 @@ namespace {
     }
 
     // Execute the two-step provisioning exchange when appropriate.
-    void performProvisioningIfNeeded(uint8_t sw1, uint8_t sw2) {
+    bool performProvisioningIfNeeded(uint8_t sw1, uint8_t sw2) {
         bool alreadyProvisioned = ProvisioningPhase::isProvisioned();
         bool shouldForce = ProvisioningPhase::isForceProvisioning();
         
         // If already provisioned and force mode is OFF, reject provisioning attempt
         if (alreadyProvisioned && !shouldForce) {
             Serial.println("[PhaseA] ⚠️  Device already provisioned. Use 'f' or 'F' command to force re-provisioning.");
-            return;
+            return true;
         }
         
         bool shouldProvision = (shouldForce || !alreadyProvisioned) && (sw1 == 0x90 && sw2 == 0x00);
-        if (!shouldProvision) return;
+        if (!shouldProvision) return true;
 
         // ------------------------------
         // Phase 1: SPAKE2+ auth challenge (before key exchange)
@@ -581,7 +628,7 @@ namespace {
 
         if (!sendSpake2Mastercard(challenge, sizeof(challenge))) {
             Serial.println("[PhaseA] MasterCard SPAKE2+ verify failed");
-            return;
+            return false;
         }
 
         // ------------------------------
@@ -647,7 +694,7 @@ namespace {
             } else {
                 Serial.println("[PhaseA] Last base resp: <none>");
             }
-            return;
+            return false;
         }
 
         Serial.printf("[PhaseA] Parsed Base: keyIdLen=%u pubKeyFirst=%02X certLen=%u\n",
@@ -663,22 +710,16 @@ namespace {
             Serial.println("[PhaseA] cert: <none>");
         }
 
-        // Re-sync RF session boundary before signature step.
-        // Phone HCE may deactivate after base response on some devices.
-        Serial.println("[PhaseA] Resync before signature...");
-        releaseTarget();
-        delay(140);
-        if (!ensureSelected(4000)) {
-            Serial.println("[PhaseA] SELECT before signature failed");
-            return;
-        }
-        delay(140);
+        // Some phones drop RF after base response; let WRITE DATA handle reselection internally
+        // instead of forcing a release here, which can increase stalls.
+        Serial.println("[PhaseA] Proceeding to WRITE DATA with adaptive reselect");
+        delay(80);
 
         // ------------------------------
         // Step 1.5: WRITE DATA (Lc=77) vehicle_id + vehicle_pub
         // ------------------------------
         if (!sendVehicleWriteData()) {
-            return;
+            return false;
         }
         delay(100);
 
@@ -714,17 +755,17 @@ namespace {
         if (!sigOk) {
             Serial.println("[PhaseA] Signature GET DATA failed");
             Serial.print("[PhaseA] Last sig resp: "); printHex(sigResp, sigTotalLen);
-            return;
+            return false;
         }
 
         Serial.printf("[PhaseA] IN Sig Resp len=%u SW=%02X%02X\n", sigTotalLen, sigResp[sigTotalLen - 2], sigResp[sigTotalLen - 1]);
         int sigPayloadLen = sigTotalLen - 2;
-        if (sigPayloadLen < 2) { Serial.println("[PhaseA] Signature payload too short"); return; }
+        if (sigPayloadLen < 2) { Serial.println("[PhaseA] Signature payload too short"); return false; }
 
         const uint8_t* sigDer = nullptr;
         uint16_t sigLen = 0;
         sigLen = (uint16_t)(sigResp[0] << 8 | sigResp[1]);
-        if (2 + sigLen > sigPayloadLen) { Serial.println("[PhaseA] sigLen OOB"); return; }
+        if (2 + sigLen > sigPayloadLen) { Serial.println("[PhaseA] sigLen OOB"); return false; }
         sigDer = sigResp + 2;
 
         Serial.print("[PhaseA] sigDer (first up to 32 bytes): ");
@@ -737,22 +778,22 @@ namespace {
         }
 
         Serial.printf("[PhaseA] sigLen=%u verify=%s\n", sigLen, sigOK ? "OK" : "FAIL");
-        if (!sigOK) { Serial.println("[PhaseA] Credentials NOT stored (signature failure)"); return; }
+        if (!sigOK) { Serial.println("[PhaseA] Credentials NOT stored (signature failure)"); return false; }
 
         // Decide whether to store provisioning data
         if (!info.hasPub) {
             Serial.println("[PhaseA] Missing endpoint public key; provisioning rejected");
-            return;
+            return false;
         }
 
         if (!sendOpControlFlowSuccess()) {
             Serial.println("[PhaseA] Provisioning aborted: OP CONTROL FLOW commit failed");
-            return;
+            return false;
         }
 
         if (!ProvisioningPhase::setOwnerProvisioned(info.pubKey65, shouldForce)) {
             Serial.println("[PhaseA] Owner provisioning rejected (already provisioned?)");
-            return;
+            return false;
         }
         if (info.certLen > 0) ProvisioningPhase::storeCertChain(info.cert, info.certLen);
         Serial.println("[PhaseA] Provisioning data persisted (CCC mailbox owner slot)");
@@ -771,6 +812,8 @@ namespace {
             ProvisioningPhase::setOneShotForce(false);
             Serial.println("[PhaseA] ✓ Force provisioning auto-disabled after successful provisioning");
         }
+
+        return true;
     }
 
     // Process incoming serial admin commands (debounced and guarded by startup time)
@@ -918,10 +961,14 @@ namespace NfcSession {
                                     ProvisioningPhase::isForceProvisioning() ? "ON" : "OFF");
 
         // Possibly perform provisioning sequence after a successful SELECT
-        performProvisioningIfNeeded(sw1, sw2);
+        bool provisioningOk = performProvisioningIfNeeded(sw1, sw2);
+
+        if (!provisioningOk) {
+            Serial.println("[PhaseA] Transient provisioning failure; retrying without waiting for card removal");
+        }
 
         // Keep flow smooth: wait briefly for removal only when SELECT succeeded
-        postSessionCooldown(sw1 == 0x90 && sw2 == 0x00);
+        postSessionCooldown((sw1 == 0x90 && sw2 == 0x00) && provisioningOk);
     }
 
     // ---- Admin control API (delegates to ProvisioningPhase) ----

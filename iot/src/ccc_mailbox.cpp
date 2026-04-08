@@ -12,19 +12,55 @@
 namespace {
   Preferences prefs;
   const char* kNs = "ccc_dk";
+  constexpr uint8_t kMaxSlots = 8;
 
   CCCMailbox::CCC_Mailbox g_mailbox{};
   bool g_loaded = false;
   mbedtls_entropy_context g_vsign_entropy;
   mbedtls_ctr_drbg_context g_vsign_drbg;
   bool g_vsign_rng_ready = false;
+  bool g_vehicle_pub_loaded = false;
+  bool g_vehicle_priv_loaded = false;
 
   bool isValidPub(const uint8_t* pub65) {
     return pub65 && pub65[0] == 0x04;
   }
 
+  bool isAllZero(const uint8_t* data, size_t len) {
+    if (!data) return true;
+    for (size_t i = 0; i < len; ++i) {
+      if (data[i] != 0) return false;
+    }
+    return true;
+  }
+
+  bool slotIndexValid(uint8_t slotIndex) {
+    return slotIndex < kMaxSlots;
+  }
+
+  uint8_t slotMask(uint8_t slotIndex) {
+    return static_cast<uint8_t>(1u << slotIndex);
+  }
+
+  void endpointKey(uint8_t slotIndex, char* out, size_t outLen) {
+    snprintf(out, outLen, "ep_%u", (unsigned)slotIndex);
+  }
+
   void tokenKey(uint8_t slotIndex, char* out, size_t outLen) {
     snprintf(out, outLen, "tok_%u", (unsigned)slotIndex);
+  }
+
+  bool slotHasEndpoint(uint8_t slotIndex) {
+    if (!slotIndexValid(slotIndex)) return false;
+    if ((g_mailbox.slot_bitmap & slotMask(slotIndex)) == 0) return false;
+    return isValidPub(g_mailbox.slots[slotIndex].endpoint_pub);
+  }
+
+  bool slotHasToken(uint8_t slotIndex) {
+    if (!slotIndexValid(slotIndex)) return false;
+    if ((g_mailbox.slot_bitmap & slotMask(slotIndex)) == 0) return false;
+    return !isAllZero(g_mailbox.slots[slotIndex].immobilizer_token,
+                      sizeof(g_mailbox.slots[slotIndex].immobilizer_token));
   }
 
   void clearLegacyProvisioning() {
@@ -141,6 +177,8 @@ namespace {
 
   void loadMailbox() {
     memset(&g_mailbox, 0, sizeof(g_mailbox));
+    g_vehicle_pub_loaded = false;
+    g_vehicle_priv_loaded = false;
     prefs.begin(kNs, true);
 
     String vId = prefs.getString("v_id", "");
@@ -152,35 +190,79 @@ namespace {
     size_t vPubLen = prefs.getBytesLength("v_pub");
     if (vPubLen == 65) {
       prefs.getBytes("v_pub", g_mailbox.vehicle_pub, 65);
-      g_mailbox.vehicle_pub_valid = isValidPub(g_mailbox.vehicle_pub);
+      g_vehicle_pub_loaded = isValidPub(g_mailbox.vehicle_pub);
     }
 
     size_t vPrivLen = prefs.getBytesLength("v_priv");
     if (vPrivLen == 32) {
       prefs.getBytes("v_priv", g_mailbox.vehicle_priv, 32);
-      g_mailbox.vehicle_priv_valid = true;
-    }
-
-    size_t epPubLen = prefs.getBytesLength("ep_pub");
-    if (epPubLen == 65) {
-      prefs.getBytes("ep_pub", g_mailbox.endpoint_pub, 65);
-      g_mailbox.endpoint_pub_valid = isValidPub(g_mailbox.endpoint_pub);
+      g_vehicle_priv_loaded = true;
     }
 
     g_mailbox.signaling_bitmap = prefs.getUShort("sig_bmp", 0);
     g_mailbox.slot_bitmap = prefs.getUChar("slot_bmp", 0);
 
-    for (uint8_t i = 0; i < 8; ++i) {
+    bool normalizeSlotBitmap = false;
+
+    for (uint8_t i = 0; i < kMaxSlots; ++i) {
+      char epKey[8];
+      endpointKey(i, epKey, sizeof(epKey));
+      size_t epLen = prefs.getBytesLength(epKey);
+      if (epLen == 65) {
+        prefs.getBytes(epKey, g_mailbox.slots[i].endpoint_pub, 65);
+        if (isValidPub(g_mailbox.slots[i].endpoint_pub)) {
+          if ((g_mailbox.slot_bitmap & slotMask(i)) == 0) {
+            g_mailbox.slot_bitmap |= slotMask(i);
+            normalizeSlotBitmap = true;
+          }
+        } else {
+          memset(g_mailbox.slots[i].endpoint_pub, 0, 65);
+        }
+      }
+    }
+
+    // Migrate legacy owner endpoint key storage (ep_pub) into slot 0.
+    bool migratedLegacyEndpoint = false;
+    size_t legacyEpLen = prefs.getBytesLength("ep_pub");
+    if (legacyEpLen == 65 && !slotHasEndpoint(0)) {
+      uint8_t legacyPub[65];
+      prefs.getBytes("ep_pub", legacyPub, 65);
+      if (isValidPub(legacyPub)) {
+        memcpy(g_mailbox.slots[0].endpoint_pub, legacyPub, 65);
+        g_mailbox.slot_bitmap |= slotMask(0);
+        normalizeSlotBitmap = true;
+        migratedLegacyEndpoint = true;
+      }
+    }
+
+    for (uint8_t i = 0; i < kMaxSlots; ++i) {
       char key[8];
       tokenKey(i, key, sizeof(key));
       size_t tokLen = prefs.getBytesLength(key);
       if (tokLen == 32) {
-        prefs.getBytes(key, g_mailbox.immobilizer_tokens[i], 32);
-        g_mailbox.token_valid[i] = true;
+        prefs.getBytes(key, g_mailbox.slots[i].immobilizer_token, 32);
+        if ((g_mailbox.slot_bitmap & slotMask(i)) == 0) {
+          g_mailbox.slot_bitmap |= slotMask(i);
+          normalizeSlotBitmap = true;
+        }
       }
     }
 
     prefs.end();
+
+    if (normalizeSlotBitmap || migratedLegacyEndpoint) {
+      prefs.begin(kNs, false);
+      prefs.putUChar("slot_bmp", g_mailbox.slot_bitmap);
+      if (migratedLegacyEndpoint) {
+        char ep0Key[8];
+        endpointKey(0, ep0Key, sizeof(ep0Key));
+        prefs.putBytes(ep0Key, g_mailbox.slots[0].endpoint_pub, 65);
+        if (prefs.isKey("ep_pub")) {
+          prefs.remove("ep_pub");
+        }
+      }
+      prefs.end();
+    }
   }
 
   void persistRoot() {
@@ -201,15 +283,15 @@ bool begin() {
 
   loadMailbox();
 
-  bool invalidVehiclePair = g_mailbox.vehicle_pub_valid && g_mailbox.vehicle_priv_valid
+  bool invalidVehiclePair = g_vehicle_pub_loaded && g_vehicle_priv_loaded
       ? !validateVehicleKeypair(g_mailbox.vehicle_pub, g_mailbox.vehicle_priv)
       : false;
   bool missingRoot = (strlen(g_mailbox.vehicle_id) != 8)
-      || !g_mailbox.vehicle_pub_valid
-      || !g_mailbox.vehicle_priv_valid
+      || !g_vehicle_pub_loaded
+      || !g_vehicle_priv_loaded
       || invalidVehiclePair;
   if (missingRoot) {
-    if (g_mailbox.vehicle_pub_valid && !g_mailbox.vehicle_priv_valid) {
+    if (g_vehicle_pub_loaded && !g_vehicle_priv_loaded) {
       Serial.println("[CCC] Vehicle private key missing; rekeying vehicle identity and clearing provisioned data");
     }
     clearLegacyProvisioning();
@@ -219,13 +301,15 @@ bool begin() {
       Serial.println("[CCC] ERROR: Failed to generate vehicle keypair");
       return false;
     }
-    g_mailbox.vehicle_pub_valid = true;
-    g_mailbox.vehicle_priv_valid = true;
+    g_vehicle_pub_loaded = true;
+    g_vehicle_priv_loaded = true;
+    g_mailbox.vehicle_identity_valid = true;
     g_mailbox.signaling_bitmap = 0;
     g_mailbox.slot_bitmap = 0;
     persistRoot();
     Serial.printf("[CCC] Initialized mailbox (v_id=%s)\n", g_mailbox.vehicle_id);
   } else {
+    g_mailbox.vehicle_identity_valid = true;
     Serial.printf("[CCC] Loaded mailbox (v_id=%s slot_bmp=0x%02X)\n",
                   g_mailbox.vehicle_id, g_mailbox.slot_bitmap);
   }
@@ -254,15 +338,15 @@ const char* vehicleId() {
 }
 
 bool hasVehiclePub() {
-  return g_mailbox.vehicle_pub_valid;
+  return g_mailbox.vehicle_identity_valid;
 }
 
 bool hasVehiclePriv() {
-  return g_mailbox.vehicle_priv_valid;
+  return g_mailbox.vehicle_identity_valid;
 }
 
 bool getVehiclePub(uint8_t* out, size_t max) {
-  if (!out || max < 65 || !g_mailbox.vehicle_pub_valid) return false;
+  if (!out || max < 65 || !g_mailbox.vehicle_identity_valid) return false;
   memcpy(out, g_mailbox.vehicle_pub, 65);
   return true;
 }
@@ -271,7 +355,7 @@ bool signVehicleDataP256(const uint8_t* data, size_t dataLen,
                         uint8_t* sigDerOut, size_t sigDerMax,
                         size_t* sigDerLenOut) {
   if (!data || dataLen == 0 || !sigDerOut || sigDerMax == 0 || !sigDerLenOut) return false;
-  if (!g_mailbox.vehicle_priv_valid) return false;
+  if (!g_mailbox.vehicle_identity_valid) return false;
   if (!g_vsign_rng_ready) return false;
 
   unsigned char hash[32];
@@ -310,47 +394,59 @@ bool signVehicleDataP256(const uint8_t* data, size_t dataLen,
   return true;
 }
 
-bool hasEndpointPub() {
-  return g_mailbox.endpoint_pub_valid;
+bool hasEndpointPub(uint8_t slotIndex) {
+  return slotHasEndpoint(slotIndex);
 }
 
-bool getEndpointPub(uint8_t* out, size_t max) {
-  if (!out || max < 65 || !g_mailbox.endpoint_pub_valid) return false;
-  memcpy(out, g_mailbox.endpoint_pub, 65);
+bool getEndpointPub(uint8_t* out, size_t max, uint8_t slotIndex) {
+  if (!slotHasEndpoint(slotIndex) || !out || max < 65) return false;
+  memcpy(out, g_mailbox.slots[slotIndex].endpoint_pub, 65);
   return true;
 }
 
-bool setEndpointPub(const uint8_t* pub65) {
-  if (!pub65 || !isValidPub(pub65)) return false;
-  memcpy(g_mailbox.endpoint_pub, pub65, 65);
-  g_mailbox.endpoint_pub_valid = true;
+bool setEndpointPub(const uint8_t* pub65, uint8_t slotIndex) {
+  if (!slotIndexValid(slotIndex) || !pub65 || !isValidPub(pub65)) return false;
+  memcpy(g_mailbox.slots[slotIndex].endpoint_pub, pub65, 65);
+  g_mailbox.slot_bitmap |= slotMask(slotIndex);
+  char key[8];
+  endpointKey(slotIndex, key, sizeof(key));
   prefs.begin(kNs, false);
-  bool ok = prefs.putBytes("ep_pub", pub65, 65) == 65;
+  bool ok = prefs.putBytes(key, pub65, 65) == 65;
+  if (ok) ok = prefs.putUChar("slot_bmp", g_mailbox.slot_bitmap);
+  if (slotIndex == 0 && prefs.isKey("ep_pub")) {
+    prefs.remove("ep_pub");
+  }
   prefs.end();
   return ok;
 }
 
-bool clearEndpointPub() {
-  memset(g_mailbox.endpoint_pub, 0, sizeof(g_mailbox.endpoint_pub));
-  g_mailbox.endpoint_pub_valid = false;
+bool clearEndpointPub(uint8_t slotIndex) {
+  if (!slotIndexValid(slotIndex)) return false;
+  memset(g_mailbox.slots[slotIndex].endpoint_pub, 0,
+         sizeof(g_mailbox.slots[slotIndex].endpoint_pub));
+  g_mailbox.slot_bitmap &= static_cast<uint8_t>(~slotMask(slotIndex));
+  char key[8];
+  endpointKey(slotIndex, key, sizeof(key));
   prefs.begin(kNs, false);
   bool ok = true;
-  if (prefs.isKey("ep_pub")) ok = prefs.remove("ep_pub");
+  if (prefs.isKey(key)) ok = prefs.remove(key);
+  if (slotIndex == 0 && prefs.isKey("ep_pub")) ok = ok && prefs.remove("ep_pub");
+  ok = ok && prefs.putUChar("slot_bmp", g_mailbox.slot_bitmap);
   prefs.end();
   return ok;
 }
 
 bool isSlotActive(uint8_t slotIndex) {
-  if (slotIndex > 7) return false;
-  return (g_mailbox.slot_bitmap & (1 << slotIndex)) != 0;
+  if (!slotIndexValid(slotIndex)) return false;
+  return (g_mailbox.slot_bitmap & slotMask(slotIndex)) != 0;
 }
 
 bool setSlotActive(uint8_t slotIndex, bool active) {
-  if (slotIndex > 7) return false;
+  if (!slotIndexValid(slotIndex)) return false;
   if (active) {
-    g_mailbox.slot_bitmap |= (1 << slotIndex);
+    g_mailbox.slot_bitmap |= slotMask(slotIndex);
   } else {
-    g_mailbox.slot_bitmap &= ~(1 << slotIndex);
+    g_mailbox.slot_bitmap &= static_cast<uint8_t>(~slotMask(slotIndex));
   }
   prefs.begin(kNs, false);
   bool ok = prefs.putUChar("slot_bmp", g_mailbox.slot_bitmap);
@@ -359,44 +455,45 @@ bool setSlotActive(uint8_t slotIndex, bool active) {
 }
 
 bool hasToken(uint8_t slotIndex) {
-  if (slotIndex > 7) return false;
-  return g_mailbox.token_valid[slotIndex];
+  return slotHasToken(slotIndex);
 }
 
 bool getToken(uint8_t slotIndex, uint8_t out[32]) {
-  if (slotIndex > 7 || !out || !g_mailbox.token_valid[slotIndex]) return false;
-  memcpy(out, g_mailbox.immobilizer_tokens[slotIndex], 32);
+  if (!slotHasToken(slotIndex) || !out) return false;
+  memcpy(out, g_mailbox.slots[slotIndex].immobilizer_token, 32);
   return true;
 }
 
 bool setToken(uint8_t slotIndex, const uint8_t tok[32]) {
-  if (slotIndex > 7 || !tok) return false;
-  memcpy(g_mailbox.immobilizer_tokens[slotIndex], tok, 32);
-  g_mailbox.token_valid[slotIndex] = true;
+  if (!slotIndexValid(slotIndex) || !tok) return false;
+  memcpy(g_mailbox.slots[slotIndex].immobilizer_token, tok, 32);
+  g_mailbox.slot_bitmap |= slotMask(slotIndex);
   char key[8];
   tokenKey(slotIndex, key, sizeof(key));
   prefs.begin(kNs, false);
   bool ok = prefs.putBytes(key, tok, 32) == 32;
+  if (ok) ok = prefs.putUChar("slot_bmp", g_mailbox.slot_bitmap);
   prefs.end();
   return ok;
 }
 
 bool clearToken(uint8_t slotIndex) {
-  if (slotIndex > 7) return false;
-  memset(g_mailbox.immobilizer_tokens[slotIndex], 0, 32);
-  g_mailbox.token_valid[slotIndex] = false;
+  if (!slotIndexValid(slotIndex)) return false;
+  memset(g_mailbox.slots[slotIndex].immobilizer_token, 0, 32);
+  g_mailbox.slot_bitmap &= static_cast<uint8_t>(~slotMask(slotIndex));
   char key[8];
   tokenKey(slotIndex, key, sizeof(key));
   prefs.begin(kNs, false);
   bool ok = true;
   if (prefs.isKey(key)) ok = prefs.remove(key);
+  ok = ok && prefs.putUChar("slot_bmp", g_mailbox.slot_bitmap);
   prefs.end();
   return ok;
 }
 
 bool ensureToken(uint8_t slotIndex) {
-  if (slotIndex > 7) return false;
-  if (g_mailbox.token_valid[slotIndex]) return true;
+  if (!slotIndexValid(slotIndex)) return false;
+  if (slotHasToken(slotIndex)) return true;
   uint8_t tok[32];
   for (size_t i = 0; i < sizeof(tok); ++i) {
     tok[i] = (uint8_t)(esp_random() & 0xFF);
@@ -424,7 +521,9 @@ bool setSignalingFlag(uint16_t mask, bool enabled) {
 }
 
 void clearMailboxes() {
-  clearEndpointPub();
+  for (uint8_t i = 0; i < kMaxSlots; ++i) {
+    clearEndpointPub(i);
+  }
   g_mailbox.signaling_bitmap = 0;
   g_mailbox.slot_bitmap = 0;
   prefs.begin(kNs, false);
@@ -432,7 +531,7 @@ void clearMailboxes() {
   prefs.putUChar("slot_bmp", g_mailbox.slot_bitmap);
   prefs.end();
 
-  for (uint8_t i = 0; i < 8; ++i) {
+  for (uint8_t i = 0; i < kMaxSlots; ++i) {
     clearToken(i);
   }
 }
@@ -442,6 +541,8 @@ void clearAll() {
   prefs.clear();
   prefs.end();
   memset(&g_mailbox, 0, sizeof(g_mailbox));
+  g_vehicle_pub_loaded = false;
+  g_vehicle_priv_loaded = false;
   g_loaded = false;
 }
 
