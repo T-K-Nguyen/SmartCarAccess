@@ -65,6 +65,9 @@ void setup() {
 }
 
 void loop() {
-  // Main loop remains idle; FSM/NFC run in dedicated tasks.
+  // BLE advertising profile demotion (fast -> slow) is polled from here.
+  BLEMod::tick();
+
+  // Main loop remains mostly idle; FSM/NFC run in dedicated tasks.
   vTaskDelay(pdMS_TO_TICKS(50));
 }

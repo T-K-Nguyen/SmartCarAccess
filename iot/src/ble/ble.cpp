@@ -25,15 +25,106 @@ namespace {
 
   bool s_bleStarted = false;
 
+  enum class AdvProfile : uint8_t {
+    Fast,
+    Slow,
+  };
+
+  struct AdvState {
+    AdvProfile profile = AdvProfile::Slow;
+    uint32_t fastWindowDeadlineMs = 0;
+    bool profileInitialized = false;
+  };
+
+  AdvState s_advState;
+
+  uint16_t advMsToUnits(uint32_t intervalMs) {
+    const uint32_t units = (intervalMs * 8U + 2U) / 5U;  // Round to 0.625ms units.
+    if (units < 0x0020) {
+      return 0x0020;
+    }
+    if (units > 0x4000) {
+      return 0x4000;
+    }
+    return static_cast<uint16_t>(units);
+  }
+
+  bool fastWindowActive(uint32_t nowMs) {
+    if (s_advState.fastWindowDeadlineMs == 0) {
+      return false;
+    }
+    return static_cast<int32_t>(s_advState.fastWindowDeadlineMs - nowMs) > 0;
+  }
+
+  void applyAdvertisingProfile(NimBLEAdvertising* advertising, const BLERollout::Flags& flags, AdvProfile profile, const char* reason) {
+    const bool useFast = profile == AdvProfile::Fast;
+    const uint16_t minMs = useFast ? flags.advFastMinMs : flags.advSlowMinMs;
+    const uint16_t maxMs = useFast ? flags.advFastMaxMs : flags.advSlowMaxMs;
+
+    advertising->setMinInterval(advMsToUnits(minMs));
+    advertising->setMaxInterval(advMsToUnits(maxMs));
+
+    if (!s_advState.profileInitialized || s_advState.profile != profile) {
+      Serial.printf(
+        "[BLE][ADV] profile=%s reason=%s interval_ms=%u-%u\n",
+        useFast ? "fast" : "slow",
+        reason,
+        minMs,
+        maxMs
+      );
+    }
+
+    s_advState.profile = profile;
+    s_advState.profileInitialized = true;
+  }
+
+  void applyAdvertisingPolicy(bool requestFastProfile, const char* reason) {
+    NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+    if (!advertising) {
+      return;
+    }
+
+    BLERollout::Flags flags = BLERollout::flags();
+    const uint32_t nowMs = millis();
+    const char* safeReason = (reason != nullptr) ? reason : "unspecified";
+
+    if (requestFastProfile) {
+      if (!fastWindowActive(nowMs)) {
+        s_advState.fastWindowDeadlineMs = nowMs + flags.advFastWindowMs;
+        Serial.printf(
+          "[BLE][ADV] fast_window_started reason=%s window_ms=%lu deadline_ms=%lu\n",
+          safeReason,
+          static_cast<unsigned long>(flags.advFastWindowMs),
+          static_cast<unsigned long>(s_advState.fastWindowDeadlineMs)
+        );
+      } else {
+        Serial.printf(
+          "[BLE][ADV] fast_window_guard reason=%s remaining_ms=%lu (not extended)\n",
+          safeReason,
+          static_cast<unsigned long>(s_advState.fastWindowDeadlineMs - nowMs)
+        );
+      }
+    }
+
+    const AdvProfile targetProfile = fastWindowActive(nowMs) ? AdvProfile::Fast : AdvProfile::Slow;
+    applyAdvertisingProfile(advertising, flags, targetProfile, safeReason);
+    NimBLEDevice::startAdvertising();
+  }
+
   void logRolloutFlags() {
     BLERollout::Flags f = BLERollout::flags();
     Serial.printf(
-      "[BLE][ROLL] flags background=%u fast_tx=%u bonding_enforce=%u rssi_monitor_only=%u rssi_threshold_dbm=%d\n",
+      "[BLE][ROLL] flags background=%u fast_tx=%u bonding_enforce=%u rssi_monitor_only=%u rssi_threshold_dbm=%d adv_fast_ms=%u-%u adv_slow_ms=%u-%u adv_fast_window_ms=%lu\n",
       f.backgroundMode ? 1 : 0,
       f.fastTransaction ? 1 : 0,
       f.bondingEnforce ? 1 : 0,
       f.rssiMonitorOnly ? 1 : 0,
-      f.rssiThresholdDbm
+      f.rssiThresholdDbm,
+      f.advFastMinMs,
+      f.advFastMaxMs,
+      f.advSlowMinMs,
+      f.advSlowMaxMs,
+      static_cast<unsigned long>(f.advFastWindowMs)
     );
   }
 
@@ -105,12 +196,12 @@ namespace BLEMod {
         pServer->updateConnParams(connInfo.getConnHandle(), 12, 12, 0, 200);
         Serial.println("[BLE] Requested connection params: interval=15ms, latency=0, timeout=2000ms");
         
-        NimBLEDevice::startAdvertising();
+        BLEMod::restartAdvertising(false, "connect_keepalive");
       }
       void onDisconnect(NimBLEServer* /*pServer*/, NimBLEConnInfo& /*connInfo*/, int reason) override {
         Serial.printf("[BLE] Central disconnected (reason=%d). Restarting advertising and resetting session.\n", reason);
         BLEAuth::resetSession();
-        NimBLEDevice::startAdvertising();
+        BLEMod::restartAdvertising(true, "server_disconnect");
       }
       
       void onMTUChange(uint16_t MTU, NimBLEConnInfo& connInfo) override {
@@ -162,10 +253,26 @@ namespace BLEMod {
     pAdvertising->addServiceUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000"); // Auth/Echo service UUID
     pAdvertising->addServiceUUID("9a9b9c9d-0000-4000-8000-9a9b9c9d0000"); // Admin service UUID
     pAdvertising->addServiceUUID("555a0001-00aa-1111-2222-333344445555"); // Attestation service UUID
-    pAdvertising->start();
+
+    restartAdvertising(true, "boot");
 
     Serial.printf("[BLE] Advertising started: %s\n", kDeviceName);
     s_bleStarted = true;
+  }
+
+  void tick() {
+    if (!s_bleStarted) {
+      return;
+    }
+
+    const uint32_t nowMs = millis();
+    if (!fastWindowActive(nowMs) && s_advState.profileInitialized && s_advState.profile == AdvProfile::Fast) {
+      applyAdvertisingPolicy(false, "fast_window_elapsed");
+    }
+  }
+
+  void restartAdvertising(bool requestFastProfile, const char* reason) {
+    applyAdvertisingPolicy(requestFastProfile, reason);
   }
 
   bool isStarted() { return s_bleStarted; }

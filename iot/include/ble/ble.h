@@ -1,8 +1,16 @@
 #pragma once
 
+#include <stdint.h>
+
 namespace BLEMod {
   // Initialize BLE (GATT server, advertising)
   void begin();
+
+  // Maintains advertising profile transitions (e.g., timed fast -> slow demotion).
+  void tick();
+
+  // Restart advertising with optional fast-profile request for a bounded window.
+  void restartAdvertising(bool requestFastProfile = false, const char* reason = nullptr);
 
   // Status helpers
   bool isStarted();

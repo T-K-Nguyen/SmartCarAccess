@@ -15,6 +15,7 @@
 #include <freertos/queue.h>
 
 #include "ble/ble_auth.h"
+#include "ble/ble.h"
 #include "ble/ble_rollout.h"
 #include "ble/pke_telemetry.h"
 #include "provisioning_phase.h"
@@ -961,7 +962,7 @@ namespace {
       
       // CRITICAL: Restart advertising so device can be discovered again
       Serial.println("[AUTH] Restarting BLE advertising...");
-      NimBLEDevice::startAdvertising();
+      BLEMod::restartAdvertising(true, "auth_disconnect");
       Serial.println("[AUTH] ✓ Advertising restarted - device is discoverable");
     }
   };
