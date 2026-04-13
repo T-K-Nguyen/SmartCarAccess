@@ -8,6 +8,7 @@ import 'package:smart_car_app/widgets/car_dialogs.dart';
 import 'package:smart_car_app/widgets/dashboard_widgets.dart';
 import 'package:smart_car_app/service/car_service.dart';
 import 'package:smart_car_app/service/ble_runtime_permissions.dart';
+import 'package:smart_car_app/service/doze_exemption_service.dart';
 import 'package:smart_car_app/service/initial_data_helper.dart';
 import 'package:smart_car_app/service/master_card_provisioning.dart';
 import 'package:flutter/services.dart';
@@ -27,13 +28,17 @@ class _DashboardState extends State<Dashboard> {
       MasterCardProvisioningService();
   final BleRuntimePermissionService _blePermissionService =
       BleRuntimePermissionService();
+  final DozeExemptionService _dozeExemptionService = DozeExemptionService();
 
   List<Map<String, dynamic>> _cars = [];
   List<Map<String, dynamic>> _digitalKeys = [];
   bool _isLoading = true;
   bool _permissionCheckRunning = false;
+  bool _dozeCheckRunning = false;
   bool _permissionWarningShown = false;
+  bool _dozeWarningShown = false;
   BleRuntimePermissionStatus? _blePermissionStatus;
+  DozeExemptionStatus? _dozeExemptionStatus;
   final Map<String, MasterCardPayload> _pendingVehicleProvision = {};
 
   @override
@@ -42,6 +47,7 @@ class _DashboardState extends State<Dashboard> {
     _loadData();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkBleRuntimePermissions(requestIfNeeded: true);
+      _checkDozeExemptionStatus(showWarning: true);
     });
     // Show sample data dialog after a short delay
     Future.delayed(const Duration(milliseconds: 500), () {
@@ -49,6 +55,36 @@ class _DashboardState extends State<Dashboard> {
         InitialDataHelper.addSampleDataIfNeeded(context);
       }
     });
+  }
+
+  Future<void> _checkDozeExemptionStatus({bool showWarning = false}) async {
+    if (_dozeCheckRunning) {
+      return;
+    }
+
+    _dozeCheckRunning = true;
+    try {
+      final status = await _dozeExemptionService.getStatus();
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _dozeExemptionStatus = status;
+      });
+
+      if (showWarning && status.needsExemption && !_dozeWarningShown) {
+        _dozeWarningShown = true;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(status.toUserMessage()),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } finally {
+      _dozeCheckRunning = false;
+    }
   }
 
   Future<void> _checkBleRuntimePermissions({
@@ -261,6 +297,10 @@ class _DashboardState extends State<Dashboard> {
             _buildBlePermissionWarningCard(),
             const SizedBox(height: 16),
           ],
+          if (_dozeExemptionStatus?.needsExemption == true) ...[
+            _buildDozeExemptionCard(),
+            const SizedBox(height: 16),
+          ],
           if (_currentIndex == 0) ...[
             _buildQuickStats(),
             const SizedBox(height: 24),
@@ -386,6 +426,92 @@ class _DashboardState extends State<Dashboard> {
                 onPressed: _blePermissionService.openSettings,
                 icon: const Icon(Icons.settings),
                 label: const Text('Open settings'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDozeExemptionCard() {
+    final status = _dozeExemptionStatus;
+    if (status == null || !status.needsExemption) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF41a5de).withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF41a5de).withOpacity(0.6)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.battery_alert_outlined, color: Color(0xFF273671)),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Battery optimization may block background unlock',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF273671),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            status.toUserMessage(),
+            style: const TextStyle(color: Color(0xFF273671)),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ElevatedButton.icon(
+                onPressed: () async {
+                  final launched = await _dozeExemptionService
+                      .requestExemption();
+                  if (!mounted) return;
+                  if (!launched) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Could not open doze exemption request.'),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                    return;
+                  }
+                  await Future.delayed(const Duration(milliseconds: 400));
+                  if (!mounted) return;
+                  await _checkDozeExemptionStatus();
+                },
+                icon: const Icon(Icons.battery_saver),
+                label: const Text('Request exemption'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF273671),
+                  foregroundColor: Colors.white,
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  await _dozeExemptionService.openBatteryOptimizationSettings();
+                },
+                icon: const Icon(Icons.tune),
+                label: const Text('Battery settings'),
+              ),
+              TextButton.icon(
+                onPressed: _checkDozeExemptionStatus,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Refresh status'),
               ),
             ],
           ),
