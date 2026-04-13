@@ -26,8 +26,8 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
   bool _isTestingPhaseB = false;
   bool _isScanningDevices = false;
 
-  PhaseA_Result? _phaseAResult;
-  PhaseB_Result? _phaseBResult;
+  PhaseAResult? _phaseAResult;
+  PhaseBResult? _phaseBResult;
 
   List<ScanResult> _scanResults = [];
   BluetoothDevice? _selectedDevice;
@@ -221,7 +221,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
             _addLog('   5. Send "p" to view provisioning status');
 
             setState(() {
-              _phaseAResult = PhaseA_Result(
+              _phaseAResult = PhaseAResult(
                 success: true,
                 message: 'HCE service ready; identity key in Keystore',
                 phonePublicKeyStored: true,
@@ -241,7 +241,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
       _addLog('');
       _addLog('❌ ERROR: $e');
       setState(() {
-        _phaseAResult = PhaseA_Result(
+        _phaseAResult = PhaseAResult(
           success: false,
           message: e.toString(),
           phonePublicKeyStored: false,
@@ -333,7 +333,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
       _addLog('Stack trace: ${stackTrace.toString().substring(0, 200)}...');
 
       setState(() {
-        _phaseBResult = PhaseB_Result(success: false, message: e.toString());
+        _phaseBResult = PhaseBResult(success: false, message: e.toString());
       });
     } finally {
       setState(() {

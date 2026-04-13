@@ -2,10 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../service/ble_phase_test.dart';
+import '../service/pke_auth_orchestrator.dart';
 import '../service/ble_runtime_permissions.dart';
 import '../service/gps_service.dart';
 
@@ -17,8 +17,6 @@ class LocationContent extends StatefulWidget {
 }
 
 class _LocationContentState extends State<LocationContent> {
-  static const _deviceAddressKey = 'location_ble_device_address';
-
   final BlePhaseTestService _bleService = BlePhaseTestService();
   final BleRuntimePermissionService _blePermissionService =
       BleRuntimePermissionService();
@@ -60,8 +58,8 @@ class _LocationContentState extends State<LocationContent> {
   }
 
   Future<void> _loadSavedDeviceAddress() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedAddress = prefs.getString(_deviceAddressKey) ?? '';
+    final savedAddress =
+        await PkeAuthOrchestrator.loadPreferredDeviceAddress() ?? '';
     if (!mounted) {
       _deviceAddressController.text = savedAddress;
       return;
@@ -86,9 +84,8 @@ class _LocationContentState extends State<LocationContent> {
   }
 
   Future<void> _saveDeviceAddress({bool showFeedback = true}) async {
-    final prefs = await SharedPreferences.getInstance();
     final deviceAddress = _deviceAddressController.text.trim();
-    await prefs.setString(_deviceAddressKey, deviceAddress);
+    await PkeAuthOrchestrator.savePreferredDeviceAddress(deviceAddress);
 
     if (showFeedback && mounted) {
       _showSnackBar('Saved ESP32 MAC address', Colors.green);
