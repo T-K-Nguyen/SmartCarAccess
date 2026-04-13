@@ -1,19 +1,21 @@
 import 'package:smart_car_app/screen/dashboard.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:smart_car_app/service/pke_background_service.dart';
 import 'package:smart_car_app/service/nfc_provisioning_service.dart';
 import 'package:smart_car_app/service/pke_rollout_flags.dart';
 
 // import 'package:firebase_auth/firebase_auth.dart';
 
-void main() async{
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // Initialize HCE MethodChannel handler early so background engines can query data fast
   await NfcProvisioningService.initialize(ownerIdHint: 'app');
-  await PkeRolloutFlagsService().ensureDefaults();
+  final rolloutFlags = await PkeRolloutFlagsService().ensureDefaults();
+  await PkeBackgroundService.ensureForRollout(rolloutFlags);
   await Firebase.initializeApp();
   // FirebaseAuth.instance.setLanguageCode('vi');
-  
+
   runApp(const MyApp());
 }
 
@@ -52,7 +54,7 @@ class MyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
         useMaterial3: true,
       ),
-      home: Dashboard()
+      home: Dashboard(),
     );
   }
 }
@@ -126,9 +128,7 @@ class _MyHomePageState extends State<MyHomePage> {
           // wireframe for each widget.
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
-            const Text(
-              'You have pushed the button this many times:',
-            ),
+            const Text('You have pushed the button this many times:'),
             Text(
               '$_counter',
               style: Theme.of(context).textTheme.headlineMedium,
