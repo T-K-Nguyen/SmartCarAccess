@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:smart_car_app/screen/login.dart';
 import 'package:smart_car_app/service/car_service.dart';
 import 'package:smart_car_app/service/nfc_provisioning_service.dart';
+import 'package:smart_car_app/theme/app_colors.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -46,7 +47,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
         }
       });
     } catch (e) {
-      print('Error loading user data: $e');
       if (mounted) {
         setState(() {
           _isLoading = false;
@@ -78,7 +78,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F5F5),
+      backgroundColor: AppColors.background,
       body: SingleChildScrollView(
         child: Column(
           children: [
@@ -95,11 +95,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return Container(
       width: double.infinity,
       decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF273671), Color(0xFF41a5de)],
-        ),
+        gradient: AppColors.primaryGradient,
         borderRadius: BorderRadius.only(
           bottomLeft: Radius.circular(30),
           bottomRight: Radius.circular(30),
@@ -189,7 +185,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             icon: Icons.directions_car,
             title: 'My Cars',
             value: _isLoading ? '...' : '$_carCount',
-            color: const Color(0xFF273671),
+            color: AppColors.primary,
           ),
         ),
         const SizedBox(width: 16),
@@ -198,7 +194,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             icon: Icons.vpn_key,
             title: 'Digital Keys',
             value: _isLoading ? '...' : '$_keyCount',
-            color: const Color(0xFF41a5de),
+            color: AppColors.secondary,
           ),
         ),
       ],
@@ -487,8 +483,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   void _testHceService() async {
-    print('=== HCE SERVICE TEST INITIATED ===');
-    
     try {
       // Check if NFC provisioning service is available
       final result = await NfcProvisioningService.testHceService();
@@ -500,8 +494,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
           duration: const Duration(seconds: 5),
         ),
       );
-      
-      print('HCE Test completed: $result');
       
       // Show detailed dialog
       showDialog(
@@ -537,7 +529,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
       
     } catch (e) {
-      print('HCE Test failed with error: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('HCE Test Error: $e'),
@@ -593,7 +584,6 @@ class _ProfileContentState extends State<ProfileContent> {
         }
       });
     } catch (e) {
-      print('Error loading user data: $e');
       if (mounted) {
         setState(() {
           _isLoading = false;
@@ -714,7 +704,7 @@ class _ProfileContentState extends State<ProfileContent> {
             icon: Icons.directions_car,
             title: 'My Cars',
             value: _isLoading ? '...' : '$_carCount',
-            color: const Color(0xFF273671),
+            color: AppColors.primary,
           ),
         ),
         const SizedBox(width: 16),
@@ -723,7 +713,7 @@ class _ProfileContentState extends State<ProfileContent> {
             icon: Icons.vpn_key,
             title: 'Digital Keys',
             value: _isLoading ? '...' : '$_keyCount',
-            color: const Color(0xFF41a5de),
+            color: AppColors.secondary,
           ),
         ),
       ],

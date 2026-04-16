@@ -29,7 +29,6 @@ typedef ProgressCallback = void Function(String step, String message);
 class BlePhaseTestService {
   // Method channels for Android Keystore integration
   static const _handshakeChannel = MethodChannel('smartcar/phaseb/handshake');
-  static const _keystoreChannel = MethodChannel('smartcar/keystore');
   // Phase B Authentication Service UUIDs
   static const String authServiceUUID = "0000aaaa-1234-5678-9abc-def012345678";
   static const String charCccRxUUID = "0000aac1-1234-5678-9abc-def012345678";
@@ -518,11 +517,7 @@ class BlePhaseTestService {
     return _TunnelFrame(ins: ins, sw1: sw1, sw2: sw2, data: data);
   }
 
-  /// Convert bytes to hex string
-  String _bytesToHex(Uint8List bytes) {
-    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
-  }
-}
+}  
 
 // ========== State Machines ==========
 
