@@ -12,6 +12,7 @@ import 'package:smart_car_app/widgets/key_components.dart';
 import 'package:smart_car_app/service/car_service.dart';
 import 'package:smart_car_app/service/initial_data_helper.dart';
 import 'package:smart_car_app/service/master_card_provisioning.dart';
+import 'package:smart_car_app/service/language_service.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:smart_car_app/theme/app_colors.dart';
@@ -29,6 +30,7 @@ class _DashboardState extends State<Dashboard> {
   final CarService _carService = CarService();
   final MasterCardProvisioningService _masterCardService =
       MasterCardProvisioningService();
+  late LanguageService _languageService;
 
   List<Map<String, dynamic>> _cars = [];
   List<Map<String, dynamic>> _digitalKeys = [];
@@ -39,6 +41,8 @@ class _DashboardState extends State<Dashboard> {
   @override
   void initState() {
     super.initState();
+    _languageService = LanguageService.instance;
+    _languageService.addListener(_onLanguageChanged);
     _loadData();
     // Show sample data dialog after a short delay
     Future.delayed(const Duration(milliseconds: 500), () {
@@ -46,6 +50,19 @@ class _DashboardState extends State<Dashboard> {
         InitialDataHelper.addSampleDataIfNeeded(context);
       }
     });
+  }
+
+  void _onLanguageChanged() {
+    print('Dashboard: Language changed, rebuilding UI'); // Debug log
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  @override
+  void dispose() {
+    _languageService.removeListener(_onLanguageChanged);
+    super.dispose();
   }
 
   void _loadData() {
@@ -88,7 +105,7 @@ class _DashboardState extends State<Dashboard> {
           setState(() {
             _isLoading = false;
           });
-          AppSnackBar.showError(context, 'Failed to load vehicles: $error');
+          AppSnackBar.showError(context, '${_languageService.translate('failed_to_load_vehicles')}: $error');
         }
       },
     ); // Listen to digital keys stream
@@ -102,7 +119,7 @@ class _DashboardState extends State<Dashboard> {
       },
       onError: (error) {
         if (mounted) {
-          AppSnackBar.showError(context, 'Failed to load digital keys: $error');
+          AppSnackBar.showError(context, '${_languageService.translate('failed_to_load_keys')}: $error');
         }
       },
     );
@@ -110,19 +127,19 @@ class _DashboardState extends State<Dashboard> {
 
   /// Helper method to format last sync time
   String _getLastSyncText() {
-    if (_lastSyncTime == null) return 'Loading...';
+    if (_lastSyncTime == null) return _languageService.translate('loading');
     
     final now = DateTime.now();
     final difference = now.difference(_lastSyncTime!);
     
     if (difference.inSeconds < 60) {
-      return 'Just now';
+      return _languageService.translate('just_now');
     } else if (difference.inMinutes < 60) {
-      return '${difference.inMinutes}m ago';
+      return '${difference.inMinutes}m ${_languageService.translate('ago')}';
     } else if (difference.inHours < 24) {
-      return '${difference.inHours}h ago';
+      return '${difference.inHours}h ${_languageService.translate('ago')}';
     } else {
-      return '${difference.inDays}d ago';
+      return '${difference.inDays}d ${_languageService.translate('ago')}';
     }
   }
 
@@ -139,12 +156,13 @@ class _DashboardState extends State<Dashboard> {
 
   @override
   Widget build(BuildContext context) {
+    print('Dashboard: Building UI, current language: ${_languageService.currentLanguage}');
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: _buildAppBar(),
       body: SafeArea(
         child: _currentIndex == 3
-            ? const ProfileContent()
+            ? ProfileScreen()
             : _currentIndex == 2
             ? const LocationContent()
             : _buildDashboardContent(),
@@ -170,16 +188,16 @@ class _DashboardState extends State<Dashboard> {
     String title = '';
     switch (_currentIndex) {
       case 0:
-        title = 'Home';
+        title = _languageService.translate('home');
         break;
       case 1:
-        title = 'Digital Keys';
+        title = _languageService.translate('digital_keys');
         break;
       case 2:
-        title = 'Location';
+        title = _languageService.translate('location');
         break;
       case 3:
-        title = 'Profile';
+        title = _languageService.translate('profile');
         break;
     }
 
@@ -198,7 +216,7 @@ class _DashboardState extends State<Dashboard> {
           ),
           if (_currentIndex == 0)
             Text(
-              'Updated ${_getLastSyncText()}',
+              '${_languageService.translate('updated')} ${_getLastSyncText()}',
               style: const TextStyle(
                 fontSize: 12,
                 color: AppColors.textSecondary,
@@ -287,7 +305,7 @@ class _DashboardState extends State<Dashboard> {
           children: [
             Expanded(
               child: StatCard(
-                title: 'Total Cars',
+                title: _languageService.translate('total_cars'),
                 value: '${_cars.length}',
                 icon: Icons.directions_car,
                 color: AppColors.primary,
@@ -296,7 +314,7 @@ class _DashboardState extends State<Dashboard> {
             const SizedBox(width: 16),
             Expanded(
               child: StatCard(
-                title: 'Active Keys',
+                title: _languageService.translate('active_keys'),
                 value:
                     '${_digitalKeys.where((k) => k['status'] == 'Active').length}',
                 icon: Icons.vpn_key,
@@ -310,7 +328,7 @@ class _DashboardState extends State<Dashboard> {
           children: [
             Expanded(
               child: StatCard(
-                title: 'Available',
+                title: _languageService.translate('available'),
                 value:
                     '${_cars.where((c) => c['keyStatus'] == 'Active').length}',
                 icon: Icons.check_circle,
@@ -320,8 +338,8 @@ class _DashboardState extends State<Dashboard> {
             const SizedBox(width: 16),
             Expanded(
               child: QuickActionCard(
-                title: 'Quick Actions',
-                subtitle: 'Control your vehicles',
+                title: _languageService.translate('quick_actions'),
+                subtitle: _languageService.translate('control_vehicles'),
                 icon: Icons.touch_app,
                 color: const Color(0xFF41a5de),
                 onTap: () {
@@ -341,9 +359,9 @@ class _DashboardState extends State<Dashboard> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'My Vehicles',
-          style: TextStyle(
+        Text(
+          _languageService.translate('my_vehicles'),
+          style: const TextStyle(
             fontSize: 20,
             fontWeight: FontWeight.bold,
             color: Color(0xFF273671),
@@ -392,7 +410,7 @@ class _DashboardState extends State<Dashboard> {
                           InitialDataHelper.addSampleDataIfNeeded(context);
                         },
                         icon: const Icon(Icons.auto_awesome),
-                        label: const Text('Add Sample Data'),
+                        label: Text(_languageService.translate('add_sample_data')),
                         style: OutlinedButton.styleFrom(
                           foregroundColor: const Color(0xFF273671),
                         ),
@@ -471,22 +489,15 @@ class _DashboardState extends State<Dashboard> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            const Expanded(
-              child: Text(
-                'Digital Keys',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF273671),
-                ),
-              ),
-            ),
-            ElevatedButton.icon(
+        // Add Key button only, no title
+        Align(
+          alignment: Alignment.centerRight,
+          child: SizedBox(
+            width: 200, // Make the button even narrower
+            child: ElevatedButton.icon(
               onPressed: _showAddDigitalKeyDialog,
               icon: const Icon(Icons.add),
-              label: const Text('Add Key'),
+              label: Text(_languageService.translate('add_key')),
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF273671),
                 foregroundColor: Colors.white,
@@ -495,7 +506,7 @@ class _DashboardState extends State<Dashboard> {
                 ),
               ),
             ),
-          ],
+          ),
         ),
         const SizedBox(height: 16),
         _digitalKeys.isEmpty
@@ -522,7 +533,7 @@ class _DashboardState extends State<Dashboard> {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        'No digital keys created yet',
+                        _languageService.translate('no_keys_created'),
                         style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.w500,
@@ -531,7 +542,7 @@ class _DashboardState extends State<Dashboard> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Create digital keys to share vehicle access',
+                        _languageService.translate('create_keys_description'),
                         style: TextStyle(fontSize: 14, color: Colors.grey[500]),
                       ),
                     ],
@@ -638,7 +649,7 @@ class _DashboardState extends State<Dashboard> {
           
           // Permissions header
           Text(
-            'Permissions (${permissions.length})',
+            '${_languageService.translate('permissions')} (${permissions.length})',
             style: const TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.bold,
@@ -667,7 +678,7 @@ class _DashboardState extends State<Dashboard> {
               ElevatedButton.icon(
                 onPressed: () => _showKeyDetails(key),
                 icon: const Icon(Icons.info_outline, size: 16),
-                label: const Text('Details', style: TextStyle(fontSize: 12)),
+                label: Text(_languageService.translate('details'), style: TextStyle(fontSize: 12)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.grey[200],
                   foregroundColor: AppColors.primary,
@@ -724,7 +735,7 @@ class _DashboardState extends State<Dashboard> {
                         Navigator.pop(ctx);
                       },
                       icon: const Icon(Icons.copy),
-                      label: const Text('Copy QR'),
+                      label: Text(_languageService.translate('copy_qr')),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -735,7 +746,7 @@ class _DashboardState extends State<Dashboard> {
                         Navigator.pop(ctx);
                       },
                       icon: const Icon(Icons.share),
-                      label: const Text('Share'),
+                      label: Text(_languageService.translate('share')),
                     ),
                   ),
                 ],
@@ -847,14 +858,23 @@ class _DashboardState extends State<Dashboard> {
       },
       selectedItemColor: const Color(0xFF273671),
       unselectedItemColor: Colors.grey,
-      items: const [
-        BottomNavigationBarItem(icon: Icon(Icons.home_outlined), label: 'Home'),
-        BottomNavigationBarItem(icon: Icon(Icons.vpn_key), label: 'Keys'),
+      items: [
         BottomNavigationBarItem(
-          icon: Icon(Icons.map_outlined),
-          label: 'Location',
+          icon: const Icon(Icons.home_outlined),
+          label: _languageService.translate('home'),
         ),
-        BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Profile'),
+        BottomNavigationBarItem(
+          icon: const Icon(Icons.vpn_key),
+          label: '', // Remove label as requested
+        ),
+        BottomNavigationBarItem(
+          icon: const Icon(Icons.map_outlined),
+          label: _languageService.translate('location'),
+        ),
+        BottomNavigationBarItem(
+          icon: const Icon(Icons.person),
+          label: _languageService.translate('profile'),
+        ),
       ],
     );
   }
@@ -1101,7 +1121,7 @@ class _DashboardState extends State<Dashboard> {
       } catch (e) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Failed to create digital key: $e'),
+            content: Text('${_languageService.translate('failed_create_key')}: $e'),
             backgroundColor: Colors.red,
           ),
         );

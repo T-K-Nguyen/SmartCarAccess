@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:smart_car_app/screen/login.dart';
 import 'package:smart_car_app/service/car_service.dart';
 import 'package:smart_car_app/service/nfc_provisioning_service.dart';
+import 'package:smart_car_app/service/language_service.dart';
 import 'package:smart_car_app/theme/app_colors.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -18,12 +19,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
   int _carCount = 0;
   int _keyCount = 0;
   bool _isLoading = true;
+  late LanguageService _languageService;
 
   @override
   void initState() {
     super.initState();
     currentUser = FirebaseAuth.instance.currentUser;
+    _languageService = LanguageService.instance;
+    // Listen to language changes and rebuild UI
+    _languageService.addListener(_onLanguageChanged);
     _loadUserData();
+  }
+
+  void _onLanguageChanged() {
+    print('Profile: Language changed, rebuilding UI'); // Debug log
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  @override
+  void dispose() {
+    _languageService.removeListener(_onLanguageChanged);
+    super.dispose();
   }
 
   Future<void> _loadUserData() async {
@@ -77,6 +95,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   @override
   Widget build(BuildContext context) {
+    print('Profile: Building UI, current language: ${_languageService.currentLanguage}');
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SingleChildScrollView(
@@ -183,7 +202,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         Expanded(
           child: _buildStatCard(
             icon: Icons.directions_car,
-            title: 'My Cars',
+            title: _languageService.translate('my_cars'),
             value: _isLoading ? '...' : '$_carCount',
             color: AppColors.primary,
           ),
@@ -192,7 +211,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         Expanded(
           child: _buildStatCard(
             icon: Icons.vpn_key,
-            title: 'Digital Keys',
+            title: _languageService.translate('digital_keys'),
             value: _isLoading ? '...' : '$_keyCount',
             color: AppColors.secondary,
           ),
@@ -262,18 +281,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
       children: [
         _buildMenuItem(
           icon: Icons.person_outline,
-          title: 'Edit Profile',
-          subtitle: 'Update your information',
+          title: _languageService.translate('edit_profile'),
+          subtitle: _languageService.translate('edit_profile_subtitle'),
           onTap: () {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Edit Profile - Coming Soon')),
+              SnackBar(content: Text(_languageService.translate('coming_soon'))),
             );
           },
         ),
         _buildMenuItem(
           icon: Icons.security,
-          title: 'Security',
-          subtitle: 'Password and authentication',
+          title: _languageService.translate('security'),
+          subtitle: _languageService.translate('security_subtitle'),
           onTap: () {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('Security Settings - Coming Soon')),
@@ -282,45 +301,45 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ),
         _buildMenuItem(
           icon: Icons.notifications,
-          title: 'Notifications',
-          subtitle: 'Push notifications and alerts',
+          title: _languageService.translate('notifications'),
+          subtitle: _languageService.translate('notifications_subtitle'),
           onTap: () {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Notification Settings - Coming Soon')),
+              SnackBar(content: Text(_languageService.translate('coming_soon'))),
             );
           },
         ),
         _buildMenuItem(
           icon: Icons.help_outline,
-          title: 'Help & Support',
-          subtitle: 'Get help and contact us',
+          title: _languageService.translate('help_support'),
+          subtitle: _languageService.translate('help_support_subtitle'),
           onTap: () {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Help & Support - Coming Soon')),
+              SnackBar(content: Text(_languageService.translate('coming_soon'))),
             );
           },
         ),
         _buildMenuItem(
           icon: Icons.nfc,
-          title: 'Test NFC HCE',
-          subtitle: 'Debug NFC Host Card Emulation service',
+          title: _languageService.translate('test_nfc'),
+          subtitle: _languageService.translate('test_nfc_subtitle'),
           onTap: () {
             _testHceService();
           },
         ),
         _buildMenuItem(
-          icon: Icons.info_outline,
-          title: 'About',
-          subtitle: 'App version and information',
+          icon: Icons.language,
+          title: _languageService.translate('language'),
+          subtitle: _languageService.translate('language_subtitle'),
           onTap: () {
-            _showAboutDialog();
+            _showLanguageDialog();
           },
         ),
         const SizedBox(height: 10),
         _buildMenuItem(
           icon: Icons.logout,
-          title: 'Sign Out',
-          subtitle: 'Sign out of your account',
+          title: _languageService.translate('sign_out'),
+          subtitle: _languageService.translate('sign_out_subtitle'),
           onTap: () => _showLogoutDialog(),
           isDestructive: true,
         ),
@@ -397,19 +416,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
-          title: const Text(
-            'Sign Out',
-            style: TextStyle(
+          title: Text(
+            _languageService.translate('sign_out'),
+            style: const TextStyle(
               fontWeight: FontWeight.bold,
               color: Color(0xFF273671),
             ),
           ),
-          content: const Text('Are you sure you want to sign out?'),
+          content: Text(_languageService.translate('confirm_sign_out')),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
               child: Text(
-                'Cancel',
+                _languageService.translate('cancel'),
                 style: TextStyle(color: Colors.grey[600]),
               ),
             ),
@@ -424,8 +443,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   borderRadius: BorderRadius.circular(8),
                 ),
               ),
-              child: const Text(
-                'Sign Out',
+              child: Text(
+                _languageService.translate('sign_out'),
                 style: TextStyle(color: Colors.white),
               ),
             ),
@@ -538,489 +557,101 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
     }
   }
-}
 
-// A content-only widget that can be embedded inside another Scaffold
-// (used by Dashboard when switching tabs). Keeps logout logic the same.
-class ProfileContent extends StatefulWidget {
-  const ProfileContent({super.key});
-
-  @override
-  State<ProfileContent> createState() => _ProfileContentState();
-}
-
-class _ProfileContentState extends State<ProfileContent> {
-  User? currentUser;
-  final CarService _carService = CarService();
-  int _carCount = 0;
-  int _keyCount = 0;
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    currentUser = FirebaseAuth.instance.currentUser;
-    _loadUserData();
-  }
-
-  Future<void> _loadUserData() async {
-    try {
-      // Load cars count
-      _carService.getUserCars().listen((cars) {
-        if (mounted) {
-          setState(() {
-            _carCount = cars.length;
-          });
-        }
-      });
-
-      // Load digital keys count
-      _carService.getUserDigitalKeys().listen((keys) {
-        if (mounted) {
-          setState(() {
-            _keyCount = keys.length;
-            _isLoading = false;
-          });
-        }
-      });
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _signOut(BuildContext context) async {
-    try {
-      await FirebaseAuth.instance.signOut();
-      if (mounted) {
-        Navigator.pushAndRemoveUntil(
-          context,
-          MaterialPageRoute(builder: (_) => const LogIn()),
-          (route) => false,
-        );
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error signing out: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          _buildProfileCard(),
-          const SizedBox(height: 20),
-          _buildStatsCards(),
-          const SizedBox(height: 20),
-          _buildMenuItems(),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildProfileCard() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF273671), Color(0xFF41a5de)],
-        ),
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 10,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          // Profile Avatar
-          Container(
-            width: 80,
-            height: 80,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(color: Colors.white, width: 3),
-            ),
-            child: CircleAvatar(
-              radius: 36,
-              backgroundColor: Colors.white,
-              backgroundImage: currentUser?.photoURL != null 
-                ? NetworkImage(currentUser!.photoURL!)
-                : null,
-              child: currentUser?.photoURL == null 
-                ? Icon(
-                    Icons.person,
-                    size: 40,
-                    color: Colors.grey[400],
-                  )
-                : null,
-            ),
-          ),
-          const SizedBox(height: 12),
-          // User Name
-          Text(
-            currentUser?.displayName ?? 'User Name',
-            style: const TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
-            ),
-          ),
-          const SizedBox(height: 4),
-          // User Email
-          Text(
-            currentUser?.email ?? 'user@example.com',
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.white.withOpacity(0.9),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatsCards() {
-    return Row(
-      children: [
-        Expanded(
-          child: _buildStatCard(
-            icon: Icons.directions_car,
-            title: 'My Cars',
-            value: _isLoading ? '...' : '$_carCount',
-            color: AppColors.primary,
-          ),
-        ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: _buildStatCard(
-            icon: Icons.vpn_key,
-            title: 'Digital Keys',
-            value: _isLoading ? '...' : '$_keyCount',
-            color: AppColors.secondary,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildStatCard({
-    required IconData icon,
-    required String title,
-    required String value,
-    required Color color,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: color.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(
-              icon,
-              color: color,
-              size: 20,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-              color: color,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            title,
-            style: TextStyle(
-              fontSize: 10,
-              color: Colors.grey[600],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMenuItems() {
-    return Column(
-      children: [
-        _buildMenuItem(
-          icon: Icons.person,
-          title: 'Edit Profile',
-          onTap: () {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Edit Profile - Coming Soon')),
-            );
-          },
-        ),
-        _buildMenuItem(
-          icon: Icons.security,
-          title: 'Security',
-          onTap: () {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Security Settings - Coming Soon')),
-            );
-          },
-        ),
-        _buildMenuItem(
-          icon: Icons.notifications,
-          title: 'Notifications',
-          onTap: () {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Notification Settings - Coming Soon')),
-            );
-          },
-        ),
-        _buildMenuItem(
-          icon: Icons.help,
-          title: 'Help & Support',
-          onTap: () {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Help & Support - Coming Soon')),
-            );
-          },
-        ),
-        _buildMenuItem(
-          icon: Icons.nfc,
-          title: 'Test NFC HCE',
-          onTap: () {
-            _testHceService();
-          },
-        ),
-        _buildMenuItem(
-          icon: Icons.logout,
-          title: 'Sign Out',
-          onTap: () => _showLogoutDialog(),
-          isDestructive: true,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildMenuItem({
-    required IconData icon,
-    required String title,
-    required VoidCallback onTap,
-    bool isDestructive = false,
-  }) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: ListTile(
-        onTap: onTap,
-        leading: Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(
-            color: isDestructive 
-              ? Colors.red.withOpacity(0.1)
-              : const Color(0xFF273671).withOpacity(0.1),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: Icon(
-            icon,
-            color: isDestructive ? Colors.red : const Color(0xFF273671),
-            size: 20,
-          ),
-        ),
-        title: Text(
-          title,
-          style: TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w600,
-            color: isDestructive ? Colors.red : const Color(0xFF273671),
-          ),
-        ),
-        trailing: Icon(
-          Icons.arrow_forward_ios,
-          size: 16,
-          color: Colors.grey[400],
-        ),
-      ),
-    );
-  }
-
-  void _showLogoutDialog() {
+  void _showLanguageDialog() {
+    String selectedLanguage = _languageService.currentLanguage;
+    
     showDialog(
       context: context,
       builder: (BuildContext context) {
-        return AlertDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          title: const Text(
-            'Sign Out',
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF273671),
-            ),
-          ),
-          content: const Text('Are you sure you want to sign out?'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text(
-                'Cancel',
-                style: TextStyle(color: Colors.grey[600]),
+        return StatefulBuilder(
+          builder: (BuildContext context, StateSetter setState) {
+            return AlertDialog(
+              backgroundColor: const Color(0xFFE8E8E8), // Darker version of app background
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
               ),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop(context);
-                _signOut(context);
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
+              title: Text(
+                _languageService.translate('language'),
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF273671),
+                  fontSize: 18,
                 ),
               ),
-              child: const Text(
-                'Sign Out',
-                style: TextStyle(color: Colors.white),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  RadioListTile<String>(
+                    title: const Text(
+                      'English',
+                      style: TextStyle(fontSize: 16),
+                    ),
+                    value: 'en',
+                    groupValue: selectedLanguage,
+                    onChanged: (String? value) {
+                      if (value != null) {
+                        setState(() {
+                          selectedLanguage = value;
+                        });
+                      }
+                    },
+                    activeColor: const Color(0xFF273671),
+                  ),
+                  RadioListTile<String>(
+                    title: const Text(
+                      'Tiếng Việt',
+                      style: TextStyle(fontSize: 16),
+                    ),
+                    value: 'vi',
+                    groupValue: selectedLanguage,
+                    onChanged: (String? value) {
+                      if (value != null) {
+                        setState(() {
+                          selectedLanguage = value;
+                        });
+                      }
+                    },
+                    activeColor: const Color(0xFF273671),
+                  ),
+                ],
               ),
-            ),
-          ],
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text(
+                    _languageService.translate('cancel'),
+                    style: TextStyle(color: Colors.grey[600]),
+                  ),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    print('Profile: Apply button pressed, selectedLanguage: $selectedLanguage, currentLanguage: ${_languageService.currentLanguage}');
+                    if (selectedLanguage != _languageService.currentLanguage) {
+                      print('Profile: Calling setLanguage with: $selectedLanguage');
+                      await _languageService.setLanguage(selectedLanguage);
+                      print('Profile: setLanguage completed');
+                      // Force rebuild entire app
+                      WidgetsBinding.instance.reassembleApplication();
+                      Navigator.pop(context);
+                    } else {
+                      print('Profile: Language not changed, same as current');
+                      Navigator.pop(context);
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF273671),
+                  ),
+                  child: Text(
+                    _languageService.translate('apply'),
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ),
+              ],
+            );
+          },
         );
       },
-    );
-  }
-
-  Future<void> _testHceService() async {
-    try {
-      // Show a dialog with loading and logs
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => _buildHceTestDialog(),
-      );
-
-      // Test HCE service
-      final service = NfcProvisioningService(ownerId: currentUser?.email ?? 'test@example.com');
-      
-      // Ensure keys exist
-      await service.ensureOwnerKeysExist();
-      
-      // Re-initialize to refresh cached data
-      await NfcProvisioningService.initialize(ownerIdHint: currentUser?.email ?? 'test@example.com');
-      
-      // Pop the dialog
-      if (mounted) Navigator.of(context).pop();
-      
-      // Show success
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ HCE Service initialized successfully! Your phone is ready for NFC provisioning.'),
-          backgroundColor: Colors.green,
-          duration: Duration(seconds: 5),
-        ),
-      );
-      
-    } catch (e) {
-      // Pop the dialog if still showing
-      if (mounted) Navigator.of(context).pop();
-      
-      // Show error
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('❌ HCE Test failed: $e'),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 5),
-        ),
-      );
-    }
-  }
-
-  Widget _buildHceTestDialog() {
-    return AlertDialog(
-      title: const Row(
-        children: [
-          Icon(Icons.nfc, color: Colors.blue),
-          SizedBox(width: 8),
-          Text('Testing HCE Service'),
-        ],
-      ),
-      content: const Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Initializing NFC Host Card Emulation...'),
-          SizedBox(height: 16),
-          Row(
-            children: [
-              SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-              SizedBox(width: 12),
-              Text('Setting up provisioning keys...'),
-            ],
-          ),
-          SizedBox(height: 8),
-          Row(
-            children: [
-              SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-              SizedBox(width: 12),
-              Text('Preparing HCE service...'),
-            ],
-          ),
-          SizedBox(height: 16),
-          Text(
-            'After this test completes, try tapping your phone to the ESP32 device.',
-            style: TextStyle(fontSize: 12, color: Colors.grey),
-          ),
-        ],
-      ),
     );
   }
 }
