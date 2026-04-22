@@ -13,6 +13,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <sys/time.h>
+#include <time.h>
+#include <errno.h>
 
 #include "ble/ble_auth.h"
 #include "ble/ble.h"
@@ -37,6 +40,11 @@ namespace {
   static constexpr uint8_t kInsAuth1       = 0x81;
   static constexpr uint8_t kInsExchange    = 0x82;
   static constexpr uint8_t kInsControlFlow = 0x83;
+  static constexpr uint8_t kExchangePayloadV1 = 0x01;
+  static constexpr uint8_t kExchangeFlagEpochPresent = 0x01;
+  static constexpr uint8_t kExchangeP1TimeSync = 0x10;
+  static constexpr int64_t kEpochMinValid = 1577836800LL; // 2020-01-01T00:00:00Z
+  static constexpr int64_t kEpochMaxValid = 4102444800LL; // 2100-01-01T00:00:00Z
 
   // SW status words
   static constexpr uint8_t kSw1Ok = 0x90;
@@ -99,6 +107,8 @@ namespace {
   uint8_t s_challenge[24]; // vehicleId(8) || nonce(16)
   uint8_t s_sig_buf[128];
   size_t s_sig_len = 0;
+  bool s_exchange_epoch_present = false;
+  int64_t s_exchange_epoch_seconds = 0;
 
   // Worker task
   TaskHandle_t s_authWorkerTask = nullptr;
@@ -240,12 +250,112 @@ namespace {
     memset(s_challenge, 0, sizeof(s_challenge));
     memset(s_sig_buf, 0, sizeof(s_sig_buf));
     s_sig_len = 0;
+    s_exchange_epoch_present = false;
+    s_exchange_epoch_seconds = 0;
     clear_latency_marks();
 
     // Clean up mbedTLS contexts
     mbedtls_ecp_group_free(&s_grp);
     mbedtls_mpi_free(&s_ephemeral_priv);
     mbedtls_ecp_point_free(&s_ephemeral_pub);
+  }
+
+  bool parse_exchange_auth_payload(const uint8_t* data,
+                                   size_t len,
+                                   uint8_t* out_sig,
+                                   size_t out_sig_cap,
+                                   size_t* out_sig_len,
+                                   bool* out_epoch_present,
+                                   int64_t* out_epoch_seconds) {
+    if (!data || len == 0 || !out_sig || !out_sig_len || !out_epoch_present || !out_epoch_seconds) {
+      return false;
+    }
+
+    // Backward-compatible path: legacy payload is raw DER signature bytes.
+    if (data[0] != kExchangePayloadV1) {
+      if (len > out_sig_cap) {
+        return false;
+      }
+      memcpy(out_sig, data, len);
+      *out_sig_len = len;
+      *out_epoch_present = false;
+      *out_epoch_seconds = 0;
+      return true;
+    }
+
+    if (len < 4) {
+      return false;
+    }
+
+    const uint8_t flags = data[1];
+    const uint16_t sig_len = static_cast<uint16_t>(data[2]) |
+                             (static_cast<uint16_t>(data[3]) << 8);
+    const size_t header_len = 4;
+    const size_t epoch_len = (flags & kExchangeFlagEpochPresent) ? 8 : 0;
+
+    if (sig_len == 0 || sig_len > out_sig_cap) {
+      return false;
+    }
+
+    const size_t required_len = header_len + sig_len + epoch_len;
+    if (len != required_len) {
+      return false;
+    }
+
+    memcpy(out_sig, data + header_len, sig_len);
+    *out_sig_len = sig_len;
+    *out_epoch_present = (flags & kExchangeFlagEpochPresent) != 0;
+    *out_epoch_seconds = 0;
+
+    if (*out_epoch_present) {
+      const uint8_t* epoch_ptr = data + header_len + sig_len;
+      int64_t epoch = 0;
+      for (size_t i = 0; i < 8; ++i) {
+        epoch = (epoch << 8) | static_cast<int64_t>(epoch_ptr[i]);
+      }
+      *out_epoch_seconds = epoch;
+    }
+
+    return true;
+  }
+
+  bool apply_epoch_time_sync_if_present() {
+    if (!s_exchange_epoch_present) {
+      return true;
+    }
+
+    const int64_t requested_epoch = s_exchange_epoch_seconds;
+    Serial.printf("[AUTH][TIME] requested_epoch=%lld\n", static_cast<long long>(requested_epoch));
+
+    if (requested_epoch < kEpochMinValid || requested_epoch > kEpochMaxValid) {
+      Serial.printf("[AUTH][TIME] reject_out_of_range min=%lld max=%lld\n",
+                    static_cast<long long>(kEpochMinValid),
+                    static_cast<long long>(kEpochMaxValid));
+      return false;
+    }
+
+    const time_t before = time(nullptr);
+    if (before > 0) {
+      const int64_t drift_seconds = requested_epoch - static_cast<int64_t>(before);
+      Serial.printf("[AUTH][TIME] current_epoch=%lld drift_seconds=%lld\n",
+                    static_cast<long long>(before),
+                    static_cast<long long>(drift_seconds));
+    } else {
+      Serial.println("[AUTH][TIME] current_epoch unavailable (rtc not set)");
+    }
+
+    timeval tv;
+    tv.tv_sec = static_cast<time_t>(requested_epoch);
+    tv.tv_usec = 0;
+    const int rc = settimeofday(&tv, nullptr);
+    if (rc != 0) {
+      Serial.printf("[AUTH][TIME] settimeofday_failed errno=%d\n", errno);
+      return false;
+    }
+
+    const time_t after = time(nullptr);
+    Serial.printf("[AUTH][TIME] settimeofday_ok new_epoch=%lld\n", static_cast<long long>(after));
+    return true;
   }
 
   bool generate_ephemeral_keypair() {
@@ -729,12 +839,22 @@ namespace {
           FSMIntegration::BLE::onExchangeReceived();
           // During standard auth flow, EXCHANGE carries challenge signature.
           if (s_authState == AUTH_CHALLENGE_READY) {
-            if (lc == 0 || lc > sizeof(s_sig_buf)) {
+            if (!parse_exchange_auth_payload(data,
+                                             lc,
+                                             s_sig_buf,
+                                             sizeof(s_sig_buf),
+                                             &s_sig_len,
+                                             &s_exchange_epoch_present,
+                                             &s_exchange_epoch_seconds)) {
               sendTunnelResponse(ins, kSw1WrongData, kSw2WrongData);
               break;
             }
-            memcpy(s_sig_buf, data, lc);
-            s_sig_len = lc;
+
+            if (s_exchange_epoch_present) {
+              Serial.printf("[AUTH][TIME] epoch bundled in auth response=%lld\n",
+                            static_cast<long long>(s_exchange_epoch_seconds));
+            }
+
             s_authState = AUTH_VERIFYING_RESPONSE;
             if (s_authWorkerTask) {
               xTaskNotifyGive(s_authWorkerTask);
@@ -742,11 +862,39 @@ namespace {
             break;
           }
 
-          // Post-auth secure channel EXCHANGE acknowledgement (time sync payload handling TODO).
+          // Post-auth secure channel EXCHANGE acknowledgement.
           if (!s_session_keys_ready) {
             sendTunnelResponse(ins, kSw1Conditions, kSw2Conditions);
             break;
           }
+
+          // Optional post-auth time sync refresh over EXCHANGE P1=0x10.
+          if (p1 == kExchangeP1TimeSync && lc > 0) {
+            size_t parsed_sig_len = 0;
+            bool epoch_present = false;
+            int64_t epoch_seconds = 0;
+            if (!parse_exchange_auth_payload(data,
+                                             lc,
+                                             s_sig_buf,
+                                             sizeof(s_sig_buf),
+                                             &parsed_sig_len,
+                                             &epoch_present,
+                                             &epoch_seconds)) {
+              sendTunnelResponse(ins, kSw1WrongData, kSw2WrongData);
+              break;
+            }
+
+            if (epoch_present) {
+              s_exchange_epoch_present = true;
+              s_exchange_epoch_seconds = epoch_seconds;
+              if (!apply_epoch_time_sync_if_present()) {
+                Serial.println("[AUTH][TIME] post-auth time sync ignored due to validation/apply failure");
+              }
+              s_exchange_epoch_present = false;
+              s_exchange_epoch_seconds = 0;
+            }
+          }
+
           sendTunnelResponse(ins, kSw1Ok, kSw2Ok);
           FSMIntegration::BLE::onExchangeResponseSent();
           break;
@@ -912,6 +1060,15 @@ namespace {
             s_auth_successes++;
             s_latency.t_auth_verified_ms = millis();
             s_latency.has_auth_verified = true;
+
+            if (s_exchange_epoch_present) {
+              if (!apply_epoch_time_sync_if_present()) {
+                Serial.println("[AUTH][TIME] bundled time sync ignored due to validation/apply failure");
+              }
+              s_exchange_epoch_present = false;
+              s_exchange_epoch_seconds = 0;
+            }
+
             PKETelemetry::emit(PKETelemetry::Event::AuthVerified);
             FSMIntegration::BLE::onAuthVerified();
             sendTunnelResponse(kInsExchange, kSw1Ok, kSw2Ok);

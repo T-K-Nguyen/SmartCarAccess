@@ -39,6 +39,13 @@ class PhaseBResult {
 
 class PkeAuthOrchestrator {
   static const _handshakeChannel = MethodChannel('smartcar/phaseb/handshake');
+  static const Duration _defaultScanTimeout = Duration(seconds: 6);
+  static const int _maxAuthAttempts = 3;
+  static const Duration _retryBaseDelay = Duration(milliseconds: 800);
+  static const Duration _maxRetryDelay = Duration(seconds: 5);
+  static const Duration _gatt133Cooldown = Duration(seconds: 2);
+  static const int _exchangePayloadV1 = 0x01;
+  static const int _exchangeFlagEpochPresent = 0x01;
 
   static const String authServiceUUID = '0000aaaa-1234-5678-9abc-def012345678';
   static const String charCccRxUUID = '0000aac1-1234-5678-9abc-def012345678';
@@ -87,17 +94,8 @@ class PkeAuthOrchestrator {
     Duration timeout = const Duration(seconds: 30),
     PkeAuthProgressCallback? onProgress,
   }) async {
-    final deviceAddress = await loadPreferredDeviceAddress();
-    if (deviceAddress == null) {
-      return PhaseBResult(
-        success: false,
-        message:
-            'No preferred BLE device configured. Save ESP32 MAC in Location screen first.',
-      );
-    }
-
     return authenticate(
-      deviceAddress: deviceAddress,
+      deviceAddress: await loadPreferredDeviceAddress() ?? '',
       timeout: timeout,
       onProgress: onProgress,
     );
@@ -111,33 +109,89 @@ class PkeAuthOrchestrator {
   }) async {
     debugPrint('=== Phase B Authentication ===');
     debugPrint('Target device: $deviceAddress');
-    _telemetry.startAttempt();
 
     void reportProgress(String step, String message) {
       debugPrint('[$step] $message');
       onProgress?.call(step, message);
     }
 
+    PhaseBResult? lastFailure;
+
+    for (int attempt = 1; attempt <= _maxAuthAttempts; attempt++) {
+      _telemetry.startAttempt();
+      reportProgress(
+        'Attempt $attempt/$_maxAuthAttempts',
+        'Starting authentication flow',
+      );
+
+      final result = await _authenticateSingleAttempt(
+        deviceAddress: deviceAddress,
+        device: device,
+        timeout: timeout,
+        reportProgress: reportProgress,
+      );
+
+      if (result.success) {
+        return result;
+      }
+
+      lastFailure = result;
+      final shouldRetry =
+          attempt < _maxAuthAttempts && _isTransientFailure(result.message);
+      if (!shouldRetry) {
+        break;
+      }
+
+      final delay = _computeRetryDelay(attempt, result.message);
+      reportProgress(
+        'Retry',
+        'Transient failure detected. Retrying in ${delay.inMilliseconds} ms...',
+      );
+      _telemetry.emit(
+        event: PkeTelemetryEvent.unlockDecision,
+        unlockDecision: 'deny',
+        details:
+            'auth_retry_scheduled_attempt_${attempt + 1}_delay_${delay.inMilliseconds}ms',
+      );
+
+      try {
+        await disconnect();
+      } catch (_) {}
+
+      await Future<void>.delayed(delay);
+    }
+
+    return lastFailure ??
+        PhaseBResult(
+          success: false,
+          message: 'Authentication failed: unknown error',
+        );
+  }
+
+  Future<PhaseBResult> _authenticateSingleAttempt({
+    required String deviceAddress,
+    BluetoothDevice? device,
+    required Duration timeout,
+    required void Function(String step, String message) reportProgress,
+  }) async {
     try {
       const int insAuth0 = 0x80;
       const int insAuth1 = 0x81;
       const int insExchange = 0x82;
       const int insControlFlow = 0x83;
 
-      reportProgress('Step 1', 'Connecting to BLE device...');
+      reportProgress('Step 1', 'Resolving BLE target...');
+      _device = await _resolveTargetDevice(
+        preferredDeviceAddress: deviceAddress,
+        providedDevice: device,
+        timeout: timeout,
+        onProgress: reportProgress,
+      );
 
-      if (device != null && device.isConnected) {
-        _device = device;
-      } else {
-        final devices = FlutterBluePlus.connectedDevices;
-        _device = devices.firstWhere(
-          (d) => d.remoteId.str.toUpperCase() == deviceAddress.toUpperCase(),
-          orElse: () => device ?? BluetoothDevice.fromId(deviceAddress),
-        );
-        if (_device!.isDisconnected) {
-          await _device!.connect(timeout: timeout);
-          await Future<void>.delayed(const Duration(milliseconds: 200));
-        }
+      reportProgress('Step 1', 'Connecting to BLE device...');
+      if (_device!.isDisconnected) {
+        await _device!.connect(timeout: timeout);
+        await Future<void>.delayed(const Duration(milliseconds: 200));
       }
       reportProgress('Step 1', 'Connected to ${_device!.platformName}');
       _telemetry.emit(
@@ -345,7 +399,14 @@ class PkeAuthOrchestrator {
       final challengeSignature = Uint8List.fromList(
         List<int>.from(challengeSigResult),
       );
-      await _sendApdu(ins: insExchange, p1: 0x00, data: challengeSignature);
+      final challengeExchangePayload = _buildChallengeExchangePayload(
+        challengeSignature,
+      );
+      await _sendApdu(
+        ins: insExchange,
+        p1: 0x00,
+        data: challengeExchangePayload,
+      );
       await exchangeAckCompleter.future.timeout(const Duration(seconds: 10));
       reportProgress('Step 10', 'EXCHANGE signature accepted');
       String? challengeVehicleIdHex;
@@ -400,6 +461,190 @@ class PkeAuthOrchestrator {
     } finally {
       await _cccTxSubscription?.cancel();
     }
+  }
+
+  bool _isTransientFailure(String message) {
+    final normalized = message.toLowerCase();
+
+    if (normalized.contains('payload too large')) {
+      return false;
+    }
+
+    const transientHints = <String>[
+      'gatt',
+      '133',
+      'timeout',
+      'timed out',
+      'connection',
+      'disconnected',
+      'discover services',
+      'service not found',
+      'characteristic',
+      'no ble device advertising',
+      'auth service not found',
+      'scan',
+    ];
+
+    for (final hint in transientHints) {
+      if (normalized.contains(hint)) {
+        return true;
+      }
+    }
+
+    // Unknown failures get bounded retries as a safe default.
+    return true;
+  }
+
+  Duration _computeRetryDelay(int attempt, String failureMessage) {
+    int delayMs = _retryBaseDelay.inMilliseconds * (1 << (attempt - 1));
+    if (delayMs > _maxRetryDelay.inMilliseconds) {
+      delayMs = _maxRetryDelay.inMilliseconds;
+    }
+    if (_isGatt133Failure(failureMessage) &&
+        delayMs < _gatt133Cooldown.inMilliseconds) {
+      delayMs = _gatt133Cooldown.inMilliseconds;
+    }
+    return Duration(milliseconds: delayMs);
+  }
+
+  bool _isGatt133Failure(String message) {
+    final normalized = message.toLowerCase();
+    return normalized.contains('133') &&
+        (normalized.contains('gatt') ||
+            normalized.contains('status') ||
+            normalized.contains('connect'));
+  }
+
+  Uint8List _buildChallengeExchangePayload(Uint8List challengeSignature) {
+    final epochSeconds = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+    final frame = BytesBuilder();
+    frame.addByte(_exchangePayloadV1);
+    frame.addByte(_exchangeFlagEpochPresent);
+    frame.addByte(challengeSignature.length & 0xFF);
+    frame.addByte((challengeSignature.length >> 8) & 0xFF);
+    frame.add(challengeSignature);
+    frame.add(_int64ToBigEndian(epochSeconds));
+    return frame.toBytes();
+  }
+
+  Uint8List _int64ToBigEndian(int value) {
+    final data = ByteData(8);
+    data.setInt64(0, value, Endian.big);
+    return data.buffer.asUint8List();
+  }
+
+  Future<BluetoothDevice> _resolveTargetDevice({
+    required String preferredDeviceAddress,
+    BluetoothDevice? providedDevice,
+    required Duration timeout,
+    PkeAuthProgressCallback? onProgress,
+  }) async {
+    final preferred = preferredDeviceAddress.trim().toUpperCase();
+
+    if (providedDevice != null) {
+      return providedDevice;
+    }
+
+    if (preferred.isNotEmpty) {
+      final connected = FlutterBluePlus.connectedDevices;
+      for (final candidate in connected) {
+        if (candidate.remoteId.str.toUpperCase() == preferred) {
+          return candidate;
+        }
+      }
+    }
+
+    final scanTimeout = Duration(
+      seconds: timeout.inSeconds < _defaultScanTimeout.inSeconds
+          ? timeout.inSeconds
+          : _defaultScanTimeout.inSeconds,
+    );
+
+    onProgress?.call('Step 1', 'Scanning for CCC auth service...');
+    final candidates = await _scanForAuthCandidates(scanTimeout: scanTimeout);
+
+    if (candidates.isNotEmpty) {
+      if (preferred.isNotEmpty) {
+        for (final candidate in candidates) {
+          if (candidate.device.remoteId.str.toUpperCase() == preferred) {
+            return candidate.device;
+          }
+        }
+      }
+
+      ScanResult strongest = candidates.first;
+      for (int i = 1; i < candidates.length; i++) {
+        if (candidates[i].rssi > strongest.rssi) {
+          strongest = candidates[i];
+        }
+      }
+      return strongest.device;
+    }
+
+    if (preferred.isNotEmpty) {
+      onProgress?.call(
+        'Step 1',
+        'No scanned candidate matched; falling back to saved MAC target.',
+      );
+      return BluetoothDevice.fromId(preferredDeviceAddress);
+    }
+
+    throw Exception(
+      'No BLE device advertising CCC auth service was found. Save target MAC or keep ECU advertising.',
+    );
+  }
+
+  Future<List<ScanResult>> _scanForAuthCandidates({
+    required Duration scanTimeout,
+  }) async {
+    final Map<String, ScanResult> bestByRemoteId = {};
+    StreamSubscription<List<ScanResult>>? subscription;
+
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+
+    try {
+      subscription = FlutterBluePlus.scanResults.listen((results) {
+        for (final result in results) {
+          if (!_isAuthServiceCandidate(result)) {
+            continue;
+          }
+
+          final key = result.device.remoteId.str.toUpperCase();
+          final previous = bestByRemoteId[key];
+          if (previous == null || result.rssi > previous.rssi) {
+            bestByRemoteId[key] = result;
+          }
+        }
+      });
+
+      await FlutterBluePlus.startScan(
+        timeout: scanTimeout,
+        withServices: [Guid(authServiceUUID)],
+      );
+      await Future<void>.delayed(
+        scanTimeout + const Duration(milliseconds: 250),
+      );
+    } finally {
+      await subscription?.cancel();
+      try {
+        await FlutterBluePlus.stopScan();
+      } catch (_) {}
+    }
+
+    final candidates = bestByRemoteId.values.toList();
+    candidates.sort((a, b) => b.rssi.compareTo(a.rssi));
+    return candidates;
+  }
+
+  bool _isAuthServiceCandidate(ScanResult result) {
+    for (final serviceUuid in result.advertisementData.serviceUuids) {
+      if (serviceUuid.toString().toLowerCase() == authServiceUUID) {
+        return true;
+      }
+    }
+    return false;
   }
 
   Future<void> disconnect() async {

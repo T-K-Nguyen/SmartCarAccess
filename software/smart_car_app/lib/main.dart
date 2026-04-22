@@ -9,11 +9,18 @@ import 'package:smart_car_app/service/pke_rollout_flags.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  debugPrint('[PKE][APP] main() starting');
   // Initialize HCE MethodChannel handler early so background engines can query data fast
   await NfcProvisioningService.initialize(ownerIdHint: 'app');
+  debugPrint('[PKE][APP] HCE channel initialized');
   final rolloutFlags = await PkeRolloutFlagsService().ensureDefaults();
+  debugPrint(
+    '[PKE][APP] rollout flags background=${rolloutFlags.backgroundMode ? 1 : 0} fast_tx=${rolloutFlags.fastTransaction ? 1 : 0} bonding_enforce=${rolloutFlags.bondingEnforce ? 1 : 0}',
+  );
   await PkeBackgroundService.ensureForRollout(rolloutFlags);
+  debugPrint('[PKE][APP] background service ensureForRollout finished');
   await Firebase.initializeApp();
+  debugPrint('[PKE][APP] Firebase initialized');
   // FirebaseAuth.instance.setLanguageCode('vi');
 
   runApp(const MyApp());

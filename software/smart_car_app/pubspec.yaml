@@ -53,6 +53,8 @@ dependencies:
   flutter_background_service: ^5.1.0
   flutter_background_service_android: ^6.3.0
   flutter_local_notifications: ^17.2.4
+  phaseb_handshake_bridge:
+    path: packages/phaseb_handshake_bridge
 
 dev_dependencies:
   flutter_test:

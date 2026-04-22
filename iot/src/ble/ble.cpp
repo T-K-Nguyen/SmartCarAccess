@@ -291,23 +291,31 @@ namespace BLEMod {
     BLEAttestation::registerService(pServer);
 
     if (pServer->getServiceByUUID("9a9b9c9d-0000-4000-8000-9a9b9c9d0000")) Serial.println("[BLE] Admin service registered");
-    if (pServer->getServiceByUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000")) Serial.println("[BLE] Auth/Echo service registered");
+    if (pServer->getServiceByUUID("0000aaaa-1234-5678-9abc-def012345678")) Serial.println("[BLE] Auth service registered");
     if (pServer->getServiceByUUID("555a0001-00aa-1111-2222-333344445555")) Serial.println("[BLE] Attestation service registered");
 
     // Start the Auth service once after all characteristics are added
-    if (auto pAuth = pServer->getServiceByUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000")) {
+    if (auto pAuth = pServer->getServiceByUUID("0000aaaa-1234-5678-9abc-def012345678")) {
       pAuth->start();
     }
 
     // Advertising
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
-    NimBLEAdvertisementData advData; advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
+    
+    // 1. Build the primary packet (This MUST contain the UUID for background wake-up)
+    NimBLEAdvertisementData advData; 
+    advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
+    
+    // Add the UUID directly into the manual payload
+    advData.setCompleteServices(NimBLEUUID("0000aaaa-1234-5678-9abc-def012345678")); 
     pAdvertising->setAdvertisementData(advData);
-    NimBLEAdvertisementData scanResp; scanResp.setName(kDeviceName); pAdvertising->setScanResponseData(scanResp);
-    pAdvertising->addServiceUUID("d0d0d0d0-0000-4000-8000-d0d0d0d00000"); // Auth/Echo service UUID
-    pAdvertising->addServiceUUID("9a9b9c9d-0000-4000-8000-9a9b9c9d0000"); // Admin service UUID
-    pAdvertising->addServiceUUID("555a0001-00aa-1111-2222-333344445555"); // Attestation service UUID
 
+    // 2. Build the scan response (Contains the name to save space)
+    NimBLEAdvertisementData scanResp; 
+    scanResp.setName(kDeviceName); 
+    pAdvertising->setScanResponseData(scanResp);
+
+    // Start advertising
     restartAdvertising(true, "boot");
 
     Serial.printf("[BLE] Advertising started: %s\n", kDeviceName);

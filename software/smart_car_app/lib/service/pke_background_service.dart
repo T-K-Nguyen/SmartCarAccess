@@ -4,6 +4,7 @@ import 'dart:ui';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'nfc_provisioning_service.dart';
@@ -21,23 +22,28 @@ class PkeBackgroundService {
   static final FlutterBackgroundService _service = FlutterBackgroundService();
   static bool _configured = false;
 
+  static void _log(String message) {
+    debugPrint('[PKE][BG] $message');
+  }
+
   static Future<void> ensureForRollout(PkeRolloutFlags flags) async {
     if (!Platform.isAndroid) {
+      _log('ensureForRollout skipped on non-Android platform');
       return;
     }
 
     await _ensureConfigured();
 
     final running = await _service.isRunning();
-    if (flags.backgroundMode) {
-      if (!running) {
-        await _service.startService();
-      }
-      return;
-    }
+    _log(
+      'ensureForRollout backgroundMode=${flags.backgroundMode ? 1 : 0} running=${running ? 1 : 0}',
+    );
 
-    if (running) {
-      _service.invoke('stopService');
+    if (!running) {
+      _log('starting foreground background-service');
+      await _service.startService();
+    } else {
+      _log('background-service already running');
     }
   }
 
@@ -54,6 +60,7 @@ class PkeBackgroundService {
 
   static Future<void> triggerAuthOnce({String? deviceAddress}) async {
     if (!Platform.isAndroid) {
+      _log('triggerAuthOnce skipped on non-Android platform');
       return;
     }
 
@@ -64,9 +71,11 @@ class PkeBackgroundService {
 
     final running = await _service.isRunning();
     if (!running) {
+      _log('triggerAuthOnce starting service before invoking auth');
       await _service.startService();
     }
 
+    _log('triggerAuthOnce invoked deviceAddress=${deviceAddress ?? 'auto'}');
     _service.invoke('runAuthOnce', {
       if (deviceAddress != null) 'deviceAddress': deviceAddress,
     });
@@ -74,9 +83,11 @@ class PkeBackgroundService {
 
   static Future<void> _ensureConfigured() async {
     if (_configured) {
+      _log('background service already configured');
       return;
     }
 
+    _log('configuring background service and notification channel');
     await _createNotificationChannel();
 
     await _service.configure(
@@ -85,6 +96,10 @@ class PkeBackgroundService {
         autoStart: false,
         autoStartOnBoot: false,
         isForegroundMode: true,
+        foregroundServiceTypes: <AndroidForegroundType>[
+          AndroidForegroundType.location,
+          AndroidForegroundType.connectedDevice,
+        ],
         notificationChannelId: _channelId,
         initialNotificationTitle: 'Smart Car Background Runtime',
         initialNotificationContent: 'Preparing background orchestration',
@@ -98,6 +113,7 @@ class PkeBackgroundService {
     );
 
     _configured = true;
+    _log('background service configured');
   }
 
   static Future<void> _createNotificationChannel() async {
@@ -128,18 +144,33 @@ Future<bool> onIosBackground(ServiceInstance service) async {
 
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
+  const Duration scanTimeout = Duration(seconds: 4);
+  const Duration scanTick = Duration(seconds: 8);
+  const Duration retryBase = Duration(seconds: 2);
+  const Duration retryMax = Duration(seconds: 20);
+
   WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
+
+  debugPrint('[PKE][BG] onStart entered');
 
   await NfcProvisioningService.initialize(ownerIdHint: 'background');
 
   final telemetry = PkeTelemetry(source: 'app_bg');
   final authOrchestrator = PkeAuthOrchestrator(telemetry: telemetry);
   var authInFlight = false;
+  var scanInFlight = false;
+  var consecutiveAuthFailures = 0;
+  DateTime nextAllowedAuthAt = DateTime.fromMillisecondsSinceEpoch(0);
+  StreamSubscription<List<ScanResult>>? scanSubscription;
   telemetry.startAttempt();
   telemetry.emit(
     event: PkeTelemetryEvent.scanWake,
     details: 'background_service_started',
+  );
+  debugPrint('[PKE][BG] background isolate initialized');
+  debugPrint(
+    '[PKE][BG] scanTimeout=${scanTimeout.inSeconds}s scanTick=${scanTick.inSeconds}s retryBase=${retryBase.inSeconds}s retryMax=${retryMax.inSeconds}s',
   );
 
   if (service is AndroidServiceInstance) {
@@ -151,10 +182,64 @@ void onStart(ServiceInstance service) async {
   }
 
   Timer? heartbeat;
+  Timer? scanLoop;
 
-  Future<void> runAuthOnce(String trigger, {String? deviceAddress}) async {
+  bool isAuthCooldownActive() {
+    return DateTime.now().isBefore(nextAllowedAuthAt);
+  }
+
+  Duration computeRetryDelay(int failureCount) {
+    int delayMs = retryBase.inMilliseconds;
+    for (int i = 1; i < failureCount; i++) {
+      delayMs *= 2;
+      if (delayMs >= retryMax.inMilliseconds) {
+        delayMs = retryMax.inMilliseconds;
+        break;
+      }
+    }
+    if (delayMs > retryMax.inMilliseconds) {
+      delayMs = retryMax.inMilliseconds;
+    }
+    return Duration(milliseconds: delayMs);
+  }
+
+  void scheduleRetryBackoff() {
+    consecutiveAuthFailures++;
+    final delay = computeRetryDelay(consecutiveAuthFailures);
+    nextAllowedAuthAt = DateTime.now().add(delay);
+    telemetry.emit(
+      event: PkeTelemetryEvent.scanWake,
+      details:
+          'background_retry_backoff_${delay.inMilliseconds}ms_failures_$consecutiveAuthFailures',
+    );
+  }
+
+  void resetRetryBackoff() {
+    consecutiveAuthFailures = 0;
+    nextAllowedAuthAt = DateTime.fromMillisecondsSinceEpoch(0);
+  }
+
+  Future<bool> runAuthOnce(
+    String trigger, {
+    String? deviceAddress,
+    BluetoothDevice? discoveredDevice,
+  }) async {
+    debugPrint(
+      '[PKE][BG] runAuthOnce trigger=$trigger deviceAddress=${deviceAddress ?? 'auto'} discovered=${discoveredDevice != null ? 1 : 0}',
+    );
+
     if (authInFlight) {
-      return;
+      debugPrint('[PKE][BG] auth already in flight, ignoring trigger=$trigger');
+      return false;
+    }
+
+    if (isAuthCooldownActive()) {
+      debugPrint('[PKE][BG] auth cooldown active, ignoring trigger=$trigger');
+      telemetry.emit(
+        event: PkeTelemetryEvent.scanWake,
+        details: 'background_auth_cooldown_active_$trigger',
+      );
+      return false;
     }
 
     authInFlight = true;
@@ -168,14 +253,6 @@ void onStart(ServiceInstance service) async {
           ? override
           : await PkeAuthOrchestrator.loadPreferredDeviceAddress();
 
-      if (target == null || target.isEmpty) {
-        telemetry.emit(
-          event: PkeTelemetryEvent.scanWake,
-          details: 'background_auth_skipped_no_target',
-        );
-        return;
-      }
-
       telemetry.startAttempt();
       telemetry.emit(
         event: PkeTelemetryEvent.scanWake,
@@ -183,37 +260,136 @@ void onStart(ServiceInstance service) async {
       );
 
       final result = await authOrchestrator.authenticate(
-        deviceAddress: target,
+        deviceAddress: target ?? '',
+        device: discoveredDevice,
         timeout: const Duration(seconds: 25),
       );
 
+      debugPrint(
+        '[PKE][BG] auth result trigger=$trigger success=${result.success ? 1 : 0} message=${result.message}',
+      );
+
       if (result.success) {
+        resetRetryBackoff();
         telemetry.emit(
           event: PkeTelemetryEvent.unlockDecision,
           unlockDecision: 'allow',
           details: 'background_auth_success',
         );
+        return true;
       } else {
+        scheduleRetryBackoff();
         telemetry.emit(
           event: PkeTelemetryEvent.unlockDecision,
           unlockDecision: 'deny',
           details: 'background_auth_failed',
         );
+        return false;
       }
     } catch (_) {
+      debugPrint('[PKE][BG] auth exception trigger=$trigger');
+      scheduleRetryBackoff();
       telemetry.emit(
         event: PkeTelemetryEvent.unlockDecision,
         unlockDecision: 'deny',
         details: 'background_auth_exception',
       );
+      return false;
     } finally {
       await authOrchestrator.disconnect();
       authInFlight = false;
     }
   }
 
+  bool isCccAuthCandidate(ScanResult result) {
+    for (final serviceUuid in result.advertisementData.serviceUuids) {
+      if (serviceUuid.toString().toLowerCase() ==
+          PkeAuthOrchestrator.authServiceUUID.toLowerCase()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<void> handleScanMatch(ScanResult result) async {
+    if (authInFlight) {
+      debugPrint(
+        '[PKE][BG] scan match ignored because auth is already running',
+      );
+      return;
+    }
+
+    if (isAuthCooldownActive()) {
+      debugPrint('[PKE][BG] scan match ignored because cooldown is active');
+      telemetry.emit(
+        event: PkeTelemetryEvent.scanWake,
+        details: 'background_scan_match_cooldown_active',
+      );
+      return;
+    }
+
+    scanInFlight = false;
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+
+    final remoteId = result.device.remoteId.str;
+    debugPrint(
+      '[PKE][BG] scan match remoteId=$remoteId rssi=${result.rssi} name=${result.device.platformName}',
+    );
+    telemetry.emit(
+      event: PkeTelemetryEvent.scanWake,
+      details: 'background_scan_match_$remoteId',
+      rssiDbm: result.rssi,
+    );
+
+    await runAuthOnce(
+      'scan_match',
+      deviceAddress: remoteId,
+      discoveredDevice: result.device,
+    );
+  }
+
+  Future<void> beginScanBurst() async {
+    if (scanInFlight || authInFlight || isAuthCooldownActive()) {
+      debugPrint(
+        '[PKE][BG] beginScanBurst skipped scanInFlight=${scanInFlight ? 1 : 0} authInFlight=${authInFlight ? 1 : 0} cooldown=${isAuthCooldownActive() ? 1 : 0}',
+      );
+      return;
+    }
+
+    scanInFlight = true;
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+
+    telemetry.emit(
+      event: PkeTelemetryEvent.scanWake,
+      details: 'background_scan_start',
+    );
+    debugPrint(
+      '[PKE][BG] starting scan burst timeout=${scanTimeout.inSeconds}s',
+    );
+
+    try {
+      await FlutterBluePlus.startScan(
+        timeout: scanTimeout,
+        withServices: [Guid(PkeAuthOrchestrator.authServiceUUID)],
+      );
+    } catch (_) {
+      debugPrint('[PKE][BG] startScan threw; scanInFlight reset');
+    } finally {
+      scanInFlight = false;
+      debugPrint('[PKE][BG] scan burst finished; scanInFlight reset');
+    }
+  }
+
   void stopService() {
+    debugPrint('[PKE][BG] stopService requested');
     heartbeat?.cancel();
+    scanLoop?.cancel();
+    unawaited(scanSubscription?.cancel());
+    unawaited(FlutterBluePlus.stopScan());
     unawaited(authOrchestrator.disconnect());
     telemetry.emit(
       event: PkeTelemetryEvent.unlockDecision,
@@ -233,6 +409,26 @@ void onStart(ServiceInstance service) async {
     runAuthOnce('invoke', deviceAddress: deviceAddress);
   });
 
+  scanSubscription = FlutterBluePlus.scanResults.listen((results) {
+    for (final result in results) {
+      if (!isCccAuthCandidate(result)) {
+        continue;
+      }
+      debugPrint(
+        '[PKE][BG] scan candidate remoteId=${result.device.remoteId.str} rssi=${result.rssi} services=${result.advertisementData.serviceUuids.join(',')}',
+      );
+      unawaited(handleScanMatch(result));
+      break;
+    }
+  });
+
+  scanLoop = Timer.periodic(scanTick, (_) {
+    unawaited(beginScanBurst());
+  });
+
+  unawaited(beginScanBurst());
+  debugPrint('[PKE][BG] initial scan burst scheduled');
+
   heartbeat = Timer.periodic(const Duration(seconds: 20), (_) {
     final now = DateTime.now();
     if (service is AndroidServiceInstance) {
@@ -250,4 +446,5 @@ void onStart(ServiceInstance service) async {
   });
 
   unawaited(runAuthOnce('startup'));
+  debugPrint('[PKE][BG] startup auth scheduled');
 }
