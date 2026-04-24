@@ -570,6 +570,9 @@ namespace {
         uint16_t certLen = 0;
         const uint8_t* cert = nullptr;
         bool hasPub = false;
+        bool hasFastArtifact = false;
+        uint8_t fastArtifactVersion = 0;
+        uint8_t fastArtifactKey[32] = {0};
     };
 
     bool parseBaseResponse(const uint8_t* data, int dataLen, BaseInfo& out) {
@@ -585,11 +588,39 @@ namespace {
         if (idx + certLen > dataLen) return false;
         const uint8_t* cert = data + idx;
 
+        // Optional extension TLVs after cert payload:
+        // - 0x90 len=1  => fast artifact version
+        // - 0x91 len=32 => fast artifact key
+        const int extOffset = idx + certLen;
+        const int extLen = dataLen - extOffset;
+        bool hasFastArtifact = false;
+        uint8_t fastArtifactVersion = 0;
+        uint8_t fastArtifactKey[32] = {0};
+        if (extLen > 0) {
+            const uint8_t* ext = data + extOffset;
+            const uint8_t* versionTlv = nullptr;
+            int versionLen = 0;
+            const uint8_t* keyTlv = nullptr;
+            int keyLen = 0;
+            bool hasVersion = extractTlv(0x90, ext, extLen, &versionTlv, &versionLen) && versionLen == 1;
+            bool hasKey = extractTlv(0x91, ext, extLen, &keyTlv, &keyLen) && keyLen == 32;
+            if (hasVersion && hasKey) {
+                fastArtifactVersion = versionTlv[0];
+                memcpy(fastArtifactKey, keyTlv, 32);
+                hasFastArtifact = fastArtifactVersion != 0;
+            }
+        }
+
         out.keyIdLen = keyIdLen;
         out.pubKey65 = pubKey65;
         out.certLen = certLen;
         out.cert = cert;
         out.hasPub = (pubKey65[0] == 0x04);
+        out.hasFastArtifact = hasFastArtifact;
+        out.fastArtifactVersion = fastArtifactVersion;
+        if (hasFastArtifact) {
+            memcpy(out.fastArtifactKey, fastArtifactKey, 32);
+        }
         return true;
     }
 
@@ -709,6 +740,11 @@ namespace {
         } else {
             Serial.println("[PhaseA] cert: <none>");
         }
+        if (info.hasFastArtifact) {
+            Serial.printf("[PhaseA] fast artifact extension detected ver=%u\n", (unsigned)info.fastArtifactVersion);
+        } else {
+            Serial.println("[PhaseA] fast artifact extension: <none>");
+        }
 
         // Some phones drop RF after base response; let WRITE DATA handle reselection internally
         // instead of forcing a release here, which can increase stalls.
@@ -796,6 +832,11 @@ namespace {
             return false;
         }
         if (info.certLen > 0) ProvisioningPhase::storeCertChain(info.cert, info.certLen);
+        if (info.hasFastArtifact) {
+            if (!ProvisioningPhase::storeFastArtifact(info.fastArtifactVersion, info.fastArtifactKey)) {
+                Serial.println("[PhaseA] Warning: failed to persist fast artifact extension");
+            }
+        }
         Serial.println("[PhaseA] Provisioning data persisted (CCC mailbox owner slot)");
 
         // Notify app after local persist succeeds.

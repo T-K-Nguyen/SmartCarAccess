@@ -8,6 +8,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'gps_service.dart';
+import 'pke_rollout_flags.dart';
 import 'pke_telemetry.dart';
 
 const String kPkePreferredBleDeviceAddressKey = 'location_ble_device_address';
@@ -46,6 +47,7 @@ class PkeAuthOrchestrator {
   static const Duration _gatt133Cooldown = Duration(seconds: 2);
   static const int _exchangePayloadV1 = 0x01;
   static const int _exchangeFlagEpochPresent = 0x01;
+  static const int _fastAuthArtifactVersion = 0x01;
 
   static const String authServiceUUID = '0000aaaa-1234-5678-9abc-def012345678';
   static const String charCccRxUUID = '0000aac1-1234-5678-9abc-def012345678';
@@ -132,6 +134,15 @@ class PkeAuthOrchestrator {
       );
 
       if (result.success) {
+        // Enable fast transaction for subsequent attempts after first success
+        final rolloutService = PkeRolloutFlagsService();
+        final flags = await rolloutService.getFlags();
+        if (!flags.fastTransaction) {
+          await rolloutService.saveFlags(
+            flags.copyWith(fastTransaction: true),
+          );
+          debugPrint('[PKE] Fast transaction enabled for future attempts');
+        }
         return result;
       }
 
@@ -235,11 +246,11 @@ class PkeAuthOrchestrator {
       );
       reportProgress('Step 2', 'Found CCC RX/TX characteristics');
 
-      final auth0RespCompleter = Completer<Uint8List>();
-      final auth1CmdCompleter = Completer<Uint8List>();
-      final exchangeChallengeCompleter = Completer<Uint8List>();
-      final exchangeAckCompleter = Completer<void>();
-      final controlAckCompleter = Completer<void>();
+      var auth0RespCompleter = Completer<Uint8List>();
+      var auth1CmdCompleter = Completer<Uint8List>();
+      var exchangeChallengeCompleter = Completer<Uint8List>();
+      var exchangeAckCompleter = Completer<void>();
+      var controlAckCompleter = Completer<void>();
 
       _cccTxSubscription = _cCccTx!.lastValueStream.listen((value) {
         if (value.isEmpty) {
@@ -263,20 +274,28 @@ class PkeAuthOrchestrator {
           final err = Exception(
             'INS=0x${ins.toRadixString(16)} SW=${frame.sw1.toRadixString(16)}${frame.sw2.toRadixString(16)}',
           );
-          if (!auth0RespCompleter.isCompleted) {
-            auth0RespCompleter.completeError(err);
-          }
-          if (!auth1CmdCompleter.isCompleted) {
-            auth1CmdCompleter.completeError(err);
-          }
-          if (!exchangeChallengeCompleter.isCompleted) {
-            exchangeChallengeCompleter.completeError(err);
-          }
-          if (!exchangeAckCompleter.isCompleted) {
-            exchangeAckCompleter.completeError(err);
-          }
-          if (!controlAckCompleter.isCompleted) {
-            controlAckCompleter.completeError(err);
+          // Only complete the completer matching this instruction
+          switch (ins) {
+            case insAuth0:
+              if (!auth0RespCompleter.isCompleted) {
+                auth0RespCompleter.completeError(err);
+              }
+              break;
+            case insAuth1:
+              if (!auth1CmdCompleter.isCompleted) {
+                auth1CmdCompleter.completeError(err);
+              }
+              break;
+            case insExchange:
+              if (!exchangeAckCompleter.isCompleted) {
+                exchangeAckCompleter.completeError(err);
+              }
+              break;
+            case insControlFlow:
+              if (!controlAckCompleter.isCompleted) {
+                controlAckCompleter.completeError(err);
+              }
+              break;
           }
           return;
         }
@@ -314,82 +333,145 @@ class PkeAuthOrchestrator {
       await _cCccTx!.setNotifyValue(true);
       reportProgress('Step 3', 'CCC_TX notifications enabled');
 
-      reportProgress('Step 4', 'Sending AUTH0 (standard transaction)...');
-      await _sendApdu(ins: insAuth0, p1: 0x11, data: Uint8List(0));
+      final rolloutFlags = await PkeRolloutFlagsService().getFlags();
+      final tryFastPath = rolloutFlags.fastTransaction;
+      Uint8List auth0Data = Uint8List(0);
+      var fastPathAccepted = false;
 
-      final auth0Data = await auth0RespCompleter.future.timeout(
-        const Duration(seconds: 10),
-      );
-      if (auth0Data.length < 65) {
-        throw Exception('AUTH0 response too short: ${auth0Data.length}');
+      if (tryFastPath) {
+        reportProgress('Step 4', 'Sending AUTH0 (fast transaction, P1=0x01)...');
+        try {
+          await _sendApdu(
+            ins: insAuth0,
+            p1: 0x01,
+            data: Uint8List.fromList([_fastAuthArtifactVersion]),
+          );
+          auth0Data = await auth0RespCompleter.future.timeout(
+            const Duration(seconds: 10),
+          );
+
+          if (auth0Data.length == 24) {
+            fastPathAccepted = true;
+            _challenge = auth0Data;
+            reportProgress('Step 4', 'Fast AUTH0 accepted; challenge received');
+          } else if (auth0Data.length >= 65) {
+            reportProgress(
+              'Step 4',
+              'AUTH0 returned standard payload while fast path was requested',
+            );
+          } else {
+            throw Exception('AUTH0 response too short: ${auth0Data.length}');
+          }
+        } catch (e) {
+          if (!_isFastPathFallbackError(e.toString())) {
+            rethrow;
+          }
+
+          reportProgress(
+            'Step 4',
+            'Fast path unavailable on ECU; falling back to standard AUTH0',
+          );
+
+          // Reset completers for clean standard-path fallback in the same attempt.
+          auth0RespCompleter = Completer<Uint8List>();
+          auth1CmdCompleter = Completer<Uint8List>();
+          exchangeChallengeCompleter = Completer<Uint8List>();
+          exchangeAckCompleter = Completer<void>();
+          controlAckCompleter = Completer<void>();
+        }
       }
-      _ecuEphemeralPublicKey = auth0Data.sublist(0, 65);
+
+      if (!fastPathAccepted && auth0Data.isEmpty) {
+        reportProgress('Step 4', 'Sending AUTH0 (standard transaction)...');
+        await _sendApdu(ins: insAuth0, p1: 0x11, data: Uint8List(0));
+        auth0Data = await auth0RespCompleter.future.timeout(
+          const Duration(seconds: 10),
+        );
+      }
+
+      if (!fastPathAccepted) {
+        if (auth0Data.length < 65) {
+          throw Exception('AUTH0 response too short: ${auth0Data.length}');
+        }
+        _ecuEphemeralPublicKey = auth0Data.sublist(0, 65);
+      }
       reportProgress('Step 4', 'AUTH0 response received');
       _telemetry.emit(event: PkeTelemetryEvent.auth0Received);
 
-      try {
-        final auth1Cmd = await auth1CmdCompleter.future.timeout(
-          const Duration(seconds: 5),
-        );
-        if (auth1Cmd.length >= 65) {
-          _ecuEphemeralPublicKey = auth1Cmd.sublist(0, 65);
+      if (!fastPathAccepted) {
+        try {
+          final auth1Cmd = await auth1CmdCompleter.future.timeout(
+            const Duration(seconds: 5),
+          );
+          if (auth1Cmd.length >= 65) {
+            _ecuEphemeralPublicKey = auth1Cmd.sublist(0, 65);
+          }
+          reportProgress('Step 5', 'AUTH1 payload received from ECU');
+        } catch (_) {
+          reportProgress(
+            'Step 5',
+            'AUTH1 payload not received, using AUTH0 ephemeral',
+          );
         }
-        reportProgress('Step 5', 'AUTH1 payload received from ECU');
-      } catch (_) {
-        reportProgress(
-          'Step 5',
-          'AUTH1 payload not received, using AUTH0 ephemeral',
+
+        reportProgress('Step 6', 'Generating phone ephemeral keypair...');
+        final keypairResult = await _handshakeChannel.invokeMethod(
+          'generateEphemeralKeypair',
         );
-      }
+        _phoneEphemeralPublicKey = Uint8List.fromList(
+          List<int>.from(keypairResult['publicKey']),
+        );
 
-      reportProgress('Step 6', 'Generating phone ephemeral keypair...');
-      final keypairResult = await _handshakeChannel.invokeMethod(
-        'generateEphemeralKeypair',
-      );
-      _phoneEphemeralPublicKey = Uint8List.fromList(
-        List<int>.from(keypairResult['publicKey']),
-      );
+        reportProgress('Step 7', 'Signing phone ephemeral with identity key...');
+        final signatureResult = await _handshakeChannel.invokeMethod(
+          'signEphemeralWithIdentity',
+          _phoneEphemeralPublicKey,
+        );
+        final signature = Uint8List.fromList(List<int>.from(signatureResult));
 
-      reportProgress('Step 7', 'Signing phone ephemeral with identity key...');
-      final signatureResult = await _handshakeChannel.invokeMethod(
-        'signEphemeralWithIdentity',
-        _phoneEphemeralPublicKey,
-      );
-      final signature = Uint8List.fromList(List<int>.from(signatureResult));
+        final handshakePacket = BytesBuilder();
+        handshakePacket.add(_phoneEphemeralPublicKey!);
+        handshakePacket.addByte(signature.length & 0xFF);
+        handshakePacket.addByte((signature.length >> 8) & 0xFF);
+        handshakePacket.add(signature);
 
-      final handshakePacket = BytesBuilder();
-      handshakePacket.add(_phoneEphemeralPublicKey!);
-      handshakePacket.addByte(signature.length & 0xFF);
-      handshakePacket.addByte((signature.length >> 8) & 0xFF);
-      handshakePacket.add(signature);
+        reportProgress('Step 8', 'Sending AUTH1 response...');
+        await _sendApdu(
+          ins: insAuth1,
+          p1: 0x00,
+          data: handshakePacket.toBytes(),
+        );
+        _telemetry.emit(event: PkeTelemetryEvent.auth1Sent);
 
-      reportProgress('Step 8', 'Sending AUTH1 response...');
-      await _sendApdu(ins: insAuth1, p1: 0x00, data: handshakePacket.toBytes());
-      _telemetry.emit(event: PkeTelemetryEvent.auth1Sent);
+        reportProgress('Step 9', 'Computing ECDH shared secret...');
+        final sharedSecretResult = await _handshakeChannel.invokeMethod(
+          'computeECDH',
+          {'ecuPublicKey': _ecuEphemeralPublicKey},
+        );
+        _sharedSecret = Uint8List.fromList(List<int>.from(sharedSecretResult));
 
-      reportProgress('Step 9', 'Computing ECDH shared secret...');
-      final sharedSecretResult = await _handshakeChannel.invokeMethod(
-        'computeECDH',
-        {'ecuPublicKey': _ecuEphemeralPublicKey},
-      );
-      _sharedSecret = Uint8List.fromList(List<int>.from(sharedSecretResult));
-
-      final keysResult = await _handshakeChannel
-          .invokeMethod('deriveSessionKeys', {
+        final keysResult = await _handshakeChannel.invokeMethod(
+          'deriveSessionKeys',
+          {
             'sharedSecret': _sharedSecret,
             'phoneEphemeralPub': _phoneEphemeralPublicKey,
             'ecuEphemeralPub': _ecuEphemeralPublicKey,
-          });
-      _sessionEncKey = Uint8List.fromList(List<int>.from(keysResult['encKey']));
-      _sessionMacKey = Uint8List.fromList(List<int>.from(keysResult['macKey']));
-      reportProgress('Step 9', 'Session keys derived');
+          },
+        );
+        _sessionEncKey = Uint8List.fromList(List<int>.from(keysResult['encKey']));
+        _sessionMacKey = Uint8List.fromList(List<int>.from(keysResult['macKey']));
+        reportProgress('Step 9', 'Session keys derived');
 
-      reportProgress('Step 10', 'Waiting for EXCHANGE challenge...');
-      _challenge = await exchangeChallengeCompleter.future.timeout(
-        const Duration(seconds: 12),
-      );
-      if (_challenge!.length != 24) {
-        throw Exception('Invalid challenge length: ${_challenge!.length}');
+        reportProgress('Step 10', 'Waiting for EXCHANGE challenge...');
+        _challenge = await exchangeChallengeCompleter.future.timeout(
+          const Duration(seconds: 12),
+        );
+      } else {
+        reportProgress('Step 6-9', 'Fast path active: skipping ECDH handshake');
+      }
+
+      if (_challenge == null || _challenge!.length != 24) {
+        throw Exception('Invalid challenge length: ${_challenge?.length ?? 0}');
       }
 
       final challengeSigResult = await _handshakeChannel.invokeMethod(
@@ -513,6 +595,16 @@ class PkeAuthOrchestrator {
         (normalized.contains('gatt') ||
             normalized.contains('status') ||
             normalized.contains('connect'));
+  }
+
+  bool _isFastPathFallbackError(String message) {
+    final normalized = message.toLowerCase();
+    if (!normalized.contains('ins=0x80')) {
+      return false;
+    }
+    return normalized.contains('sw=6a88') ||
+        normalized.contains('sw=6a81') ||
+        normalized.contains('sw=6a86');
   }
 
   Uint8List _buildChallengeExchangePayload(Uint8List challengeSignature) {

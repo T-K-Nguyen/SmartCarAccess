@@ -15,6 +15,12 @@ namespace ProvisioningPhase {
   // Persist optional certificate chain blob
   bool storeCertChain(const uint8_t* cert, size_t certLen);
 
+  // Persist versioned fast-path artifact generated during provisioning.
+  bool storeFastArtifact(uint8_t version, const uint8_t* key32);
+  bool hasFastArtifact();
+  bool getFastArtifact(uint8_t* outVersion, uint8_t outKey32[32]);
+  bool clearFastArtifact();
+
   // Owner provisioning helper: store phone pub, set slot 0, and generate tok_0.
   bool setOwnerProvisioned(const uint8_t* pub65, bool force);
 

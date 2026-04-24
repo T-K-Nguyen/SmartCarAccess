@@ -40,6 +40,8 @@ namespace {
   static constexpr uint8_t kInsAuth1       = 0x81;
   static constexpr uint8_t kInsExchange    = 0x82;
   static constexpr uint8_t kInsControlFlow = 0x83;
+  static constexpr uint8_t kAuth0P1Standard = 0x11;
+  static constexpr uint8_t kAuth0P1Fast = 0x01;
   static constexpr uint8_t kExchangePayloadV1 = 0x01;
   static constexpr uint8_t kExchangeFlagEpochPresent = 0x01;
   static constexpr uint8_t kExchangeP1TimeSync = 0x10;
@@ -53,6 +55,7 @@ namespace {
   static constexpr uint8_t kSw2WrongData = 0x80;
   static constexpr uint8_t kSw1WrongP1P2 = 0x6A;
   static constexpr uint8_t kSw2WrongP1P2 = 0x86;
+  static constexpr uint8_t kSw2NotFound = 0x88;
   static constexpr uint8_t kSw1Conditions = 0x69;
   static constexpr uint8_t kSw2Conditions = 0x85;
   static constexpr uint8_t kSw1Unsupported = 0x6A;
@@ -109,6 +112,8 @@ namespace {
   size_t s_sig_len = 0;
   bool s_exchange_epoch_present = false;
   int64_t s_exchange_epoch_seconds = 0;
+  bool s_fast_path_active = false;
+  uint8_t s_fast_artifact_version = 0;
 
   // Worker task
   TaskHandle_t s_authWorkerTask = nullptr;
@@ -252,12 +257,79 @@ namespace {
     s_sig_len = 0;
     s_exchange_epoch_present = false;
     s_exchange_epoch_seconds = 0;
+    s_fast_path_active = false;
+    s_fast_artifact_version = 0;
     clear_latency_marks();
 
     // Clean up mbedTLS contexts
     mbedtls_ecp_group_free(&s_grp);
     mbedtls_mpi_free(&s_ephemeral_priv);
     mbedtls_ecp_point_free(&s_ephemeral_pub);
+  }
+
+  void publish_auth_challenge(bool notifyExchange = true) {
+    const char* vid = CCCMailbox::vehicleId();
+    bool vidOk = vid && strlen(vid) == 8;
+    if (vidOk) {
+      memcpy(s_vehicle_id, vid, 8);
+    } else {
+      Serial.println("[AUTH] WARNING: CCC vehicleId missing; using random bytes");
+      for (int i = 0; i < 8; ++i) s_vehicle_id[i] = (uint8_t)esp_random();
+    }
+
+    for (int i = 0; i < 16; ++i) s_nonce[i] = (uint8_t)esp_random();
+    memcpy(s_challenge, s_vehicle_id, 8);
+    memcpy(s_challenge + 8, s_nonce, 16);
+    print_hex("VehicleId", s_vehicle_id, 8);
+    print_hex("Nonce", s_nonce, 16);
+    print_hex("Challenge", s_challenge, 24);
+
+    if (notifyExchange) {
+      sendTunnelResponse(kInsExchange, kSw1Ok, kSw2Ok, s_challenge, sizeof(s_challenge));
+      Serial.println("[AUTH] ✓ Challenge published over tunnel; awaiting EXCHANGE signature response");
+    }
+    s_authState = AUTH_CHALLENGE_READY;
+  }
+
+  bool derive_fast_session_keys(const uint8_t artifactKey[32], uint8_t artifactVersion) {
+    if (!artifactKey || artifactVersion == 0) return false;
+
+    uint8_t vehicleIdBytes[8] = {0};
+    const char* vid = CCCMailbox::vehicleId();
+    if (vid && strlen(vid) == 8) {
+      memcpy(vehicleIdBytes, vid, 8);
+    } else {
+      for (int i = 0; i < 8; ++i) vehicleIdBytes[i] = (uint8_t)esp_random();
+    }
+
+    uint8_t infoEnc[16 + 8 + 1];
+    size_t infoEncLen = 0;
+    const char* labelEnc = "SmartCarFast|ENC";
+    memset(infoEnc, 0, sizeof(infoEnc));
+    memcpy(infoEnc, labelEnc, strlen(labelEnc));
+    infoEncLen += 16;
+    memcpy(infoEnc + infoEncLen, vehicleIdBytes, 8);
+    infoEncLen += 8;
+    infoEnc[infoEncLen++] = artifactVersion;
+
+    uint8_t infoMac[16 + 8 + 1];
+    size_t infoMacLen = 0;
+    const char* labelMac = "SmartCarFast|MAC";
+    memset(infoMac, 0, sizeof(infoMac));
+    memcpy(infoMac, labelMac, strlen(labelMac));
+    infoMacLen += 16;
+    memcpy(infoMac + infoMacLen, vehicleIdBytes, 8);
+    infoMacLen += 8;
+    infoMac[infoMacLen++] = artifactVersion;
+
+    hkdf_sha256(nullptr, 0, artifactKey, 32, infoEnc, infoEncLen, s_session_key_enc, sizeof(s_session_key_enc));
+    hkdf_sha256(nullptr, 0, artifactKey, 32, infoMac, infoMacLen, s_session_key_mac, sizeof(s_session_key_mac));
+
+    s_session_keys_ready = true;
+    s_fast_path_active = true;
+    s_fast_artifact_version = artifactVersion;
+    Serial.printf("[AUTH][FAST] Session keys derived from fast artifact version=%u\n", (unsigned)artifactVersion);
+    return true;
   }
 
   bool parse_exchange_auth_payload(const uint8_t* data,
@@ -685,25 +757,7 @@ namespace {
     Serial.printf("[AUTH] Stats: Attempts=%u, Successes=%u, Failures=%u\n", 
                   s_auth_attempts, s_auth_successes, s_auth_failures);
 
-    // Prepare challenge: use CCC vehicleId and fresh nonce; publish via EXCHANGE frame.
-    const char* vid = CCCMailbox::vehicleId();
-    bool vidOk = vid && strlen(vid) == 8;
-    if (vidOk) {
-      memcpy(s_vehicle_id, vid, 8);
-    } else {
-      Serial.println("[AUTH] WARNING: CCC vehicleId missing; using random bytes");
-      for (int i = 0; i < 8; ++i) s_vehicle_id[i] = (uint8_t)esp_random();
-    }
-    for (int i = 0; i < 16; ++i) s_nonce[i] = (uint8_t)esp_random();
-    memcpy(s_challenge, s_vehicle_id, 8);
-    memcpy(s_challenge + 8, s_nonce, 16);
-    print_hex("VehicleId", s_vehicle_id, 8);
-    print_hex("Nonce", s_nonce, 16);
-    print_hex("Challenge", s_challenge, 24);
-
-    sendTunnelResponse(kInsExchange, kSw1Ok, kSw2Ok, s_challenge, sizeof(s_challenge));
-    Serial.println("[AUTH] ✓ Challenge published over tunnel; awaiting EXCHANGE signature response");
-    s_authState = AUTH_CHALLENGE_READY;
+    publish_auth_challenge();
     return true;
   }
 
@@ -778,14 +832,47 @@ namespace {
             Serial.println("[AUTH][SEC] Progressive mode: peer unbonded, allowing standard AUTH0");
           }
 
-          if (p1 == 0x01) {
-            if (flags.fastTransaction) {
-              Serial.println("[AUTH] Fast path requested but not yet implemented; fallback to standard P1=0x11");
+          if (p1 == kAuth0P1Fast) {
+            if (!flags.fastTransaction) {
+              Serial.println("[AUTH][FAST] Fast path requested while feature flag is disabled");
+              sendTunnelResponse(ins, kSw1Unsupported, kSw2Unsupported);
+              break;
             }
-            sendTunnelResponse(ins, kSw1Unsupported, kSw2Unsupported);
+            if (lc < 1) {
+              sendTunnelResponse(ins, kSw1WrongData, kSw2WrongData);
+              break;
+            }
+            const uint8_t requestedVersion = data[0];
+            uint8_t storedVersion = 0;
+            uint8_t storedArtifact[32] = {0};
+            if (!ProvisioningPhase::getFastArtifact(&storedVersion, storedArtifact)) {
+              Serial.println("[AUTH][FAST] Fast artifact missing on ECU");
+              sendTunnelResponse(ins, kSw1WrongData, kSw2NotFound);
+              break;
+            }
+            if (storedVersion != requestedVersion) {
+              Serial.printf("[AUTH][FAST] Artifact version mismatch requested=%u stored=%u\n",
+                            (unsigned)requestedVersion,
+                            (unsigned)storedVersion);
+              sendTunnelResponse(ins, kSw1WrongData, kSw2NotFound);
+              break;
+            }
+            if (!derive_fast_session_keys(storedArtifact, storedVersion)) {
+              sendTunnelResponse(ins, kSw1Internal, kSw2Internal);
+              break;
+            }
+
+            s_latency.t_auth1_tx_ms = millis();
+            s_latency.has_auth1_tx = true;
+            publish_auth_challenge(false);
+
+            // Fast AUTH0 response carries challenge directly; phone skips AUTH1/ECDH.
+            sendTunnelResponse(ins, kSw1Ok, kSw2Ok, s_challenge, sizeof(s_challenge));
+            FSMIntegration::BLE::onAuth0ResponseSent();
+            PKETelemetry::emit(PKETelemetry::Event::Auth1Sent);
             break;
           }
-          if (p1 != 0x11) {
+          if (p1 != kAuth0P1Standard) {
             sendTunnelResponse(ins, kSw1WrongP1P2, kSw2WrongP1P2);
             break;
           }
