@@ -6,6 +6,7 @@ import 'package:smart_car_app/screen/test_phase_ab.dart';
 import 'package:smart_car_app/screen/master_card_flow.dart';
 import 'package:smart_car_app/screen/settings.dart';
 import 'package:smart_car_app/screen/notifications.dart';
+import 'package:smart_car_app/screen/ai_test_harness_v2.dart';
 import 'package:smart_car_app/widgets/car_dialogs.dart';
 import 'package:smart_car_app/widgets/dashboard_widgets.dart';
 import 'package:smart_car_app/widgets/key_components.dart';
@@ -165,6 +166,8 @@ class _DashboardState extends State<Dashboard> {
             ? ProfileScreen()
             : _currentIndex == 2
             ? const LocationContent()
+            : _currentIndex == 4
+            ? const AITestHarnessV2()
             : _buildDashboardContent(),
       ),
       bottomNavigationBar: _buildBottomNavigationBar(),
@@ -198,6 +201,9 @@ class _DashboardState extends State<Dashboard> {
         break;
       case 3:
         title = _languageService.translate('profile');
+        break;
+      case 4:
+        title = 'AI Test Harness';
         break;
     }
 
@@ -874,6 +880,10 @@ class _DashboardState extends State<Dashboard> {
         BottomNavigationBarItem(
           icon: const Icon(Icons.person),
           label: _languageService.translate('profile'),
+        ),
+        BottomNavigationBarItem(
+          icon: const Icon(Icons.science),
+          label: 'Test',
         ),
       ],
     );

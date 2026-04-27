@@ -3,6 +3,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:smart_car_app/service/nfc_provisioning_service.dart';
 import 'package:smart_car_app/service/pke_rollout_flags.dart';
+import 'package:smart_car_app/service/push_notification_service.dart';
 import 'package:smart_car_app/theme/app_colors.dart';
 
 // import 'package:firebase_auth/firebase_auth.dart';
@@ -13,6 +14,8 @@ void main() async{
   await NfcProvisioningService.initialize(ownerIdHint: 'app');
   await PkeRolloutFlagsService().ensureDefaults();
   await Firebase.initializeApp();
+  // Initialize push notifications service
+  PushNotificationService.instance;
   // FirebaseAuth.instance.setLanguageCode('vi');
   
   runApp(const MyApp());

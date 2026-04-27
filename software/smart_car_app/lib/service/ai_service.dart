@@ -9,7 +9,7 @@ class AIService {
 
   /// Calculate time risk (0-1) based on hour of day
   static double _calculateTimeRisk(int hour) {
-    if ((hour >= 6 && hour < 9) || (hour >= 17 && hour < 22)) return 0.0;
+    if ((hour >= 6 && hour <= 9) || (hour >= 17 && hour <= 22)) return 0.0;
     return 1.0;
   }
 
@@ -22,22 +22,22 @@ class AIService {
 
   /// Calculate frequency risk (0-1) based on access count in last hour
   static double _calculateFrequencyRisk(int accessCount) {
-    if (accessCount <= 3) return 0.0;
-    if (accessCount <= 8) return 0.5;
+    if (accessCount <= 2) return 0.0;
+    if (accessCount <= 5) return 0.5;
     return 1.0;
   }
 
   /// Get severity level from risk score
   static String _getSeverityFromRisk(double risk) {
-    if (risk > 0.7) return 'high';
-    if (risk > 0.5) return 'medium';
+    if (risk >= 0.58) return 'high';
+    if (risk >= 0.28) return 'medium';
     return 'low';
   }
 
   /// Get action from risk score
   static String _getActionFromRisk(double risk) {
-    if (risk > 0.7) return 'BLOCK';
-    if (risk > 0.5) return 'CONFIRM';
+    if (risk >= 0.58) return 'BLOCK';
+    if (risk >= 0.28) return 'CONFIRM';
     return 'ALLOW';
   }
 
@@ -94,12 +94,12 @@ class AIService {
     final timeRisk = _calculateTimeRisk(input.hour);
     final locationRisk = _calculateLocationRisk(input.distanceFromUsual);
     final frequencyRisk = _calculateFrequencyRisk(input.accessCountLastHour);
-    final avgRisk = (timeRisk + locationRisk + frequencyRisk) / 3;
+    final avgRisk = (timeRisk * 0.3 + locationRisk * 0.3 + frequencyRisk * 0.4);
     final severity = _getSeverityFromRisk(avgRisk);
     final action = _getActionFromRisk(avgRisk);
     return '''Confirm this car access anomaly decision:
-Risks: time=$timeRisk, location=$locationRisk, freq=$frequencyRisk (avg=$avgRisk)
-Output only: {"is_anomalous":${avgRisk > 0.5 ? 'true' : 'false'},"confidence_score":${avgRisk.toStringAsFixed(2)},"reason":"${_getReasonFromRisk(avgRisk)}","severity":"$severity","action":"$action","should_notify":${avgRisk > 0.5 ? 'true' : 'false'}}''';
+Risks: time=$timeRisk(30%), location=$locationRisk(30%), freq=$frequencyRisk(40%) = $avgRisk
+Output only: {"is_anomalous":${avgRisk >= 0.28 ? 'true' : 'false'},"confidence_score":${avgRisk.toStringAsFixed(2)},"reason":"${_getReasonFromRisk(avgRisk)}","severity":"$severity","action":"$action","should_notify":${avgRisk >= 0.28 ? 'true' : 'false'}}''';
   }
 
   /// Fallback to rule-based anomaly detection (no AI calls)
@@ -107,17 +107,17 @@ Output only: {"is_anomalous":${avgRisk > 0.5 ? 'true' : 'false'},"confidence_sco
     final timeRisk = _calculateTimeRisk(input.hour);
     final locationRisk = _calculateLocationRisk(input.distanceFromUsual);
     final frequencyRisk = _calculateFrequencyRisk(input.accessCountLastHour);
-    final avgRisk = (timeRisk + locationRisk + frequencyRisk) / 3;
+    final avgRisk = (timeRisk * 0.3 + locationRisk * 0.3 + frequencyRisk * 0.4);
     final severity = _getSeverityFromRisk(avgRisk);
     final action = _getActionFromRisk(avgRisk);
 
     return AnomalyOutput(
-      isAnomalous: avgRisk > 0.5,
+      isAnomalous: avgRisk >= 0.28,
       confidenceScore: avgRisk,
       reason: 'rule-based evaluation (api unavailable)',
       severity: severity,
       action: action,
-      shouldNotify: avgRisk > 0.5,
+      shouldNotify: avgRisk >= 0.28,
     );
   }
 
