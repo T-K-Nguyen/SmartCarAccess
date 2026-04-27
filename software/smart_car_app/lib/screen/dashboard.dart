@@ -369,6 +369,14 @@ class _DashboardState extends State<Dashboard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (_blePermissionStatus?.isDegraded == true) ...[
+              _buildBlePermissionWarningCard(),
+              const SizedBox(height: 16),
+            ],
+            if (_dozeExemptionStatus?.needsExemption == true) ...[
+              _buildDozeExemptionCard(),
+              const SizedBox(height: 16),
+            ],
             if (_currentIndex == 0) ...[
               _buildQuickStats(),
               const SizedBox(height: 24),
@@ -376,25 +384,6 @@ class _DashboardState extends State<Dashboard> {
             ] else ...[
               _buildDigitalKeysSection(),
             ],
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (_blePermissionStatus?.isDegraded == true) ...[
-            _buildBlePermissionWarningCard(),
-            const SizedBox(height: 16),
-          ],
-          if (_dozeExemptionStatus?.needsExemption == true) ...[
-            _buildDozeExemptionCard(),
-            const SizedBox(height: 16),
-          ],
-          if (_currentIndex == 0) ...[
-            _buildQuickStats(),
-            const SizedBox(height: 24),
-            _buildMyVehicles(),
-          ] else ...[
-            _buildDigitalKeysSection(),
           ],
         ),
       ),
