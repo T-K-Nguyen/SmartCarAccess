@@ -23,8 +23,6 @@ class AnomalyDetectionService {
     // Calculate total anomaly score
     final totalScore = timeResult.confidence + locationResult.confidence;
     final isAnomalous = timeResult.isAnomalous || locationResult.isAnomalous;
-
-    // Determine overall severity level
     AnomalySeverity overallSeverity;
     if (totalScore >= 1.0) {
       overallSeverity = AnomalySeverity.high;
@@ -51,13 +49,8 @@ class AnomalyDetectionService {
 
   /// Analyze access event with AI scoring and return enriched decision
   Future<AnomalyEnrichedDecision> analyzeAccessEventWithAI(AccessEvent event) async {
-    // Step 1: Compute preprocessed features for AI
     final preprocessedInput = await _computePreprocessedFeatures(event);
-
-    // Step 2: Get AI evaluation (simplified - no AI-generated messages)
     final aiResult = await AnomalyScorer.evaluateAnomaly(preprocessedInput);
-
-    // Step 3: Create enriched decision (messages are hard-coded based on severity)
     final enrichedDecision = AnomalyEnrichedDecision(
       isAnomalous: aiResult.isAnomalous,
       confidenceScore: aiResult.confidenceScore,
@@ -67,19 +60,13 @@ class AnomalyDetectionService {
       shouldNotify: aiResult.shouldNotify,
       timestamp: DateTime.now(),
     );
-
-    // Step 4: Log the decision
     await _logEnrichedDecision(event, aiResult, enrichedDecision);
-
     return enrichedDecision;
   }
 
   /// Compute preprocessed features for AI scorer
   Future<AnomalyInput> _computePreprocessedFeatures(AccessEvent event) async {
-    // Calculate distance from usual locations
     final distanceFromUsual = await _calculateDistanceFromUsual(event);
-
-    // Count access_count_last_hour
     final accessCountLastHour = await _getAccessCountLastHour(event.userId, event.carId);
 
     return AnomalyInput(
@@ -162,8 +149,6 @@ class AnomalyDetectionService {
   }
 
   double _degreesToRadians(double degrees) => degrees * 3.141592653589793 / 180;
-
-  /// Log decision analysis results to Firestore (deprecated - use _logEnrichedDecision)
 
   /// Log analysis results to Firestore
   Future<void> _logAnalysis(
@@ -249,7 +234,7 @@ class AnomalyDetectionService {
     }
   }
 
-  /// Parse severity từ string
+  /// Parse severity from string
   AnomalySeverity _parseSeverity(String? severity) {
     switch (severity) {
       case 'AnomalySeverity.high':
@@ -311,8 +296,8 @@ class AnomalyEnrichedDecision {
   final bool isAnomalous;
   final double confidenceScore;
   final String reason;
-  final String severity; // low, medium, high
-  final String action; // ALLOW, CONFIRM, BLOCK
+  final String severity;
+  final String action;
   final bool shouldNotify;
   final DateTime timestamp;
 

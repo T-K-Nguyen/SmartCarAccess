@@ -22,7 +22,6 @@ class NotificationService {
           return '';
       }
     } else {
-      // English
       switch (severity) {
         case 'medium':
           return 'Confirm Access';
@@ -48,7 +47,6 @@ class NotificationService {
           return '';
       }
     } else {
-      // English
       switch (severity) {
         case 'medium':
           return 'Unusual access detected, please confirm';

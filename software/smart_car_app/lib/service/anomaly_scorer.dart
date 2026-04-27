@@ -66,8 +66,8 @@ class AnomalyOutput {
   final bool isAnomalous;
   final double confidenceScore;
   final String reason;
-  final String severity; // low, medium, high
-  final String action; // ALLOW, CONFIRM, BLOCK
+  final String severity;
+  final String action;
   final bool shouldNotify;
 
   AnomalyOutput({
