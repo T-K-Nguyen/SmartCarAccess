@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:smart_car_app/theme/app_colors.dart';
+import 'package:smart_car_app/widgets/location_components.dart';
 
 import '../service/ble_phase_test.dart';
 import '../service/pke_auth_orchestrator.dart';
@@ -88,14 +90,14 @@ class _LocationContentState extends State<LocationContent> {
     await PkeAuthOrchestrator.savePreferredDeviceAddress(deviceAddress);
 
     if (showFeedback && mounted) {
-      _showSnackBar('Saved ESP32 MAC address', Colors.green);
+      _showSnackBar('Saved ESP32 MAC address', AppColors.success);
     }
   }
 
   Future<void> _connectBle() async {
     final deviceAddress = _deviceAddressController.text.trim();
     if (deviceAddress.isEmpty) {
-      _showSnackBar('Enter ESP32 MAC address first', Colors.red);
+      _showSnackBar('Enter ESP32 MAC address first', AppColors.error);
       return;
     }
 
@@ -143,10 +145,8 @@ class _LocationContentState extends State<LocationContent> {
       });
 
       _showSnackBar(
-        result.success
-            ? 'BLE connected successfully'
-            : 'BLE authentication failed',
-        result.success ? Colors.green : Colors.red,
+        result.success ? 'BLE connected successfully' : 'BLE authentication failed',
+        result.success ? AppColors.success : AppColors.error,
       );
 
       if (result.success) {
@@ -162,7 +162,7 @@ class _LocationContentState extends State<LocationContent> {
         _bleStatus = 'BLE error';
         _statusMessage = 'BLE connection failed: $e';
       });
-      _showSnackBar('BLE connection failed: $e', Colors.red);
+      _showSnackBar('BLE connection failed: $e', AppColors.error);
     } finally {
       if (mounted) {
         setState(() {
@@ -200,7 +200,7 @@ class _LocationContentState extends State<LocationContent> {
           });
         }
         if (!silent) {
-          _showSnackBar('Location permission denied', Colors.red);
+          _showSnackBar('Location permission denied', AppColors.error);
         }
         return;
       }
@@ -216,7 +216,7 @@ class _LocationContentState extends State<LocationContent> {
           });
         }
         if (!silent) {
-          _showSnackBar('Failed to get GPS position', Colors.red);
+          _showSnackBar('Failed to get GPS position', AppColors.error);
         }
         return;
       }
@@ -294,7 +294,7 @@ class _LocationContentState extends State<LocationContent> {
         });
       }
       if (!silent) {
-        _showSnackBar('Location error: $e', Colors.red);
+        _showSnackBar('Location error: $e', AppColors.error);
       }
     } finally {
       if (mounted) {
@@ -308,7 +308,7 @@ class _LocationContentState extends State<LocationContent> {
   Future<void> _openInGoogleMaps() async {
     final position = _lastPosition;
     if (position == null) {
-      _showSnackBar('No location available yet', Colors.orange);
+      _showSnackBar('No location available yet', AppColors.warning);
       return;
     }
 
@@ -318,7 +318,7 @@ class _LocationContentState extends State<LocationContent> {
 
     final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!launched && mounted) {
-      _showSnackBar('Could not open Google Maps', Colors.red);
+      _showSnackBar('Could not open Google Maps', AppColors.error);
     }
   }
 
@@ -366,7 +366,7 @@ class _LocationContentState extends State<LocationContent> {
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFF273671), Color(0xFF41A5DE)],
+          colors: [AppColors.primary, AppColors.secondary],
         ),
         borderRadius: BorderRadius.circular(20),
       ),
@@ -443,6 +443,10 @@ class _LocationContentState extends State<LocationContent> {
                   onPressed: _isBusy ? null : _saveDeviceAddress,
                   icon: const Icon(Icons.save_outlined),
                   label: const Text('Save MAC'),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    side: const BorderSide(width: 1.5),
+                  ),
                 ),
               ),
               const SizedBox(width: 12),
@@ -452,8 +456,9 @@ class _LocationContentState extends State<LocationContent> {
                   icon: const Icon(Icons.bluetooth_searching),
                   label: const Text('Connect BLE'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF273671),
+                    backgroundColor: AppColors.primary,
                     foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
                   ),
                 ),
               ),
@@ -476,15 +481,30 @@ class _LocationContentState extends State<LocationContent> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            _address,
-            style: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF273671),
-            ),
+          // GPS Status Indicator
+          GpsStatusIndicator(
+            position: _lastPosition,
+            isConnected: _lastRefreshAt != null,
+            lastUpdate: _lastRefreshAt,
           ),
+          const SizedBox(height: 16),
+
+          // Location Satellite Card
+          LocationSatelliteCard(
+            position: _lastPosition,
+            address: _address,
+          ),
+          const SizedBox(height: 16),
+
+          // Accuracy Meter
+          AccuracyMeter(accuracyMeters: _lastPosition?.accuracy),
           const SizedBox(height: 12),
+
+          // Speed and Heading
+          SpeedAndHeadingCard(position: _lastPosition),
+          const SizedBox(height: 16),
+
+          // Detailed Location Info
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(16),
@@ -494,10 +514,12 @@ class _LocationContentState extends State<LocationContent> {
             ),
             child: Text(
               _locationInfo,
-              style: const TextStyle(fontFamily: 'monospace', height: 1.5),
+              style: const TextStyle(fontFamily: 'monospace', height: 1.5, fontSize: 11),
             ),
           ),
           const SizedBox(height: 12),
+
+          // Last Update Times
           Row(
             children: [
               Expanded(
@@ -528,6 +550,10 @@ class _LocationContentState extends State<LocationContent> {
             onPressed: _isBusy ? null : _refreshLocationAndSync,
             icon: const Icon(Icons.refresh),
             label: const Text('Refresh now'),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              side: const BorderSide(width: 1.5),
+            ),
           ),
         ),
         const SizedBox(width: 12),
@@ -535,10 +561,11 @@ class _LocationContentState extends State<LocationContent> {
           child: ElevatedButton.icon(
             onPressed: _openInGoogleMaps,
             icon: const Icon(Icons.map),
-            label: const Text('Open in Google Maps'),
+            label: const Text('Google Maps'),
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF41A5DE),
+              backgroundColor: const Color(0xFF41a5de),
               foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 14),
             ),
           ),
         ),

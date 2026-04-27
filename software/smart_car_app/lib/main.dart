@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:smart_car_app/service/pke_background_service.dart';
 import 'package:smart_car_app/service/nfc_provisioning_service.dart';
 import 'package:smart_car_app/service/pke_rollout_flags.dart';
+import 'package:smart_car_app/service/push_notification_service.dart';
+import 'package:smart_car_app/theme/app_colors.dart';
 
 // import 'package:firebase_auth/firebase_auth.dart';
 
@@ -20,6 +22,8 @@ void main() async {
   await PkeBackgroundService.ensureForRollout(rolloutFlags);
   debugPrint('[PKE][APP] background service ensureForRollout finished');
   await Firebase.initializeApp();
+  // Initialize push notifications service
+  PushNotificationService.instance;
   debugPrint('[PKE][APP] Firebase initialized');
   // FirebaseAuth.instance.setLanguageCode('vi');
 
@@ -42,6 +46,8 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Flutter Demo',
       debugShowCheckedModeBanner: false,
+      theme: AppTheme.lightTheme,
+      home: Dashboard()
       theme: ThemeData(
         // This is the theme of your application.
         //

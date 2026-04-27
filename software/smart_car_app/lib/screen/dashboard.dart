@@ -4,15 +4,22 @@ import 'package:smart_car_app/screen/location.dart';
 import 'package:smart_car_app/screen/profile.dart';
 import 'package:smart_car_app/screen/test_phase_ab.dart';
 import 'package:smart_car_app/screen/master_card_flow.dart';
+import 'package:smart_car_app/screen/settings.dart';
+import 'package:smart_car_app/screen/notifications.dart';
+import 'package:smart_car_app/screen/ai_test_harness_v2.dart';
 import 'package:smart_car_app/widgets/car_dialogs.dart';
 import 'package:smart_car_app/widgets/dashboard_widgets.dart';
+import 'package:smart_car_app/widgets/key_components.dart';
 import 'package:smart_car_app/service/car_service.dart';
 import 'package:smart_car_app/service/ble_runtime_permissions.dart';
 import 'package:smart_car_app/service/doze_exemption_service.dart';
 import 'package:smart_car_app/service/initial_data_helper.dart';
 import 'package:smart_car_app/service/master_card_provisioning.dart';
+import 'package:smart_car_app/service/language_service.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:smart_car_app/theme/app_colors.dart';
+import 'package:smart_car_app/widgets/app_components.dart';
 
 class Dashboard extends StatefulWidget {
   const Dashboard({super.key});
@@ -26,6 +33,7 @@ class _DashboardState extends State<Dashboard> {
   final CarService _carService = CarService();
   final MasterCardProvisioningService _masterCardService =
       MasterCardProvisioningService();
+  late LanguageService _languageService;
   final BleRuntimePermissionService _blePermissionService =
       BleRuntimePermissionService();
   final DozeExemptionService _dozeExemptionService = DozeExemptionService();
@@ -33,6 +41,7 @@ class _DashboardState extends State<Dashboard> {
   List<Map<String, dynamic>> _cars = [];
   List<Map<String, dynamic>> _digitalKeys = [];
   bool _isLoading = true;
+  DateTime? _lastSyncTime;
   bool _permissionCheckRunning = false;
   bool _dozeCheckRunning = false;
   bool _permissionWarningShown = false;
@@ -44,6 +53,8 @@ class _DashboardState extends State<Dashboard> {
   @override
   void initState() {
     super.initState();
+    _languageService = LanguageService.instance;
+    _languageService.addListener(_onLanguageChanged);
     _loadData();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkBleRuntimePermissions(requestIfNeeded: true);
@@ -57,6 +68,18 @@ class _DashboardState extends State<Dashboard> {
     });
   }
 
+  void _onLanguageChanged() {
+    print('Dashboard: Language changed, rebuilding UI'); // Debug log
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  @override
+  void dispose() {
+    _languageService.removeListener(_onLanguageChanged);
+    super.dispose();
+  }
   Future<void> _checkDozeExemptionStatus({bool showWarning = false}) async {
     if (_dozeCheckRunning) {
       return;
@@ -125,8 +148,8 @@ class _DashboardState extends State<Dashboard> {
     // Listen to cars stream
     _carService.getUserCars().listen(
       (cars) {
-        print('Loaded ${cars.length} cars: $cars'); // Debug log
         if (mounted) {
+          _lastSyncTime = DateTime.now();
           final normalizedCars = cars.map((car) {
             // Convert color string to Color object if needed
             if (car['color'] is String) {
@@ -157,23 +180,16 @@ class _DashboardState extends State<Dashboard> {
         }
       },
       onError: (error) {
-        print('Error loading cars: $error');
         if (mounted) {
           setState(() {
             _isLoading = false;
           });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Failed to load vehicles: $error'),
-              backgroundColor: Colors.red,
-            ),
-          );
+          AppSnackBar.showError(context, '${_languageService.translate('failed_to_load_vehicles')}: $error');
         }
       },
     ); // Listen to digital keys stream
     _carService.getUserDigitalKeys().listen(
       (keys) {
-        print('Loaded ${keys.length} digital keys: $keys'); // Debug log
         if (mounted) {
           setState(() {
             _digitalKeys = keys;
@@ -181,42 +197,68 @@ class _DashboardState extends State<Dashboard> {
         }
       },
       onError: (error) {
-        print('Error loading digital keys: $error');
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Failed to load digital keys: $error'),
-              backgroundColor: Colors.red,
-            ),
-          );
+          AppSnackBar.showError(context, '${_languageService.translate('failed_to_load_keys')}: $error');
         }
       },
     );
   }
 
+  /// Helper method to format last sync time
+  String _getLastSyncText() {
+    if (_lastSyncTime == null) return _languageService.translate('loading');
+    
+    final now = DateTime.now();
+    final difference = now.difference(_lastSyncTime!);
+    
+    if (difference.inSeconds < 60) {
+      return _languageService.translate('just_now');
+    } else if (difference.inMinutes < 60) {
+      return '${difference.inMinutes}m ${_languageService.translate('ago')}';
+    } else if (difference.inHours < 24) {
+      return '${difference.inHours}h ${_languageService.translate('ago')}';
+    } else {
+      return '${difference.inDays}d ${_languageService.translate('ago')}';
+    }
+  }
+
+  /// Refresh data manually
+  Future<void> _refreshData() async {
+    if (!mounted) return;
+    setState(() => _isLoading = true);
+    _loadData();
+    await Future.delayed(const Duration(seconds: 1));
+    if (mounted) {
+      setState(() => _isLoading = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    print('Dashboard: Building UI, current language: ${_languageService.currentLanguage}');
     return Scaffold(
-      backgroundColor: Colors.grey[50],
+      backgroundColor: AppColors.background,
       appBar: _buildAppBar(),
       body: SafeArea(
         child: _currentIndex == 3
-            ? const ProfileContent()
+            ? ProfileScreen()
             : _currentIndex == 2
             ? const LocationContent()
+            : _currentIndex == 4
+            ? const AITestHarnessV2()
             : _buildDashboardContent(),
       ),
       bottomNavigationBar: _buildBottomNavigationBar(),
       floatingActionButton: _currentIndex == 0
           ? FloatingActionButton(
               onPressed: _showAddCarDialog,
-              backgroundColor: const Color(0xFF273671),
+              backgroundColor: AppColors.primary,
               child: const Icon(Icons.add, color: Colors.white),
             )
           : _currentIndex == 1
           ? FloatingActionButton(
               onPressed: _showAddDigitalKeyDialog,
-              backgroundColor: const Color(0xFF273671),
+              backgroundColor: AppColors.primary,
               child: const Icon(Icons.vpn_key, color: Colors.white),
             )
           : null,
@@ -227,34 +269,52 @@ class _DashboardState extends State<Dashboard> {
     String title = '';
     switch (_currentIndex) {
       case 0:
-        title = 'Home';
+        title = _languageService.translate('home');
         break;
       case 1:
-        title = 'Digital Keys';
+        title = _languageService.translate('digital_keys');
         break;
       case 2:
-        title = 'Location';
+        title = _languageService.translate('location');
         break;
       case 3:
-        title = 'Profile';
+        title = _languageService.translate('profile');
+        break;
+      case 4:
+        title = 'AI Test Harness';
         break;
     }
 
     return AppBar(
-      title: Text(
-        title,
-        style: const TextStyle(
-          fontSize: 24,
-          fontWeight: FontWeight.bold,
-          color: Color(0xFF273671),
-        ),
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+              color: AppColors.textPrimary,
+            ),
+          ),
+          if (_currentIndex == 0)
+            Text(
+              '${_languageService.translate('updated')} ${_getLastSyncText()}',
+              style: const TextStyle(
+                fontSize: 12,
+                color: AppColors.textSecondary,
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+        ],
       ),
       backgroundColor: Colors.transparent,
       elevation: 0,
       centerTitle: false,
       actions: [
         IconButton(
-          icon: const Icon(Icons.science_outlined, color: Color(0xFF273671)),
+          icon: const Icon(Icons.science_outlined, color: AppColors.textPrimary),
           tooltip: 'Test Phase A/B',
           onPressed: () {
             Navigator.of(context).push(
@@ -265,16 +325,27 @@ class _DashboardState extends State<Dashboard> {
         IconButton(
           icon: const Icon(
             Icons.notifications_outlined,
-            color: Color(0xFF273671),
+            color: AppColors.textPrimary,
+            semanticLabel: 'Notifications',
           ),
+          tooltip: 'Notifications',
           onPressed: () {
-            // Handle notifications
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const NotificationsScreen()),
+            );
           },
         ),
         IconButton(
-          icon: const Icon(Icons.settings_outlined, color: Color(0xFF273671)),
+          icon: const Icon(
+            Icons.settings_outlined,
+            color: AppColors.textPrimary,
+            semanticLabel: 'Settings',
+          ),
+          tooltip: 'Settings',
           onPressed: () {
-            // Handle settings
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            );
           },
         ),
       ],
@@ -284,10 +355,27 @@ class _DashboardState extends State<Dashboard> {
   Widget _buildDashboardContent() {
     if (_isLoading) {
       return const Center(
-        child: CircularProgressIndicator(color: Color(0xFF273671)),
+        child: CircularProgressIndicator(color: AppColors.primary),
       );
     }
 
+    return RefreshIndicator(
+      onRefresh: _refreshData,
+      color: AppColors.primary,
+      backgroundColor: Colors.white,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        physics: const AlwaysScrollableScrollPhysics(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (_currentIndex == 0) ...[
+              _buildQuickStats(),
+              const SizedBox(height: 24),
+              _buildMyVehicles(),
+            ] else ...[
+              _buildDigitalKeysSection(),
+            ],
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -308,7 +396,7 @@ class _DashboardState extends State<Dashboard> {
           ] else ...[
             _buildDigitalKeysSection(),
           ],
-        ],
+        ),
       ),
     );
   }
@@ -320,20 +408,20 @@ class _DashboardState extends State<Dashboard> {
           children: [
             Expanded(
               child: StatCard(
-                title: 'Total Cars',
+                title: _languageService.translate('total_cars'),
                 value: '${_cars.length}',
                 icon: Icons.directions_car,
-                color: const Color(0xFF273671),
+                color: AppColors.primary,
               ),
             ),
             const SizedBox(width: 16),
             Expanded(
               child: StatCard(
-                title: 'Active Keys',
+                title: _languageService.translate('active_keys'),
                 value:
                     '${_digitalKeys.where((k) => k['status'] == 'Active').length}',
                 icon: Icons.vpn_key,
-                color: const Color(0xFF41a5de),
+                color: AppColors.secondary,
               ),
             ),
           ],
@@ -343,7 +431,7 @@ class _DashboardState extends State<Dashboard> {
           children: [
             Expanded(
               child: StatCard(
-                title: 'Available',
+                title: _languageService.translate('available'),
                 value:
                     '${_cars.where((c) => c['keyStatus'] == 'Active').length}',
                 icon: Icons.check_circle,
@@ -353,10 +441,10 @@ class _DashboardState extends State<Dashboard> {
             const SizedBox(width: 16),
             Expanded(
               child: QuickActionCard(
-                title: 'Quick Actions',
-                subtitle: 'Control your vehicles',
+                title: _languageService.translate('quick_actions'),
+                subtitle: _languageService.translate('control_vehicles'),
                 icon: Icons.touch_app,
-                color: const Color(0xFF273671),
+                color: const Color(0xFF41a5de),
                 onTap: () {
                   setState(() {
                     _currentIndex = 1;
@@ -524,9 +612,9 @@ class _DashboardState extends State<Dashboard> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'My Vehicles',
-          style: TextStyle(
+        Text(
+          _languageService.translate('my_vehicles'),
+          style: const TextStyle(
             fontSize: 20,
             fontWeight: FontWeight.bold,
             color: Color(0xFF273671),
@@ -575,7 +663,7 @@ class _DashboardState extends State<Dashboard> {
                           InitialDataHelper.addSampleDataIfNeeded(context);
                         },
                         icon: const Icon(Icons.auto_awesome),
-                        label: const Text('Add Sample Data'),
+                        label: Text(_languageService.translate('add_sample_data')),
                         style: OutlinedButton.styleFrom(
                           foregroundColor: const Color(0xFF273671),
                         ),
@@ -654,22 +742,15 @@ class _DashboardState extends State<Dashboard> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            const Expanded(
-              child: Text(
-                'Digital Keys',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF273671),
-                ),
-              ),
-            ),
-            ElevatedButton.icon(
+        // Add Key button only, no title
+        Align(
+          alignment: Alignment.centerRight,
+          child: SizedBox(
+            width: 200, // Make the button even narrower
+            child: ElevatedButton.icon(
               onPressed: _showAddDigitalKeyDialog,
               icon: const Icon(Icons.add),
-              label: const Text('Add Key'),
+              label: Text(_languageService.translate('add_key')),
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF273671),
                 foregroundColor: Colors.white,
@@ -678,7 +759,7 @@ class _DashboardState extends State<Dashboard> {
                 ),
               ),
             ),
-          ],
+          ),
         ),
         const SizedBox(height: 16),
         _digitalKeys.isEmpty
@@ -705,7 +786,7 @@ class _DashboardState extends State<Dashboard> {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        'No digital keys created yet',
+                        _languageService.translate('no_keys_created'),
                         style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.w500,
@@ -714,7 +795,7 @@ class _DashboardState extends State<Dashboard> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Create digital keys to share vehicle access',
+                        _languageService.translate('create_keys_description'),
                         style: TextStyle(fontSize: 14, color: Colors.grey[500]),
                       ),
                     ],
@@ -738,6 +819,8 @@ class _DashboardState extends State<Dashboard> {
       (c) => c['id'] == key['carId'],
       orElse: () => {},
     );
+    final permissions = (key['permissions'] as List<dynamic>).cast<String>().toList();
+    final validUntil = DateTime.parse(key['validUntil'] ?? DateTime.now().add(const Duration(days: 30)).toIso8601String());
 
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
@@ -747,7 +830,7 @@ class _DashboardState extends State<Dashboard> {
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: Colors.black.withValues(alpha: 0.05),
             blurRadius: 10,
             offset: const Offset(0, 2),
           ),
@@ -756,18 +839,19 @@ class _DashboardState extends State<Dashboard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Header with key info and badges
           Row(
             children: [
               Container(
                 width: 50,
                 height: 50,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF273671).withOpacity(0.1),
+                  color: AppColors.primary.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: const Icon(
                   Icons.vpn_key,
-                  color: Color(0xFF273671),
+                  color: AppColors.primary,
                   size: 24,
                 ),
               ),
@@ -781,7 +865,7 @@ class _DashboardState extends State<Dashboard> {
                       style: const TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
-                        color: Color(0xFF273671),
+                        color: AppColors.primary,
                       ),
                     ),
                     Text(
@@ -791,7 +875,9 @@ class _DashboardState extends State<Dashboard> {
                   ],
                 ),
               ),
-              _buildStatusChip(key['status']),
+              // Key type badge
+              KeyTypeBadge(keyType: key['type'] ?? 'Guest'),
+              const SizedBox(width: 8),
               IconButton(
                 onPressed: () => _confirmDeleteDigitalKey(key),
                 icon: const Icon(Icons.delete_outline),
@@ -801,40 +887,197 @@ class _DashboardState extends State<Dashboard> {
             ],
           ),
           const SizedBox(height: 12),
+          
+          // Status and expiration
           Row(
             children: [
+              _buildStatusChip(key['status']),
+              const SizedBox(width: 8),
               Expanded(
-                child: Text(
-                  'Type: ${key['type']}',
-                  style: TextStyle(color: Colors.grey[600], fontSize: 12),
-                ),
-              ),
-              Expanded(
-                child: Text(
-                  'Valid until: ${_formatDate(key['validUntil'])}',
-                  style: TextStyle(color: Colors.grey[600], fontSize: 12),
-                ),
+                child: ExpirationBadge(expirationDate: validUntil),
               ),
             ],
           ),
           const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            children: (key['permissions'] as List<dynamic>).cast<String>().map((
-              permission,
-            ) {
-              return Chip(
-                label: Text(
-                  permission.replaceAll('_', ' ').toUpperCase(),
-                  style: const TextStyle(fontSize: 10),
+          
+          // Permissions header
+          Text(
+            '${_languageService.translate('permissions')} (${permissions.length})',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: AppColors.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 8),
+          
+          // Permissions display
+          PermissionIndicator(
+            permissions: permissions,
+            compact: false,
+          ),
+          const SizedBox(height: 12),
+          
+          // Quick actions
+          Row(
+            children: [
+              Expanded(
+                child: KeyShareButton(
+                  keyId: key['id'],
+                  onShare: () => _showShareKeyDialog(key),
                 ),
-                backgroundColor: const Color(0xFF41a5de).withOpacity(0.1),
-                side: BorderSide.none,
-              );
-            }).toList(),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton.icon(
+                onPressed: () => _showKeyDetails(key),
+                icon: const Icon(Icons.info_outline, size: 16),
+                label: Text(_languageService.translate('details'), style: TextStyle(fontSize: 12)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.grey[200],
+                  foregroundColor: AppColors.primary,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
+    );
+  }
+
+  /// Show share key dialog with QR code
+  void _showShareKeyDialog(Map<String, dynamic> key) {
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Share ${key['name']}',
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Container(
+                width: 150,
+                height: 150,
+                decoration: BoxDecoration(
+                  color: Colors.grey[200],
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Center(
+                  child: Text('QR Code\n(To be generated)', textAlign: TextAlign.center),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        AppSnackBar.showSuccess(context, 'QR code copied to clipboard');
+                        Navigator.pop(ctx);
+                      },
+                      icon: const Icon(Icons.copy),
+                      label: Text(_languageService.translate('copy_qr')),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        AppSnackBar.showSuccess(context, 'Share intent opened');
+                        Navigator.pop(ctx);
+                      },
+                      icon: const Icon(Icons.share),
+                      label: Text(_languageService.translate('share')),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Show detailed key information
+  void _showKeyDetails(Map<String, dynamic> key) {
+    final permissions = (key['permissions'] as List<dynamic>).cast<String>().toList();
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      key['name'],
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                _buildDetailRow('Type', KeyTypeBadge(keyType: key['type'] ?? 'Guest')),
+                const SizedBox(height: 12),
+                _buildDetailRow('Status', _buildStatusChip(key['status'])),
+                const SizedBox(height: 12),
+                _buildDetailRow('Created', Text(_formatDate(key['createdAt'] ?? DateTime.now().toIso8601String()))),
+                const SizedBox(height: 12),
+                _buildDetailRow('Valid Until', Text(_formatDate(key['validUntil'] ?? DateTime.now().toIso8601String()))),
+                const SizedBox(height: 16),
+                const Text('Permissions:', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                PermissionIndicator(permissions: permissions),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Helper to build detail rows in dialogs
+  Row _buildDetailRow(String label, Widget value) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        SizedBox(
+          width: 80,
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              color: AppColors.textSecondary,
+            ),
+          ),
+        ),
+        Expanded(child: value),
+      ],
     );
   }
 
@@ -868,14 +1111,27 @@ class _DashboardState extends State<Dashboard> {
       },
       selectedItemColor: const Color(0xFF273671),
       unselectedItemColor: Colors.grey,
-      items: const [
-        BottomNavigationBarItem(icon: Icon(Icons.home_outlined), label: 'Home'),
-        BottomNavigationBarItem(icon: Icon(Icons.vpn_key), label: 'Keys'),
+      items: [
         BottomNavigationBarItem(
-          icon: Icon(Icons.map_outlined),
-          label: 'Location',
+          icon: const Icon(Icons.home_outlined),
+          label: _languageService.translate('home'),
         ),
-        BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Profile'),
+        BottomNavigationBarItem(
+          icon: const Icon(Icons.vpn_key),
+          label: '', // Remove label as requested
+        ),
+        BottomNavigationBarItem(
+          icon: const Icon(Icons.map_outlined),
+          label: _languageService.translate('location'),
+        ),
+        BottomNavigationBarItem(
+          icon: const Icon(Icons.person),
+          label: _languageService.translate('profile'),
+        ),
+        BottomNavigationBarItem(
+          icon: const Icon(Icons.science),
+          label: 'Test',
+        ),
       ],
     );
   }
@@ -1122,7 +1378,7 @@ class _DashboardState extends State<Dashboard> {
       } catch (e) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Failed to create digital key: $e'),
+            content: Text('${_languageService.translate('failed_create_key')}: $e'),
             backgroundColor: Colors.red,
           ),
         );

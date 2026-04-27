@@ -7,6 +7,8 @@ import 'package:smart_car_app/screen/signup.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:smart_car_app/theme/app_colors.dart';
+import 'package:smart_car_app/widgets/app_components.dart';
 
 class LogIn extends StatefulWidget {
   const LogIn({super.key});
@@ -42,20 +44,18 @@ class _LogInState extends State<LogIn> {
       Navigator.push(context, MaterialPageRoute(builder: (context) => const Dashboard()));
     } on FirebaseAuthException catch (e) {
       if (e.code == 'user-not-found') {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            backgroundColor: Colors.orangeAccent,
-            content: Text(
-              "No User Found for that Email",
-              style: TextStyle(fontSize: 18.0),
-            )));
+        AppSnackBar.showError(context, "Email not found. Please check or create an account");
       } else if (e.code == 'wrong-password') {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            backgroundColor: Colors.orangeAccent,
-            content: Text(
-              "Wrong Password Provided by User",
-              style: TextStyle(fontSize: 18.0),
-            )));
+        AppSnackBar.showError(context, "Incorrect password. Please try again");
+      } else if (e.code == 'invalid-email') {
+        AppSnackBar.showError(context, "Invalid email format. Please check and try again");
+      } else if (e.code == 'user-disabled') {
+        AppSnackBar.showError(context, "This account has been disabled. Contact support");
+      } else {
+        AppSnackBar.showError(context, "Login failed: ${e.message}");
       }
+    } catch (e) {
+      AppSnackBar.showError(context, "An unexpected error occurred. Please try again");
     }
   }
 
@@ -63,8 +63,10 @@ class _LogInState extends State<LogIn> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      body: Column(
-          children: [
+      resizeToAvoidBottomInset: true,
+      body: SingleChildScrollView(
+        child: Column(
+            children: [
             SizedBox(
                 width: MediaQuery.of(context).size.width,
                 child: Image.asset(
@@ -78,7 +80,7 @@ class _LogInState extends State<LogIn> {
               child: Text(
                 'BK Smart Car',
                 style: TextStyle(
-                  color: Color(0xFF273671),
+                  color: AppColors.textPrimary,
                   fontSize: 28.0,
                   fontWeight: FontWeight.bold,
                 ),
@@ -88,84 +90,50 @@ class _LogInState extends State<LogIn> {
               height: 20.0,
             ),
             Padding(
-              padding: const EdgeInsets.only(left: 20.0, right: 20.0),
+              padding: const EdgeInsets.symmetric(horizontal: 20.0),
               child: Form(
                 key: _formkey,
                 child: Column(
                   children: [
-                    Container(
-                      padding:
-                          EdgeInsets.symmetric(vertical: 2.0, horizontal: 30.0),
-                      decoration: BoxDecoration(
-                          color: Color(0xFFedf0f8),
-                          borderRadius: BorderRadius.circular(30)),
-                      child: TextFormField(
-                        validator: (value) {
-                          if (value == null || value.isEmpty) {
-                            return 'Please Enter E-mail';
-                          }
-                          return null;
-                        },
-                        controller: mailcontroller,
-                        decoration: InputDecoration(
-                            border: InputBorder.none,
-                            hintText: "Email",
-                            hintStyle: TextStyle(
-                                color: Color(0xFFb2b7bf), fontSize: 18.0)),
-                      ),
+                    AppTextField(
+                      hintText: "Email",
+                      controller: mailcontroller,
+                      keyboardType: TextInputType.emailAddress,
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'Please Enter E-mail';
+                        }
+                        return null;
+                      },
                     ),
                     SizedBox(
                       height: 30.0,
                     ),
-                    Container(
-                      padding:
-                          EdgeInsets.symmetric(vertical: 2.0, horizontal: 30.0),
-                      decoration: BoxDecoration(
-                          color: Color(0xFFedf0f8),
-                          borderRadius: BorderRadius.circular(30)),
-                      child: TextFormField(
-                        controller: passwordcontroller,
-                        validator: (value) {
-                          if (value == null || value.isEmpty) {
-                            return 'Please Enter Password';
-                          }
-                          return null;
-                        },
-                        decoration: InputDecoration(
-                            border: InputBorder.none,
-                            hintText: "Password",
-                            hintStyle: TextStyle(
-                                color: Color(0xFFb2b7bf), fontSize: 18.0)),
-                   obscureText: true,   ),
+                    AppTextField(
+                      hintText: "Password",
+                      controller: passwordcontroller,
+                      obscureText: true,
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'Please Enter Password';
+                        }
+                        return null;
+                      },
                     ),
                     SizedBox(
                       height: 30.0,
                     ),
-                    GestureDetector(
-                      onTap: (){
-                        if(_formkey.currentState!.validate()){
+                    AppButton(
+                      label: "Sign In",
+                      onPressed: () {
+                        if(_formkey.currentState!.validate()) {
                           setState(() {
-                            email= mailcontroller.text;
-                            password=passwordcontroller.text;
+                            email = mailcontroller.text;
+                            password = passwordcontroller.text;
                           });
                         }
                         userLogin();
                       },
-                      child: Container(
-                          width: MediaQuery.of(context).size.width,
-                          padding: EdgeInsets.symmetric(
-                              vertical: 13.0, horizontal: 30.0),
-                          decoration: BoxDecoration(
-                              color: Color(0xFF273671),
-                              borderRadius: BorderRadius.circular(30)),
-                          child: Center(
-                              child: Text(
-                            "Sign In",
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 22.0,
-                                fontWeight: FontWeight.w500),
-                          ))),
                     ),
                   ],
                 ),
@@ -184,7 +152,7 @@ class _LogInState extends State<LogIn> {
                   },
                   child: Text("Forgot Password?",
                       style: TextStyle(
-                          color: Color(0xFF8c8e98),
+                          color: AppColors.textSecondary,
                           fontSize: 18.0,
                           fontWeight: FontWeight.w500)),
                 ),
@@ -196,7 +164,7 @@ class _LogInState extends State<LogIn> {
             Text(
               "or LogIn with",
               style: TextStyle(
-                  color: Color(0xFF273671),
+                  color: AppColors.textPrimary,
                   fontSize: 22.0,
                   fontWeight: FontWeight.w500),
             ),
@@ -235,7 +203,7 @@ class _LogInState extends State<LogIn> {
               children: [
                 Text("Don't have an account?",
                     style: TextStyle(
-                        color: Color(0xFF8c8e98),
+                        color: AppColors.textSecondary,
                         fontSize: 18.0,
                         fontWeight: FontWeight.w500)),
                 SizedBox(
@@ -249,7 +217,7 @@ class _LogInState extends State<LogIn> {
                   child: Text(
                     "SignUp",
                     style: TextStyle(
-                        color: Color(0xFF273671),
+                        color: AppColors.textPrimary,
                         fontSize: 20.0,
                         fontWeight: FontWeight.w500),
                   ),
@@ -258,6 +226,7 @@ class _LogInState extends State<LogIn> {
             )
           ],
         ),
+      ),
     );
   }
 }

@@ -16,7 +16,7 @@ class AuthMethods {
       final FirebaseAuth firebaseAuth = FirebaseAuth.instance;
       final GoogleSignIn googleSignIn = GoogleSignIn();
 
-      print('Starting Google Sign-In...'); // Debug log
+      print('Starting Google Sign-In...');
 
       final GoogleSignInAccount? googleSignInAccount = await googleSignIn.signIn();
 
@@ -26,12 +26,12 @@ class AuthMethods {
         return;
       }
 
-      print('Google Sign-In account obtained: ${googleSignInAccount.email}'); // Debug log
+      print('Google Sign-In account obtained: ${googleSignInAccount.email}');
 
       final GoogleSignInAuthentication googleSignInAuthentication =
           await googleSignInAccount.authentication;
 
-      print('Google Sign-In authentication obtained'); // Debug log
+      print('Google Sign-In authentication obtained');
 
       final AuthCredential credential = GoogleAuthProvider.credential(
         idToken: googleSignInAuthentication.idToken,
@@ -42,7 +42,7 @@ class AuthMethods {
       final User? userDetails = result.user;
 
       if (userDetails != null) {
-        print('Firebase sign-in successful: ${userDetails.email}'); // Debug log
+        print('Firebase sign-in successful: ${userDetails.email}');
         
         final Map<String, dynamic> userInfoMap = {
           "email": userDetails.email,
@@ -55,7 +55,7 @@ class AuthMethods {
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => Dashboard()));
       }
     } catch (e) {
-      print('Google Sign-In error: $e'); // Debug log
+      print('Google Sign-In error: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Google Sign-In failed: $e'),
