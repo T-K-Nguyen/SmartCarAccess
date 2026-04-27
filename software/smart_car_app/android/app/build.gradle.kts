@@ -41,6 +41,8 @@ flutter {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+
     // 🔹 Import Firebase BoM (Bill of Materials)
     implementation(platform("com.google.firebase:firebase-bom:34.6.0"))
 

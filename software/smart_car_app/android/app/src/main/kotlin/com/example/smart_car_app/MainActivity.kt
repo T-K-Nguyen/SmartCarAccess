@@ -3,9 +3,13 @@ package com.example.smart_car_app
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.nfc.NfcAdapter
 import android.nfc.cardemulation.CardEmulation
+import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -19,6 +23,7 @@ class MainActivity : FlutterActivity() {
         private const val CHANNEL = "smartcar/keystore"
         private const val MASTER_CHANNEL = "smartcar/mastercard"
         private const val NFC_READER_CHANNEL = "smartcar/nfc_reader"
+        private const val DEVICE_INFO_CHANNEL = "smartcar/device_info"
     }
 
     private var readerModeEnabled = false
@@ -159,6 +164,26 @@ class MainActivity : FlutterActivity() {
                 result.error("NFC_READER_ERROR", e.message, null)
             }
         }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_INFO_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getAndroidSdkInt" -> result.success(android.os.Build.VERSION.SDK_INT)
+                "getBatteryOptimizationStatus" -> {
+                    val supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                    val ignoring = if (supported) isIgnoringBatteryOptimizations() else true
+                    result.success(
+                        hashMapOf<String, Any>(
+                            "supported" to supported,
+                            "ignored" to ignoring,
+                            "sdkInt" to Build.VERSION.SDK_INT,
+                        )
+                    )
+                }
+                "requestIgnoreBatteryOptimizations" -> result.success(requestIgnoreBatteryOptimizations())
+                "openBatteryOptimizationSettings" -> result.success(openBatteryOptimizationSettings())
+                else -> result.notImplemented()
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -254,5 +279,38 @@ class MainActivity : FlutterActivity() {
         val adapter = nfcAdapter ?: return
         adapter.disableForegroundDispatch(this)
         Log.d(TAG, "Foreground dispatch disabled")
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        val pm = getSystemService(PowerManager::class.java) ?: return false
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun requestIgnoreBatteryOptimizations(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        return try {
+            val intent = Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:$packageName"),
+            )
+            startActivity(intent)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to launch doze exemption request", e)
+            false
+        }
+    }
+
+    private fun openBatteryOptimizationSettings(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        return try {
+            val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+            startActivity(intent)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to open battery optimization settings", e)
+            false
+        }
     }
 }

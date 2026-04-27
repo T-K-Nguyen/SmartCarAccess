@@ -17,6 +17,8 @@ namespace {
   const char* kForceProvFlag = "force_prov";
   const char* kOneShotForce = "oneshot_force";
   const char* kCertChain = "cert_chain";
+  const char* kFastArtifactVersion = "fast_art_ver";
+  const char* kFastArtifactKey = "fast_art_key";
 
   // Authentication stores phone public key and relies on CCC mailbox vehicle keypair.
 }
@@ -47,6 +49,56 @@ bool storeCertChain(const uint8_t* cert, size_t certLen) {
   prefs.end();
   if (ok) Serial.printf("[PhaseA] Stored phone cert chain (%u bytes) in CCC mailbox\n", (unsigned)certLen);
   return ok;
+}
+
+bool storeFastArtifact(uint8_t version, const uint8_t* key32) {
+  if (!key32 || version == 0) return false;
+  prefs.begin(kNs, false);
+  bool ok = prefs.putUChar(kFastArtifactVersion, version) == 1;
+  if (ok) {
+    ok = prefs.putBytes(kFastArtifactKey, key32, 32) == 32;
+  }
+  prefs.end();
+  if (ok) {
+    Serial.printf("[PhaseA] Stored fast artifact version=%u key_len=32\n", (unsigned)version);
+  }
+  return ok;
+}
+
+bool hasFastArtifact() {
+  prefs.begin(kNs, true);
+  bool hasVersion = prefs.isKey(kFastArtifactVersion);
+  bool hasKey = prefs.getBytesLength(kFastArtifactKey) == 32;
+  prefs.end();
+  return hasVersion && hasKey;
+}
+
+bool getFastArtifact(uint8_t* outVersion, uint8_t outKey32[32]) {
+  if (!outVersion || !outKey32) return false;
+  prefs.begin(kNs, true);
+  if (!prefs.isKey(kFastArtifactVersion) || prefs.getBytesLength(kFastArtifactKey) != 32) {
+    prefs.end();
+    return false;
+  }
+  *outVersion = prefs.getUChar(kFastArtifactVersion, 0);
+  bool ok = prefs.getBytes(kFastArtifactKey, outKey32, 32) == 32;
+  prefs.end();
+  return ok && (*outVersion != 0);
+}
+
+bool clearFastArtifact() {
+  prefs.begin(kNs, false);
+  bool changed = false;
+  if (prefs.isKey(kFastArtifactVersion)) {
+    prefs.remove(kFastArtifactVersion);
+    changed = true;
+  }
+  if (prefs.isKey(kFastArtifactKey)) {
+    prefs.remove(kFastArtifactKey);
+    changed = true;
+  }
+  prefs.end();
+  return changed;
 }
 
 bool setOwnerProvisioned(const uint8_t* pub65, bool force) {
@@ -93,6 +145,8 @@ void clearAll() {
   CCCMailbox::clearMailboxes();
   prefs.begin(kNs, false);
   if (prefs.isKey(kCertChain)) prefs.remove(kCertChain);
+  if (prefs.isKey(kFastArtifactVersion)) prefs.remove(kFastArtifactVersion);
+  if (prefs.isKey(kFastArtifactKey)) prefs.remove(kFastArtifactKey);
   if (prefs.isKey(kForceProvFlag)) prefs.remove(kForceProvFlag);
   if (prefs.isKey(kOneShotForce)) prefs.remove(kOneShotForce);
   prefs.end();
@@ -105,6 +159,8 @@ void clearProvisionedOnly() {
   CCCMailbox::setSignalingFlag(0x0001, true);
   prefs.begin(kNs, false);
   if (prefs.isKey(kCertChain)) prefs.remove(kCertChain);
+  if (prefs.isKey(kFastArtifactVersion)) prefs.remove(kFastArtifactVersion);
+  if (prefs.isKey(kFastArtifactKey)) prefs.remove(kFastArtifactKey);
   prefs.end();
 }
 

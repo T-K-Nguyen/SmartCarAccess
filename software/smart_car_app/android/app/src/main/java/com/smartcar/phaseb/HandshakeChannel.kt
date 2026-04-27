@@ -2,6 +2,7 @@ package com.smartcar.phaseb
 
 import android.util.Log
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 
 /**
@@ -22,8 +23,16 @@ object HandshakeChannel {
      * Register Phase B handshake channel with Flutter engine.
      */
     fun register(flutterEngine: FlutterEngine) {
+        register(flutterEngine.dartExecutor.binaryMessenger)
+    }
+
+    /**
+     * Register Phase B handshake channel with a binary messenger.
+     * This supports both the UI engine and the headless background engine.
+     */
+    fun register(messenger: BinaryMessenger) {
         MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
+            messenger,
             CHANNEL_NAME
         ).setMethodCallHandler { call, result ->
             try {

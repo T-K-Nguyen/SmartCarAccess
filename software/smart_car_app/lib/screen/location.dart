@@ -2,12 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:smart_car_app/theme/app_colors.dart';
 import 'package:smart_car_app/widgets/location_components.dart';
 
 import '../service/ble_phase_test.dart';
+import '../service/pke_auth_orchestrator.dart';
+import '../service/ble_runtime_permissions.dart';
 import '../service/gps_service.dart';
 
 class LocationContent extends StatefulWidget {
@@ -18,11 +19,12 @@ class LocationContent extends StatefulWidget {
 }
 
 class _LocationContentState extends State<LocationContent> {
-  static const _deviceAddressKey = 'location_ble_device_address';
-
   final BlePhaseTestService _bleService = BlePhaseTestService();
+  final BleRuntimePermissionService _blePermissionService =
+      BleRuntimePermissionService();
   final GpsService _gpsService = GpsService();
-  final TextEditingController _deviceAddressController = TextEditingController();
+  final TextEditingController _deviceAddressController =
+      TextEditingController();
 
   Timer? _autoSyncTimer;
   Position? _lastPosition;
@@ -58,8 +60,8 @@ class _LocationContentState extends State<LocationContent> {
   }
 
   Future<void> _loadSavedDeviceAddress() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedAddress = prefs.getString(_deviceAddressKey) ?? '';
+    final savedAddress =
+        await PkeAuthOrchestrator.loadPreferredDeviceAddress() ?? '';
     if (!mounted) {
       _deviceAddressController.text = savedAddress;
       return;
@@ -84,9 +86,8 @@ class _LocationContentState extends State<LocationContent> {
   }
 
   Future<void> _saveDeviceAddress({bool showFeedback = true}) async {
-    final prefs = await SharedPreferences.getInstance();
     final deviceAddress = _deviceAddressController.text.trim();
-    await prefs.setString(_deviceAddressKey, deviceAddress);
+    await PkeAuthOrchestrator.savePreferredDeviceAddress(deviceAddress);
 
     if (showFeedback && mounted) {
       _showSnackBar('Saved ESP32 MAC address', AppColors.success);
@@ -97,6 +98,20 @@ class _LocationContentState extends State<LocationContent> {
     final deviceAddress = _deviceAddressController.text.trim();
     if (deviceAddress.isEmpty) {
       _showSnackBar('Enter ESP32 MAC address first', AppColors.error);
+      return;
+    }
+
+    final permissionStatus = await _blePermissionService.ensureReady(
+      requestIfNeeded: true,
+    );
+    if (!permissionStatus.ready) {
+      if (mounted) {
+        setState(() {
+          _bleStatus = 'Missing runtime permissions';
+          _statusMessage = permissionStatus.toUserMessage();
+        });
+      }
+      _showSnackBar(permissionStatus.toUserMessage(), Colors.orange);
       return;
     }
 
@@ -121,7 +136,9 @@ class _LocationContentState extends State<LocationContent> {
 
       setState(() {
         _isAuthenticated = result.success;
-        _bleStatus = result.success ? 'Authenticated and ready' : 'Authentication failed';
+        _bleStatus = result.success
+            ? 'Authenticated and ready'
+            : 'Authentication failed';
         _statusMessage = result.success
             ? 'BLE ready. GPS will sync to ESP32 every 30 seconds.'
             : result.message;
@@ -166,7 +183,9 @@ class _LocationContentState extends State<LocationContent> {
     if (mounted) {
       setState(() {
         _isBusy = true;
-        _statusMessage = silent ? 'Refreshing location in background...' : 'Getting current location...';
+        _statusMessage = silent
+            ? 'Refreshing location in background...'
+            : 'Getting current location...';
       });
     }
 
@@ -176,7 +195,8 @@ class _LocationContentState extends State<LocationContent> {
         if (mounted) {
           setState(() {
             _statusMessage = 'Location permission denied';
-            _locationInfo = 'Enable location permission to keep GPS sync active';
+            _locationInfo =
+                'Enable location permission to keep GPS sync active';
           });
         }
         if (!silent) {
@@ -201,7 +221,8 @@ class _LocationContentState extends State<LocationContent> {
         return;
       }
 
-      final address = await _gpsService.getAddressFromPosition(position) ?? 'Unknown area';
+      final address =
+          await _gpsService.getAddressFromPosition(position) ?? 'Unknown area';
       final refreshedAt = DateTime.now();
 
       if (mounted) {
@@ -209,7 +230,8 @@ class _LocationContentState extends State<LocationContent> {
           _lastPosition = position;
           _address = address;
           _lastRefreshAt = refreshedAt;
-          _locationInfo = 'Place:     $address\n'
+          _locationInfo =
+              'Place:     $address\n'
               'Latitude:  ${position.latitude.toStringAsFixed(6)}\n'
               'Longitude: ${position.longitude.toStringAsFixed(6)}\n'
               'Altitude:  ${position.altitude.toStringAsFixed(1)} m\n'
@@ -313,10 +335,7 @@ class _LocationContentState extends State<LocationContent> {
 
   void _showSnackBar(String message, Color backgroundColor) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: backgroundColor,
-      ),
+      SnackBar(content: Text(message), backgroundColor: backgroundColor),
     );
   }
 
@@ -379,7 +398,10 @@ class _LocationContentState extends State<LocationContent> {
             runSpacing: 8,
             children: [
               _buildInfoChip('Auto refresh', '30s'),
-              _buildInfoChip('BLE', _isAuthenticated ? 'Ready' : 'Disconnected'),
+              _buildInfoChip(
+                'BLE',
+                _isAuthenticated ? 'Ready' : 'Disconnected',
+              ),
               _buildInfoChip('Packets sent', '$_sentPacketCount'),
             ],
           ),
@@ -500,9 +522,19 @@ class _LocationContentState extends State<LocationContent> {
           // Last Update Times
           Row(
             children: [
-              Expanded(child: _buildMetaTile('Last refresh', _formatDateTime(_lastRefreshAt))),
+              Expanded(
+                child: _buildMetaTile(
+                  'Last refresh',
+                  _formatDateTime(_lastRefreshAt),
+                ),
+              ),
               const SizedBox(width: 12),
-              Expanded(child: _buildMetaTile('Last BLE sync', _formatDateTime(_lastBleSyncAt))),
+              Expanded(
+                child: _buildMetaTile(
+                  'Last BLE sync',
+                  _formatDateTime(_lastBleSyncAt),
+                ),
+              ),
             ],
           ),
         ],
@@ -593,7 +625,10 @@ class _LocationContentState extends State<LocationContent> {
       ),
       child: Text(
         '$label: $value',
-        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w600,
+        ),
       ),
     );
   }
@@ -608,10 +643,7 @@ class _LocationContentState extends State<LocationContent> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            label,
-            style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-          ),
+          Text(label, style: TextStyle(fontSize: 12, color: Colors.grey[600])),
           const SizedBox(height: 4),
           Text(
             value,

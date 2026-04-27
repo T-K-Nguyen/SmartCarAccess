@@ -11,6 +11,8 @@ import 'package:smart_car_app/widgets/car_dialogs.dart';
 import 'package:smart_car_app/widgets/dashboard_widgets.dart';
 import 'package:smart_car_app/widgets/key_components.dart';
 import 'package:smart_car_app/service/car_service.dart';
+import 'package:smart_car_app/service/ble_runtime_permissions.dart';
+import 'package:smart_car_app/service/doze_exemption_service.dart';
 import 'package:smart_car_app/service/initial_data_helper.dart';
 import 'package:smart_car_app/service/master_card_provisioning.dart';
 import 'package:smart_car_app/service/language_service.dart';
@@ -32,11 +34,20 @@ class _DashboardState extends State<Dashboard> {
   final MasterCardProvisioningService _masterCardService =
       MasterCardProvisioningService();
   late LanguageService _languageService;
+  final BleRuntimePermissionService _blePermissionService =
+      BleRuntimePermissionService();
+  final DozeExemptionService _dozeExemptionService = DozeExemptionService();
 
   List<Map<String, dynamic>> _cars = [];
   List<Map<String, dynamic>> _digitalKeys = [];
   bool _isLoading = true;
   DateTime? _lastSyncTime;
+  bool _permissionCheckRunning = false;
+  bool _dozeCheckRunning = false;
+  bool _permissionWarningShown = false;
+  bool _dozeWarningShown = false;
+  BleRuntimePermissionStatus? _blePermissionStatus;
+  DozeExemptionStatus? _dozeExemptionStatus;
   final Map<String, MasterCardPayload> _pendingVehicleProvision = {};
 
   @override
@@ -45,6 +56,10 @@ class _DashboardState extends State<Dashboard> {
     _languageService = LanguageService.instance;
     _languageService.addListener(_onLanguageChanged);
     _loadData();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkBleRuntimePermissions(requestIfNeeded: true);
+      _checkDozeExemptionStatus(showWarning: true);
+    });
     // Show sample data dialog after a short delay
     Future.delayed(const Duration(milliseconds: 500), () {
       if (mounted) {
@@ -64,6 +79,69 @@ class _DashboardState extends State<Dashboard> {
   void dispose() {
     _languageService.removeListener(_onLanguageChanged);
     super.dispose();
+  }
+  Future<void> _checkDozeExemptionStatus({bool showWarning = false}) async {
+    if (_dozeCheckRunning) {
+      return;
+    }
+
+    _dozeCheckRunning = true;
+    try {
+      final status = await _dozeExemptionService.getStatus();
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _dozeExemptionStatus = status;
+      });
+
+      if (showWarning && status.needsExemption && !_dozeWarningShown) {
+        _dozeWarningShown = true;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(status.toUserMessage()),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } finally {
+      _dozeCheckRunning = false;
+    }
+  }
+
+  Future<void> _checkBleRuntimePermissions({
+    bool requestIfNeeded = false,
+  }) async {
+    if (_permissionCheckRunning) {
+      return;
+    }
+
+    _permissionCheckRunning = true;
+    try {
+      final status = await _blePermissionService.ensureReady(
+        requestIfNeeded: requestIfNeeded,
+      );
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _blePermissionStatus = status;
+      });
+
+      if (status.isDegraded && !_permissionWarningShown) {
+        _permissionWarningShown = true;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(status.toUserMessage()),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } finally {
+      _permissionCheckRunning = false;
+    }
   }
 
   void _loadData() {
@@ -298,6 +376,25 @@ class _DashboardState extends State<Dashboard> {
             ] else ...[
               _buildDigitalKeysSection(),
             ],
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (_blePermissionStatus?.isDegraded == true) ...[
+            _buildBlePermissionWarningCard(),
+            const SizedBox(height: 16),
+          ],
+          if (_dozeExemptionStatus?.needsExemption == true) ...[
+            _buildDozeExemptionCard(),
+            const SizedBox(height: 16),
+          ],
+          if (_currentIndex == 0) ...[
+            _buildQuickStats(),
+            const SizedBox(height: 24),
+            _buildMyVehicles(),
+          ] else ...[
+            _buildDigitalKeysSection(),
           ],
         ),
       ),
@@ -358,6 +455,156 @@ class _DashboardState extends State<Dashboard> {
           ],
         ),
       ],
+    );
+  }
+
+  Widget _buildBlePermissionWarningCard() {
+    final status = _blePermissionStatus;
+    if (status == null || !status.isDegraded) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.orange.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange.withOpacity(0.6)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.orange),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Background BLE is in degraded mode',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF273671),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            status.toUserMessage(),
+            style: const TextStyle(color: Color(0xFF273671)),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ElevatedButton.icon(
+                onPressed: () =>
+                    _checkBleRuntimePermissions(requestIfNeeded: true),
+                icon: const Icon(Icons.security),
+                label: const Text('Grant permissions'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF273671),
+                  foregroundColor: Colors.white,
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: _blePermissionService.openSettings,
+                icon: const Icon(Icons.settings),
+                label: const Text('Open settings'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDozeExemptionCard() {
+    final status = _dozeExemptionStatus;
+    if (status == null || !status.needsExemption) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF41a5de).withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF41a5de).withOpacity(0.6)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.battery_alert_outlined, color: Color(0xFF273671)),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Battery optimization may block background unlock',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF273671),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            status.toUserMessage(),
+            style: const TextStyle(color: Color(0xFF273671)),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ElevatedButton.icon(
+                onPressed: () async {
+                  final launched = await _dozeExemptionService
+                      .requestExemption();
+                  if (!mounted) return;
+                  if (!launched) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Could not open doze exemption request.'),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                    return;
+                  }
+                  await Future.delayed(const Duration(milliseconds: 400));
+                  if (!mounted) return;
+                  await _checkDozeExemptionStatus();
+                },
+                icon: const Icon(Icons.battery_saver),
+                label: const Text('Request exemption'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF273671),
+                  foregroundColor: Colors.white,
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  await _dozeExemptionService.openBatteryOptimizationSettings();
+                },
+                icon: const Icon(Icons.tune),
+                label: const Text('Battery settings'),
+              ),
+              TextButton.icon(
+                onPressed: _checkDozeExemptionStatus,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Refresh status'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -1238,14 +1485,19 @@ class _DashboardState extends State<Dashboard> {
           throw StateError('No local vehicle binding found after provisioning');
         }
 
-        final validBinding = _masterCardService.validateBindingConsistency(binding);
+        final validBinding = _masterCardService.validateBindingConsistency(
+          binding,
+        );
         if (!validBinding) {
           throw StateError(
             'Provisioning WRITE DATA payload integrity check failed',
           );
         }
 
-        final vehicleIdMatches = listEquals(binding.vehicleId, payload.vehicleId);
+        final vehicleIdMatches = listEquals(
+          binding.vehicleId,
+          payload.vehicleId,
+        );
         if (!vehicleIdMatches) {
           final scannedIdHex = _bytesToHex(payload.vehicleId);
           final boundIdHex = _bytesToHex(binding.vehicleId);
@@ -1295,7 +1547,9 @@ class _DashboardState extends State<Dashboard> {
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                  content: Text('Provisioning canceled due to vehicle ID mismatch.'),
+                  content: Text(
+                    'Provisioning canceled due to vehicle ID mismatch.',
+                  ),
                   backgroundColor: Colors.orange,
                 ),
               );
@@ -1351,7 +1605,9 @@ class _DashboardState extends State<Dashboard> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('Provisioning binding missing after successful flow.'),
+              content: Text(
+                'Provisioning binding missing after successful flow.',
+              ),
               backgroundColor: Colors.red,
             ),
           );
