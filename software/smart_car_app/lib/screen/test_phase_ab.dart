@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:smart_car_app/service/ble_phase_test.dart';
+import 'package:smart_car_app/service/ble_runtime_permissions.dart';
 import 'dart:async';
 
 /// Test screen for Phase A (NFC Provisioning) and Phase B (BLE Authentication)
@@ -14,17 +15,20 @@ class TestPhaseABScreen extends StatefulWidget {
 
 class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
   final BlePhaseTestService _testService = BlePhaseTestService();
-  final TextEditingController _deviceAddressController = TextEditingController();
+  final BleRuntimePermissionService _blePermissionService =
+      BleRuntimePermissionService();
+  final TextEditingController _deviceAddressController =
+      TextEditingController();
   final ScrollController _logScrollController = ScrollController();
-  
+
   final List<String> _logs = [];
   bool _isTestingPhaseA = false;
   bool _isTestingPhaseB = false;
   bool _isScanningDevices = false;
-  
-  PhaseA_Result? _phaseAResult;
-  PhaseB_Result? _phaseBResult;
-  
+
+  PhaseAResult? _phaseAResult;
+  PhaseBResult? _phaseBResult;
+
   List<ScanResult> _scanResults = [];
   BluetoothDevice? _selectedDevice;
 
@@ -49,7 +53,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
         _addLog('❌ Bluetooth is not supported on this device');
         return;
       }
-      
+
       final adapterState = await FlutterBluePlus.adapterState.first;
       if (adapterState != BluetoothAdapterState.on) {
         _addLog('⚠️ Please enable Bluetooth');
@@ -65,7 +69,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
     setState(() {
       _logs.add('[${DateTime.now().toString().substring(11, 23)}] $message');
     });
-    
+
     // Auto scroll to bottom
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_logScrollController.hasClients) {
@@ -87,16 +91,24 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
   }
 
   Future<void> _scanForDevices() async {
+    final permissionStatus = await _blePermissionService.ensureReady(
+      requestIfNeeded: true,
+    );
+    if (!permissionStatus.ready) {
+      _addLog('⚠️ ${permissionStatus.toUserMessage()}');
+      return;
+    }
+
     setState(() {
       _isScanningDevices = true;
       _scanResults.clear();
     });
-    
+
     _addLog('🔍 Scanning for BLE devices...');
-    
+
     try {
       await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
-      
+
       final subscription = FlutterBluePlus.scanResults.listen((results) {
         setState(() {
           _scanResults = results
@@ -104,13 +116,12 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
               .toList();
         });
       });
-      
+
       await Future.delayed(const Duration(seconds: 10));
       await FlutterBluePlus.stopScan();
       subscription.cancel();
-      
+
       _addLog('✓ Found ${_scanResults.length} devices');
-      
     } catch (e) {
       _addLog('❌ Scan failed: $e');
     } finally {
@@ -125,34 +136,36 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
       _isTestingPhaseA = true;
       _phaseAResult = null;
     });
-    
+
     _addLog('═══════════════════════════════════');
     _addLog('🔷 STARTING PHASE A TEST (NFC Provisioning)');
     _addLog('═══════════════════════════════════');
-    
+
     try {
       _addLog('');
       _addLog('📱 Checking Android Keystore...');
-      
+
       // 1. Check if Phase A key exists in Keystore
       try {
         final keystoreChannel = const MethodChannel('smartcar/keystore');
-        
+
         // Ensure key exists
         _addLog('   Ensuring identity key exists...');
         final keyExists = await keystoreChannel.invokeMethod('ensurePhaseAKey');
-        
+
         if (keyExists) {
           _addLog('   ✓ Identity key ready in Android Keystore');
-          
+
           // Get public key
           _addLog('   Reading public key...');
-          final publicKey = await keystoreChannel.invokeMethod('getPhaseAPublicKey65');
-          
+          final publicKey = await keystoreChannel.invokeMethod(
+            'getPhaseAPublicKey65',
+          );
+
           if (publicKey != null && publicKey.length == 65) {
             _addLog('   ✓ Public key: ${_formatBytes(publicKey, 16)}...');
             _addLog('');
-            
+
             // Show Phase A information
             _addLog('📋 PHASE A INFO:');
             _addLog('   Service: ProvisioningHostApduService (HCE)');
@@ -161,17 +174,25 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
             _addLog('   Public Key: 65 bytes (uncompressed P-256)');
             _addLog('');
             _addLog('📝 PROVISIONING FLOW:');
-            _addLog('   1. ECU sends: SELECT AID (00 A4 04 00 06 F0010203040500)');
+            _addLog(
+              '   1. ECU sends: SELECT AID (00 A4 04 00 06 F0010203040500)',
+            );
             _addLog('      ← Phone returns: UID(4 bytes) + 90 00');
             _addLog('');
             _addLog('   2. ECU sends: GET_CHALLENGE Lc=0 (00 CA 00 00 00 00)');
-            _addLog('      ← Phone returns: [keyId(1) + phonePub(65) + certLen(2)] + 90 00');
+            _addLog(
+              '      ← Phone returns: [keyId(1) + phonePub(65) + certLen(2)] + 90 00',
+            );
             _addLog('      → Public key from Android Keystore');
             _addLog('');
             _addLog('   3. ECU builds challenge: vehicleId(8) || nonce(16)');
             _addLog('      ECU sends: GET_CHALLENGE Lc=24 + [challenge]');
-            _addLog('      ← Phone signs challenge with private key (Keystore)');
-            _addLog('      ← Phone returns: [sigLen(2,BE) + DER_signature] + 90 00');
+            _addLog(
+              '      ← Phone signs challenge with private key (Keystore)',
+            );
+            _addLog(
+              '      ← Phone returns: [sigLen(2,BE) + DER_signature] + 90 00',
+            );
             _addLog('');
             _addLog('   4. ECU verifies signature → stores public key in NVS');
             _addLog('');
@@ -192,13 +213,15 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
             _addLog('');
             _addLog('💡 GUIDANCE:');
             _addLog('   1. Ensure ESP32 is running and PN532 is active');
-            _addLog('   2. Send serial command "f" or "F" to force provisioning');
+            _addLog(
+              '   2. Send serial command "f" or "F" to force provisioning',
+            );
             _addLog('   3. Tap phone on the PN532 reader');
             _addLog('   4. Check logs in ESP32 Serial Monitor');
             _addLog('   5. Send "p" to view provisioning status');
-            
+
             setState(() {
-              _phaseAResult = PhaseA_Result(
+              _phaseAResult = PhaseAResult(
                 success: true,
                 message: 'HCE service ready; identity key in Keystore',
                 phonePublicKeyStored: true,
@@ -214,12 +237,11 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
         _addLog('❌ Keystore check failed: $e');
         rethrow;
       }
-      
     } catch (e) {
       _addLog('');
       _addLog('❌ ERROR: $e');
       setState(() {
-        _phaseAResult = PhaseA_Result(
+        _phaseAResult = PhaseAResult(
           success: false,
           message: e.toString(),
           phonePublicKeyStored: false,
@@ -237,24 +259,33 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
       _addLog('❌ Please select a device or enter a MAC address');
       return;
     }
-    
-    final deviceAddress = _selectedDevice?.remoteId.str ?? _deviceAddressController.text;
-    
+
+    final permissionStatus = await _blePermissionService.ensureReady(
+      requestIfNeeded: true,
+    );
+    if (!permissionStatus.ready) {
+      _addLog('⚠️ ${permissionStatus.toUserMessage()}');
+      return;
+    }
+
+    final deviceAddress =
+        _selectedDevice?.remoteId.str ?? _deviceAddressController.text;
+
     setState(() {
       _isTestingPhaseB = true;
       _phaseBResult = null;
     });
-    
+
     _addLog('═══════════════════════════════════');
     _addLog('🔷 STARTING PHASE B TEST (BLE Authentication)');
     _addLog('═══════════════════════════════════');
     _addLog('Device: $deviceAddress');
     _addLog('');
-    
+
     try {
       // Measure total time
       final stepStartTime = DateTime.now();
-      
+
       // Run authentication with progress callback
       final result = await _testService.testPhaseB(
         deviceAddress: deviceAddress,
@@ -264,23 +295,27 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
           _addLog('[$step] $message');
         },
       );
-      
+
       final stepDuration = DateTime.now().difference(stepStartTime);
       _addLog('');
       _addLog('⏱️  Total time: ${stepDuration.inMilliseconds}ms');
-      
+
       setState(() {
         _phaseBResult = result;
       });
-      
+
       if (result.success) {
         _addLog('');
         _addLog('═══════════════════════════════════');
         _addLog('✅ PHASE B COMPLETED SUCCESSFULLY!');
         _addLog('═══════════════════════════════════');
         _addLog('📊 RESULTS:');
-        _addLog('   🔗 Shared Secret: ${_formatBytes(result.sharedSecret!, 16)}...');
-        _addLog('   🔑 Encryption Key: ${_formatBytes(result.sessionEncKey!, 16)}...');
+        _addLog(
+          '   🔗 Shared Secret: ${_formatBytes(result.sharedSecret!, 16)}...',
+        );
+        _addLog(
+          '   🔑 Encryption Key: ${_formatBytes(result.sessionEncKey!, 16)}...',
+        );
         _addLog('   🔑 MAC Key: ${_formatBytes(result.sessionMacKey!, 16)}...');
         _addLog('   🎯 Challenge: ${_formatBytes(result.challenge!, 24)}');
         _addLog('');
@@ -292,17 +327,13 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
         _addLog('═══════════════════════════════════');
         _addLog('Error: ${result.message}');
       }
-      
     } catch (e, stackTrace) {
       _addLog('');
       _addLog('❌ CRITICAL ERROR: $e');
       _addLog('Stack trace: ${stackTrace.toString().substring(0, 200)}...');
-      
+
       setState(() {
-        _phaseBResult = PhaseB_Result(
-          success: false,
-          message: e.toString(),
-        );
+        _phaseBResult = PhaseBResult(success: false, message: e.toString());
       });
     } finally {
       setState(() {
@@ -313,7 +344,9 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
 
   String _formatBytes(List<int> bytes, int maxLength) {
     final limited = bytes.take(maxLength).toList();
-    return limited.map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
+    return limited
+        .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
+        .join(' ');
   }
 
   @override
@@ -323,10 +356,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
       appBar: AppBar(
         title: const Text(
           'Test Phase A/B',
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-            color: Colors.white,
-          ),
+          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
         ),
         backgroundColor: const Color(0xFF273671),
         elevation: 0,
@@ -380,9 +410,9 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
               ],
             ),
           ),
-          
+
           const SizedBox(height: 16),
-          
+
           // Device selection section
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -414,7 +444,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                   ],
                 ),
                 const SizedBox(height: 8),
-                
+
                 // Device list
                 if (_scanResults.isNotEmpty)
                   Container(
@@ -434,22 +464,27 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                       itemCount: _scanResults.length,
                       itemBuilder: (context, index) {
                         final result = _scanResults[index];
-                        final isSelected = _selectedDevice?.remoteId == result.device.remoteId;
-                        
+                        final isSelected =
+                            _selectedDevice?.remoteId == result.device.remoteId;
+
                         return ListTile(
                           dense: true,
                           selected: isSelected,
                           selectedTileColor: const Color(0xFF273671).withValues(alpha: 0.1),
                           leading: Icon(
                             Icons.bluetooth,
-                            color: isSelected ? const Color(0xFF273671) : Colors.grey,
+                            color: isSelected
+                                ? const Color(0xFF273671)
+                                : Colors.grey,
                           ),
                           title: Text(
-                            result.device.platformName.isEmpty 
-                                ? 'Unknown Device' 
+                            result.device.platformName.isEmpty
+                                ? 'Unknown Device'
                                 : result.device.platformName,
                             style: TextStyle(
-                              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                              fontWeight: isSelected
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
                             ),
                           ),
                           subtitle: Text(
@@ -466,9 +501,12 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                           onTap: () {
                             setState(() {
                               _selectedDevice = result.device;
-                              _deviceAddressController.text = result.device.remoteId.str;
+                              _deviceAddressController.text =
+                                  result.device.remoteId.str;
                             });
-                            _addLog('✓ Selected: ${result.device.platformName} (${result.device.remoteId.str})');
+                            _addLog(
+                              '✓ Selected: ${result.device.platformName} (${result.device.remoteId.str})',
+                            );
                           },
                         );
                       },
@@ -485,15 +523,18 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide.none,
                       ),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
                     ),
                   ),
               ],
             ),
           ),
-          
+
           const SizedBox(height: 16),
-          
+
           // Test buttons
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -551,8 +592,9 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
               ],
             ),
           ),
+
           const SizedBox(height: 16),
-          
+
           // Logs section
           Expanded(
             child: Padding(
@@ -605,17 +647,23 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                             tooltip: 'Copy all logs',
                             padding: EdgeInsets.zero,
                             constraints: const BoxConstraints(),
-                            onPressed: _logs.isEmpty ? null : () {
-                              final allLogs = _logs.join('\n');
-                              Clipboard.setData(ClipboardData(text: allLogs));
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text('✓ Copied ${_logs.length} log lines to clipboard'),
-                                  duration: const Duration(seconds: 2),
-                                  backgroundColor: Colors.green,
-                                ),
-                              );
-                            },
+                            onPressed: _logs.isEmpty
+                                ? null
+                                : () {
+                                    final allLogs = _logs.join('\n');
+                                    Clipboard.setData(
+                                      ClipboardData(text: allLogs),
+                                    );
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          '✓ Copied ${_logs.length} log lines to clipboard',
+                                        ),
+                                        duration: const Duration(seconds: 2),
+                                        backgroundColor: Colors.green,
+                                      ),
+                                    );
+                                  },
                           ),
                         ],
                       ),
@@ -639,19 +687,22 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                               itemBuilder: (context, index) {
                                 final log = _logs[index];
                                 Color logColor = Colors.white;
-                                
+
                                 if (log.contains('✓') || log.contains('✅')) {
                                   logColor = Colors.greenAccent;
-                                } else if (log.contains('❌') || log.contains('ERROR')) {
+                                } else if (log.contains('❌') ||
+                                    log.contains('ERROR')) {
                                   logColor = Colors.redAccent;
-                                } else if (log.contains('⚠️') || log.contains('WARNING')) {
+                                } else if (log.contains('⚠️') ||
+                                    log.contains('WARNING')) {
                                   logColor = Colors.orangeAccent;
-                                } else if (log.contains('🔷') || log.contains('═══')) {
+                                } else if (log.contains('🔷') ||
+                                    log.contains('═══')) {
                                   logColor = Colors.cyanAccent;
                                 } else if (log.contains('[Step')) {
                                   logColor = Colors.yellowAccent;
                                 }
-                                
+
                                 return Padding(
                                   padding: const EdgeInsets.only(bottom: 4),
                                   child: SelectableText(
@@ -672,7 +723,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
               ),
             ),
           ),
-          
+
           const SizedBox(height: 16),
         ],
       ),
@@ -688,7 +739,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
   ) {
     Color statusColor = Colors.white54;
     IconData statusIcon = Icons.radio_button_unchecked;
-    
+
     if (isRunning) {
       statusColor = Colors.orangeAccent;
       statusIcon = Icons.pending;
@@ -696,7 +747,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
       statusColor = Colors.greenAccent;
       statusIcon = Icons.check_circle;
     }
-    
+
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(

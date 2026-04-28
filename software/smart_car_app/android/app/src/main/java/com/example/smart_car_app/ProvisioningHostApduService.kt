@@ -24,7 +24,8 @@ class ProvisioningHostApduService : HostApduService() {
         private const val INS_OP_CONTROL = 0x3C.toByte()
         private const val INS_READ_BINARY = 0xB0.toByte()
         private const val INS_PROVISION_RESULT = 0xDA.toByte()
-        private const val SPAKE2_CHALLENGE_TTL_MS = 15000L
+        // Keep challenge alive long enough to survive PN532 link-loss + reselection retries.
+        private const val SPAKE2_CHALLENGE_TTL_MS = 45000L
         private val SELECT_OK = byteArrayOf(
             0x5A.toByte(), 0x03.toByte(), 0x02.toByte(), 0x00.toByte(), 0x00.toByte(),
             0x5C.toByte(), 0x04.toByte(), 0x01.toByte(), 0x00.toByte(), 0x01.toByte(), 0x00.toByte()
@@ -42,6 +43,7 @@ class ProvisioningHostApduService : HostApduService() {
             val challenge = pendingSpake2Challenge ?: return null
             val ageMs = SystemClock.elapsedRealtime() - pendingSpake2ChallengeTsMs
             if (ageMs > SPAKE2_CHALLENGE_TTL_MS) {
+                Log.w(TAG, "[PhaseA] Pending SPAKE2 challenge expired age=${ageMs}ms ttl=${SPAKE2_CHALLENGE_TTL_MS}ms")
                 pendingSpake2Challenge = null
                 pendingSpake2ChallengeTsMs = 0L
                 return null
@@ -218,8 +220,16 @@ class ProvisioningHostApduService : HostApduService() {
 
     private fun handleSpake2Verify(): ByteArray {
         if (!aidSelected) return SW_UNKNOWN
-        val challenge = spake2Challenge ?: readPendingSpake2Challenge() ?: return SW_SECURITY_STATUS_NOT_SATISFIED
-        if (!MasterCardSession.isActive()) return SW_SECURITY_STATUS_NOT_SATISFIED
+        val challenge = spake2Challenge ?: readPendingSpake2Challenge()
+        if (challenge == null) {
+            Log.w(TAG, "[PhaseA] SPAKE2+ verify denied: missing or expired challenge")
+            return SW_SECURITY_STATUS_NOT_SATISFIED
+        }
+        if (!MasterCardSession.isActive()) {
+            Log.w(TAG, "[PhaseA] SPAKE2+ verify denied: master session inactive")
+            return SW_SECURITY_STATUS_NOT_SATISFIED
+        }
+        spake2Challenge = challenge.copyOf()
         val masterSecret = MasterCardSession.getMasterSecret() ?: return SW_SECURITY_STATUS_NOT_SATISFIED
 
         val mac = Mac.getInstance("HmacSHA256")

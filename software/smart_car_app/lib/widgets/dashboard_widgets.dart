@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:smart_car_app/theme/app_colors.dart';
 
 class StatCard extends StatelessWidget {
   final String title;
@@ -102,15 +103,17 @@ class QuickActionCard extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(16),
       child: Container(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(23),
         decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
             colors: [
               color,
-              color.withOpacity(0.8),
+              color.withOpacity(0.6),
+              color.withOpacity(0.4),
             ],
+            stops: const [0.0, 0.5, 1.0],
           ),
           borderRadius: BorderRadius.circular(16),
           boxShadow: [
@@ -124,12 +127,19 @@ class QuickActionCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(
-              icon,
-              color: Colors.white,
-              size: 32,
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                icon,
+                color: Colors.white,
+                size: 28,
+              ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 19),
             Text(
               title,
               style: const TextStyle(
@@ -138,7 +148,7 @@ class QuickActionCard extends StatelessWidget {
                 fontWeight: FontWeight.bold,
               ),
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: 7),
             Text(
               subtitle,
               style: TextStyle(
@@ -218,7 +228,7 @@ class VehicleStatusCard extends StatelessWidget {
                         style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
-                          color: Color(0xFF273671),
+                          color: AppColors.primary,
                         ),
                       ),
                       const SizedBox(height: 4),
@@ -228,6 +238,14 @@ class VehicleStatusCard extends StatelessWidget {
                           color: Colors.grey[600],
                           fontSize: 14,
                         ),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          _buildLockBadge(vehicle['isLocked'] ?? true),
+                          const SizedBox(width: 8),
+                          _buildBatteryBadge(vehicle['batteryLevel'] ?? 50),
+                        ],
                       ),
                     ],
                   ),
@@ -411,8 +429,75 @@ class VehicleStatusCard extends StatelessWidget {
   }
 
   Color _getBatteryColor(int batteryLevel) {
-    if (batteryLevel > 60) return Colors.green;
-    if (batteryLevel > 30) return Colors.orange;
-    return Colors.red;
+    if (batteryLevel > 60) return AppColors.success;
+    if (batteryLevel > 30) return AppColors.warning;
+    return AppColors.error;
+  }
+
+  /// Build lock status badge
+  Widget _buildLockBadge(bool isLocked) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: (isLocked ? AppColors.error : AppColors.success).withOpacity(0.1),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: (isLocked ? AppColors.error : AppColors.success).withOpacity(0.3),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            isLocked ? Icons.lock : Icons.lock_open,
+            size: 14,
+            color: isLocked ? AppColors.error : AppColors.success,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            isLocked ? 'Locked' : 'Unlocked',
+            style: TextStyle(
+              color: isLocked ? AppColors.error : AppColors.success,
+              fontWeight: FontWeight.bold,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Build battery level badge
+  Widget _buildBatteryBadge(int batteryLevel) {
+    final batteryColor = _getBatteryColor(batteryLevel);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: batteryColor.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: batteryColor.withOpacity(0.3),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.battery_std,
+            size: 14,
+            color: batteryColor,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            '$batteryLevel%',
+            style: TextStyle(
+              color: batteryColor,
+              fontWeight: FontWeight.bold,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

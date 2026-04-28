@@ -20,10 +20,13 @@ object ProvisioningResponseBuilder {
     
     /**
      * Build base credentials packet for Phase A.
-     * Format: [keyIdLen(1) + keyId(keyIdLen) + publicKey(65) + certLen(2) + certificate]
+        * Format: [keyIdLen(1) + keyId(keyIdLen) + publicKey(65) + certLen(2) + certificate + optional TLVs]
+        * Optional TLVs:
+        * - 0x90 len=1  : fast artifact version
+        * - 0x91 len=32 : fast artifact key bytes
      * 
      * For now, we don't include certificate (certLen = 0).
-     * Returns 69 bytes total: 1 + 1 + 65 + 2 + 0
+    * Returns variable length. Legacy readers can ignore trailing bytes.
      */
     fun buildBaseCredentialsPacket(context: Context): ByteArray {
         Log.d(TAG, "Building base credentials packet")
@@ -38,8 +41,18 @@ object ProvisioningResponseBuilder {
             return ByteArray(0)
         }
         
+        val fastVersion = DataStoreUtil.getOrCreateFastArtifactVersion(context)
+        val fastKey = DataStoreUtil.getOrCreateFastArtifactKey(context)
+        if (fastKey.size != 32) {
+            Log.e(TAG, "Invalid fast artifact key size: ${fastKey.size}")
+            return ByteArray(0)
+        }
+
+        val fastVersionTlv = byteArrayOf(0x90.toByte(), 0x01.toByte(), (fastVersion and 0xFF).toByte())
+        val fastKeyTlv = byteArrayOf(0x91.toByte(), 0x20.toByte()) + fastKey
+
         // Build packet
-        val packet = ByteArray(69) // keyIdLen(1) + keyId(1) + pubKey(65) + certLen(2)
+        val packet = ByteArray(69 + fastVersionTlv.size + fastKeyTlv.size)
         var offset = 0
         
         // KeyId length (1 byte)
@@ -54,12 +67,19 @@ object ProvisioningResponseBuilder {
         
         // Certificate length (2 bytes, big-endian) - 0 for now
         packet[offset++] = 0x00
-        packet[offset] = 0x00
+        packet[offset++] = 0x00
+
+        // Append fast-path artifact TLVs (versioned contract extension).
+        System.arraycopy(fastVersionTlv, 0, packet, offset, fastVersionTlv.size)
+        offset += fastVersionTlv.size
+        System.arraycopy(fastKeyTlv, 0, packet, offset, fastKeyTlv.size)
         
         Log.i(TAG, "✓ Base credentials packet built: ${packet.size} bytes")
         Log.d(TAG, "   KeyIdLen: 1, KeyId: 0x01")
         Log.d(TAG, "   Public key: ${publicKey65.toHex()}")
         Log.d(TAG, "   Cert length: 0")
+        Log.d(TAG, "   Fast artifact version: ${fastVersion and 0xFF}")
+        Log.d(TAG, "   Fast artifact key len: ${fastKey.size}")
         
         return packet
     }

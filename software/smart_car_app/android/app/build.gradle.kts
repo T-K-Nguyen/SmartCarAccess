@@ -13,6 +13,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -40,6 +41,8 @@ flutter {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+
     // 🔹 Import Firebase BoM (Bill of Materials)
     implementation(platform("com.google.firebase:firebase-bom:34.6.0"))
 
@@ -50,4 +53,6 @@ dependencies {
     implementation("com.google.firebase:firebase-firestore")
     implementation("com.google.firebase:firebase-messaging")
     implementation("androidx.core.uwb:uwb:1.0.0-alpha08")
+    
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 }

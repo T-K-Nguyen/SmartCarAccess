@@ -11,6 +11,9 @@ object DataStoreUtil {
     private const val KEY_PROV_VEHICLE_PUB = "prov_vehicle_pub_hex"
     private const val KEY_PROV_WRITE_DATA_HEX = "prov_write_data_hex"
     private const val KEY_PROV_UPDATED_AT_MS = "prov_updated_at_ms"
+    private const val KEY_FAST_ARTIFACT_VERSION = "fast_artifact_version"
+    private const val KEY_FAST_ARTIFACT_KEY_HEX = "fast_artifact_key_hex"
+    private const val DEFAULT_FAST_ARTIFACT_VERSION = 0x01
 
     fun getOrCreate4ByteUid(context: Context): ByteArray {
         val prefs: SharedPreferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -99,5 +102,36 @@ object DataStoreUtil {
             .remove(KEY_PROV_WRITE_DATA_HEX)
             .remove(KEY_PROV_UPDATED_AT_MS)
             .commit()
+    }
+
+    fun getOrCreateFastArtifactVersion(context: Context): Int {
+        val prefs: SharedPreferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (!prefs.contains(KEY_FAST_ARTIFACT_VERSION)) {
+            prefs.edit().putInt(KEY_FAST_ARTIFACT_VERSION, DEFAULT_FAST_ARTIFACT_VERSION).commit()
+        }
+        return prefs.getInt(KEY_FAST_ARTIFACT_VERSION, DEFAULT_FAST_ARTIFACT_VERSION)
+    }
+
+    fun getOrCreateFastArtifactKey(context: Context): ByteArray {
+        val prefs: SharedPreferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val existingHex = prefs.getString(KEY_FAST_ARTIFACT_KEY_HEX, null)
+        if (!existingHex.isNullOrEmpty()) {
+            val parsed = try {
+                val parsed = ByteArrayHexUtil.hexToBytes(existingHex)
+                if (parsed.size == 32) parsed else null
+            } catch (_: Exception) {
+                null
+            }
+            if (parsed != null) {
+                return parsed
+            }
+        }
+
+        val rnd = SecureRandom()
+        val key = ByteArray(32)
+        rnd.nextBytes(key)
+        val keyHex = key.joinToString("") { String.format("%02X", it) }
+        prefs.edit().putString(KEY_FAST_ARTIFACT_KEY_HEX, keyHex).commit()
+        return key
     }
 }
