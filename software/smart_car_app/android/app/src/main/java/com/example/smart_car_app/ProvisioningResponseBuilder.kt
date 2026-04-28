@@ -17,6 +17,8 @@ import javax.crypto.spec.SecretKeySpec
  */
 object ProvisioningResponseBuilder {
     private const val TAG = "ProvisioningResponseBuilder"
+    private const val MAX_DER_SIGNATURE_LEN = 70
+    private const val MAX_SIGNATURE_RETRY_ATTEMPTS = 32
     
     /**
      * Build base credentials packet for Phase A.
@@ -108,22 +110,7 @@ object ProvisioningResponseBuilder {
             Log.w(TAG, "Challenge size is ${challenge.size}, expected 24 bytes")
         }
         
-        // Sign challenge with Keystore identity key.
-        // Some PN532 + phone combinations are flaky when APDU payload exceeds 72 bytes,
-        // so prefer DER signatures <= 70 bytes (packet <= 74 with SW1SW2).
-        var signature = KeystoreBridge.signPhaseA(challenge)
-        if (signature != null && signature.size > 70) {
-            for (attempt in 2..8) {
-                val retrySig = KeystoreBridge.signPhaseA(challenge)
-                if (retrySig != null) {
-                    signature = retrySig
-                    if (retrySig.size <= 70) {
-                        Log.i(TAG, "Using compact DER signature after retry #$attempt (len=${retrySig.size})")
-                        break
-                    }
-                }
-            }
-        }
+        val signature = buildCompactSignature(challenge)
 
         if (signature == null) {
             Log.e(TAG, "Failed to sign challenge")
@@ -176,19 +163,7 @@ object ProvisioningResponseBuilder {
             return ByteArray(0)
         }
 
-        var signature = KeystoreBridge.signPhaseA(challenge)
-        if (signature != null && signature.size > 70) {
-            for (attempt in 2..8) {
-                val retrySig = KeystoreBridge.signPhaseA(challenge)
-                if (retrySig != null) {
-                    signature = retrySig
-                    if (retrySig.size <= 70) {
-                        Log.i(TAG, "Using compact DER signature+MAC after retry #$attempt (len=${retrySig.size})")
-                        break
-                    }
-                }
-            }
-        }
+        val signature = buildCompactSignature(challenge)
         if (signature == null) {
             Log.e(TAG, "Failed to sign challenge")
             return ByteArray(0)
@@ -216,6 +191,32 @@ object ProvisioningResponseBuilder {
         Log.d(TAG, "   Signature length (BE): ${signature.size}")
 
         return packet
+    }
+
+    private fun buildCompactSignature(challenge: ByteArray): ByteArray? {
+        // Some PN532 + phone combinations are flaky when APDU payload exceeds 72 bytes,
+        // so keep retrying until we get a compact DER signature when possible.
+        var bestSignature: ByteArray? = null
+        for (attempt in 1..MAX_SIGNATURE_RETRY_ATTEMPTS) {
+            val signature = KeystoreBridge.signPhaseA(challenge) ?: continue
+            if (bestSignature == null || signature.size < bestSignature!!.size) {
+                bestSignature = signature
+            }
+            if (signature.size <= MAX_DER_SIGNATURE_LEN) {
+                if (attempt > 1) {
+                    Log.i(TAG, "Using compact DER signature after retry #$attempt (len=${signature.size})")
+                }
+                return signature
+            }
+        }
+
+        if (bestSignature != null) {
+            Log.w(
+                TAG,
+                "Could not obtain compact DER signature after $MAX_SIGNATURE_RETRY_ATTEMPTS attempts; using shortest len=${bestSignature!!.size}",
+            )
+        }
+        return bestSignature
     }
     
     /**

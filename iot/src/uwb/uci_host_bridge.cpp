@@ -9,6 +9,7 @@ namespace {
 UwbUci::UciSessionManager* g_manager = nullptr;
 bool g_hasCachedConfig = false;
 bool g_pendingStart = false;
+bool g_pendingStop = false;
 bool g_busy = false;
 UwbUci::UciRunConfig g_pendingCfg;
 
@@ -18,6 +19,7 @@ void init(UwbUci::UciSessionManager* manager) {
   g_manager = manager;
   g_hasCachedConfig = false;
   g_pendingStart = false;
+  g_pendingStop = false;
   g_busy = false;
 }
 
@@ -93,12 +95,13 @@ bool requestStop(const char** err) {
     return false;
   }
 
-  const bool ok = g_manager->stopActiveSession();
-  if (!ok) {
-    if (err) *err = "stop_failed";
+  if (g_pendingStop) {
+    if (err) *err = "stop_already_pending";
     return false;
   }
-  Serial.println("[UCI][BLE-OOB] stop completed");
+
+  g_pendingStop = true;
+  Serial.println("[UCI][BLE-OOB] stop requested");
   return true;
 }
 
@@ -111,23 +114,33 @@ bool isBusy() {
 }
 
 bool hasPending() {
-  return g_pendingStart;
+  return g_pendingStart || g_pendingStop;
 }
 
 void tick() {
-  if (!g_manager || !g_pendingStart || g_busy) {
+  if (!g_manager || g_busy) {
+    return;
+  }
+
+  if (!g_pendingStart && !g_pendingStop) {
     return;
   }
 
   g_busy = true;
-  g_pendingStart = false;
-
-  Serial.printf("[UCI][BLE-OOB] start sid=%lu local=0x%04X dest=0x%04X\n",
-                static_cast<unsigned long>(g_pendingCfg.sessionId),
-                g_pendingCfg.localMac,
-                g_pendingCfg.destMac);
-  const bool ok = g_manager->runOnce(g_pendingCfg);
-  Serial.printf("[UCI][BLE-OOB] result=%s\n", ok ? "SUCCESS" : "FAIL");
+  if (g_pendingStop) {
+    g_pendingStop = false;
+    Serial.println("[UCI][BLE-OOB] stop executing");
+    const bool ok = g_manager->stopActiveSession();
+    Serial.printf("[UCI][BLE-OOB] stop result=%s\n", ok ? "SUCCESS" : "FAIL");
+  } else if (g_pendingStart) {
+    g_pendingStart = false;
+    Serial.printf("[UCI][BLE-OOB] start sid=%lu local=0x%04X dest=0x%04X\n",
+                  static_cast<unsigned long>(g_pendingCfg.sessionId),
+                  g_pendingCfg.localMac,
+                  g_pendingCfg.destMac);
+    const bool ok = g_manager->runOnce(g_pendingCfg);
+    Serial.printf("[UCI][BLE-OOB] result=%s\n", ok ? "SUCCESS" : "FAIL");
+  }
 
   g_busy = false;
 }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui';
+import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
@@ -12,6 +13,7 @@ import 'nfc_provisioning_service.dart';
 import 'pke_auth_orchestrator.dart';
 import 'pke_rollout_flags.dart';
 import 'pke_telemetry.dart';
+import 'uwb_service.dart';
 
 class PkeBackgroundService {
   static const String _channelId = 'pke_background_runtime';
@@ -168,6 +170,7 @@ void onStart(ServiceInstance service) async {
 
   final telemetry = PkeTelemetry(source: 'app_bg');
   final authOrchestrator = PkeAuthOrchestrator(telemetry: telemetry);
+  final uwbService = UwbService();
   var authInFlight = false;
   var scanInFlight = false;
   var consecutiveAuthFailures = 0;
@@ -229,6 +232,63 @@ void onStart(ServiceInstance service) async {
     nextAllowedAuthAt = DateTime.fromMillisecondsSinceEpoch(0);
   }
 
+  Future<bool> runUwbHandoff({
+    String? deviceAddress,
+    BluetoothDevice? discoveredDevice,
+  }) async {
+    try {
+      final targetAddress = deviceAddress?.trim().toUpperCase();
+      BluetoothDevice? targetDevice = discoveredDevice;
+
+      if (targetDevice == null) {
+        if (targetAddress == null || targetAddress.isEmpty) {
+          throw Exception('No BLE target available for UWB handoff');
+        }
+
+        final results = await uwbService.scan(timeout: const Duration(seconds: 8));
+        for (final result in results) {
+          if (result.device.remoteId.str.toUpperCase() == targetAddress) {
+            targetDevice = result.device;
+            break;
+          }
+        }
+      }
+
+      if (targetDevice == null) {
+        throw Exception('Unable to resolve BLE target for UWB handoff');
+      }
+
+      telemetry.emit(
+        event: PkeTelemetryEvent.scanWake,
+        details: 'background_uwb_handoff_start',
+      );
+      debugPrint(
+        '[PKE][BG] UWB handoff target=${targetDevice.remoteId.str} name=${targetDevice.platformName}',
+      );
+
+      await uwbService.connect(targetDevice);
+
+      final payload = uwbService.buildDefaultOobPayloadV1(
+        role: UwbOobPayload.carRoleControlee,
+        sessionId: DateTime.now().millisecondsSinceEpoch & 0xFFFFFFFF,
+        phoneMac: 0x0001,
+        carMac: 0x0002,
+        channel: 9,
+      );
+
+      final prepared = await uwbService.preparePayloadForOob(payload);
+      final preparedPayload = prepared['payload'] as Uint8List;
+
+      await uwbService.sendOobThenJoinFromPayload(preparedPayload);
+
+      debugPrint('[PKE][BG] UWB handoff completed');
+      return true;
+    } catch (e) {
+      debugPrint('[PKE][BG] UWB handoff failed: $e');
+      return false;
+    }
+  }
+
   Future<bool> runAuthOnce(
     String trigger, {
     String? deviceAddress,
@@ -280,13 +340,22 @@ void onStart(ServiceInstance service) async {
       );
 
       if (result.success) {
+        debugPrint('[PKE][BG] auth success - releasing BLE auth session before UWB handoff');
+        await authOrchestrator.disconnect();
+
+        final handoffOk = await runUwbHandoff(
+          deviceAddress: target,
+          discoveredDevice: discoveredDevice,
+        );
         resetRetryBackoff();
         telemetry.emit(
           event: PkeTelemetryEvent.unlockDecision,
-          unlockDecision: 'allow',
-          details: 'background_auth_success',
+          unlockDecision: handoffOk ? 'allow' : 'deny',
+          details: handoffOk
+              ? 'background_auth_success'
+              : 'background_auth_success_uwb_failed',
         );
-        return true;
+        return handoffOk;
       } else {
         scheduleRetryBackoff();
         telemetry.emit(
@@ -404,6 +473,9 @@ void onStart(ServiceInstance service) async {
     debugPrint('[PKE][BG] scan subscription cancelled');
     unawaited(FlutterBluePlus.stopScan());
     debugPrint('[PKE][BG] BLE scan stopped');
+    unawaited(uwbService.stopRanging());
+    unawaited(uwbService.disconnect());
+    debugPrint('[PKE][BG] UWB service cleanup requested');
     unawaited(authOrchestrator.disconnect());
     debugPrint('[PKE][BG] auth orchestrator disconnected');
     telemetry.emit(

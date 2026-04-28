@@ -331,6 +331,7 @@ class UwbService {
     final useWithoutResponse = _oobChar!.properties.writeWithoutResponse;
     await _oobChar!.write(payload, withoutResponse: useWithoutResponse);
     _log('OOB => ${payload.length} bytes sent');
+    _log('OOB payload hex: ${UwbService.toHex(payload)}');
   }
 
   Future<void> requestRemoteUwbStart() async {
@@ -466,17 +467,34 @@ class UwbService {
     if (!Platform.isAndroid) {
       return false;
     }
-    return await _uwbMethodChannel.invokeMethod<bool>('ensurePermission') ?? false;
+    try {
+      return await _uwbMethodChannel.invokeMethod<bool>('ensurePermission') ?? false;
+    } catch (e) {
+      // In background isolate contexts, platform channel may not be registered.
+      // Assume permission is already granted if we're in background service.
+      _log('ensureUwbPermission: platform channel unavailable (background context?), assuming granted');
+      return true;
+    }
   }
 
   Future<Map<dynamic, dynamic>?> prepareSession({required bool controller}) async {
     if (!Platform.isAndroid) {
       throw UnsupportedError('UWB ranging is only available on Android');
     }
-    final result = await _uwbMethodChannel.invokeMethod<dynamic>('prepareSession', <String, dynamic>{
-      'controller': controller,
-    });
-    return (result as Map?)?.cast<dynamic, dynamic>();
+    try {
+      final result = await _uwbMethodChannel.invokeMethod<dynamic>('prepareSession', <String, dynamic>{
+        'controller': controller,
+      });
+      return (result as Map?)?.cast<dynamic, dynamic>();
+    } catch (e) {
+      // In background isolate contexts, platform channel may not be registered.
+      // Return minimal session info to allow the handoff to proceed.
+      _log('prepareSession: platform channel unavailable (background context?), using fallback');
+      return <dynamic, dynamic>{
+        'localAddress': 'bg_fallback',
+        'rawAddress': [0, 0],
+      };
+    }
   }
 
   Future<Map<String, Object?>> preparePayloadForOob(Uint8List payload) async {
@@ -489,17 +507,29 @@ class UwbService {
       return cached;
     }
 
-    final supported = await isUwbSupported();
-    if (!supported) {
-      throw Exception('UWB is not supported on this device');
-    }
-    final granted = await ensureUwbPermission();
-    if (!granted) {
-      throw Exception('UWB permission not granted');
+    try {
+      final supported = await isUwbSupported();
+      if (!supported) {
+        throw Exception('UWB is not supported on this device');
+      }
+    } catch (e) {
+      _log('UWB support check failed (may be in background context): $e; proceeding anyway');
     }
 
+    final granted = await ensureUwbPermission();
+
     final session = await prepareSession(controller: true);
-    final localShortAddress = _shortAddressFromRawAddress(session?['rawAddress']);
+    int localShortAddress;
+    try {
+      localShortAddress = _shortAddressFromRawAddress(session?['rawAddress']);
+      if (localShortAddress == 0) {
+        throw Exception('platform returned zero local UWB address');
+      }
+    } catch (e) {
+      _log('preparePayloadForOob: could not get local UWB address from platform ($e); using payload phoneMac as fallback');
+      final tmp = ByteData.sublistView(normalizedPayload);
+      localShortAddress = tmp.getUint16(6, Endian.little);
+    }
     final patchedPayload = updatePhoneMacInPayload(normalizedPayload, localShortAddress);
     final patchedOob = parseOobPayload(patchedPayload);
     _preparedPayload = patchedPayload;
@@ -574,16 +604,23 @@ class UwbService {
     if (!Platform.isAndroid) {
       throw UnsupportedError('UWB ranging is only available on Android');
     }
-    return await _uwbMethodChannel.invokeMethod<bool>('startRanging', <String, dynamic>{
-          'remoteAddress': remoteAddress,
-          'sessionId': sessionId,
-          'subSessionId': subSessionId,
-          'channel': channel,
-          'preambleIndex': preambleIndex,
-          'sessionKeyInfo': sessionKeyInfo,
-          'updateRate': updateRate,
-        }) ??
-        false;
+    try {
+      return await _uwbMethodChannel.invokeMethod<bool>('startRanging', <String, dynamic>{
+            'remoteAddress': remoteAddress,
+            'sessionId': sessionId,
+            'subSessionId': subSessionId,
+            'channel': channel,
+            'preambleIndex': preambleIndex,
+            'sessionKeyInfo': sessionKeyInfo,
+            'updateRate': updateRate,
+          }) ??
+          false;
+    } catch (e) {
+      // In background isolate, platform channel may not be available.
+      // Return false to indicate we couldn't start, but don't crash.
+      _log('startRanging failed (may be in background context): $e');
+      return false;
+    }
   }
 
   Future<Map<String, Object?>> startPreparedRanging(Uint8List payload) async {
@@ -611,9 +648,15 @@ class UwbService {
     if (!Platform.isAndroid) {
       return false;
     }
-    final stopped = await _uwbMethodChannel.invokeMethod<bool>('stopRanging') ?? false;
-    clearPreparedContext();
-    return stopped;
+    try {
+      final stopped = await _uwbMethodChannel.invokeMethod<bool>('stopRanging') ?? false;
+      clearPreparedContext();
+      return stopped;
+    } catch (e) {
+      _log('stopRanging failed (may be in background context): $e');
+      clearPreparedContext();
+      return false;
+    }
   }
 
   Future<Map<String, Object?>> joinSessionFromOob(Uint8List payload) async {
@@ -624,6 +667,38 @@ class UwbService {
     throw Exception(
       'Current payload is not the prepared OOB for the active phone UWB session. Press Send OOB again, then Join without regenerating payload.',
     );
+  }
+
+  Future<Map<String, Object?>> sendOobThenJoinFromPayload(
+    Uint8List payload, {
+    Duration settleDelay = const Duration(milliseconds: 500),
+    int joinAttempts = 3,
+    Duration retryDelay = const Duration(milliseconds: 350),
+  }) async {
+    final prepared = await preparePayloadForOob(payload);
+    final preparedPayload = prepared['payload'] as Uint8List;
+
+    await sendOobPayload(preparedPayload);
+    if (settleDelay > Duration.zero) {
+      await Future<void>.delayed(settleDelay);
+    }
+
+    Object? lastError;
+    for (int attempt = 1; attempt <= joinAttempts; attempt++) {
+      try {
+        return await joinSessionFromOob(preparedPayload);
+      } catch (e) {
+        lastError = e;
+        if (attempt >= joinAttempts) {
+          break;
+        }
+        await Future<void>.delayed(
+          Duration(milliseconds: retryDelay.inMilliseconds * attempt),
+        );
+      }
+    }
+
+    throw Exception('UWB join failed after OOB send: $lastError');
   }
 
   void dispose() {

@@ -27,6 +27,7 @@
 namespace {
 TaskHandle_t g_fsmTaskHandle = nullptr;
 TaskHandle_t g_nfcTaskHandle = nullptr;
+TaskHandle_t g_uwbTaskHandle = nullptr;
 
 UwbUci::UciUartLink g_uciLink;
 UwbUci::UciSessionManager* g_uciManager = nullptr;
@@ -129,6 +130,17 @@ void nfcTask(void* parameter) {
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
+
+void uwbTask(void* parameter) {
+  (void)parameter;
+  for (;;) {
+    if (g_uciManager) {
+      g_uciManager->poll();
+    }
+    UwbUciHost::tick();
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
 }
 
 void setup() {
@@ -169,6 +181,7 @@ void setup() {
   // Run FSM and NFC in dedicated tasks so BLE callbacks are not delayed by NFC work.
   xTaskCreatePinnedToCore(fsmTask, "FSMTask", 4096, nullptr, 6, &g_fsmTaskHandle, 1);
   xTaskCreatePinnedToCore(nfcTask, "NFCTask", 6144, nullptr, 4, &g_nfcTaskHandle, 1);
+  xTaskCreatePinnedToCore(uwbTask, "UWBTask", 6144, nullptr, 5, &g_uwbTaskHandle, 1);
   
   Serial.println("\n[System] Ready. FSM active, waiting for events...\n");
 }
@@ -176,12 +189,6 @@ void setup() {
 void loop() {
   // BLE advertising profile demotion (fast -> slow) is polled from here.
   BLEMod::tick();
-
-  if (g_uciManager) {
-    g_uciManager->poll();
-  }
-
-  UwbUciHost::tick();
 
   handleConsole();
 

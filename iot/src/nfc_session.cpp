@@ -170,8 +170,16 @@ namespace {
             }
 
             if (!reqOk) {
-                Serial.printf("[PhaseA] SPAKE2+ round %u: REQUEST failed\n", round);
-                continue;
+                // Some phone/HCE combinations log the request as stored but still fail the PN532 ack path.
+                // Continue to VERIFY after a reselect so we can use the cached challenge instead of discarding the round.
+                Serial.printf("[PhaseA] SPAKE2+ round %u: REQUEST ack flaky; trying VERIFY anyway after reselect\n", round);
+                releaseTarget();
+                delay(80);
+                if (!ensureSelected(4000)) {
+                    Serial.printf("[PhaseA] SPAKE2+ round %u: reselect before VERIFY failed\n", round);
+                    continue;
+                }
+                delay(120);
             }
 
             uint8_t verResp[96];
@@ -864,39 +872,47 @@ namespace {
 
         // Ignore serial input for the first 1500ms after boot to avoid garbage triggering destructive commands
         if (millis() - bootMillis < 1500) {
-            while (Serial.available()) Serial.read(); // flush
+            for (size_t drained = 0; Serial.available() > 0 && drained < 32; ++drained) {
+                Serial.read();
+            }
             return;
         }
 
-        while (Serial.available()) {
-            char c = Serial.read();
-            if (c < 32 || c > 126) continue; // non-printable guard
+        if (!Serial.available()) {
+            return;
+        }
 
-            uint32_t now = millis();
-            if (c == lastCmd && now - lastCmdMs < 250) continue; // debounce bursts
-            lastCmd = c; lastCmdMs = now;
+        const char c = static_cast<char>(Serial.read());
+        if (c < 32 || c > 126) {
+            return;
+        }
 
-            if (c == 'p') {
-                // Show FSM diagnostics
-                FSMIntegration::SerialCmd::printDiagnostics();
-            } else if (c == 'f') {
-                FSMIntegration::SerialCmd::toggleForceProvision();
-            } else if (c == 'F') {
-                FSMIntegration::SerialCmd::armOneShotForce();
-            } else if (c == 'r') {
-                FSMIntegration::SerialCmd::clearKeys();
-            } else if (c == 'C') {
-                FSMIntegration::SerialCmd::clearAll();
-            } else if (c == 'v') {
-                bool ok = ProvisioningPhase::validateStoredCertMatchesStoredPub();
-                Serial.printf("[Admin] Cert vs pub match: %s\n", ok ? "YES" : "NO/UNAVAILABLE");
-            } else if (c == 'x') {
-                uint8_t pub[65]; size_t pubLen = ProvisioningPhase::getPhonePubRaw(pub, sizeof(pub));
-                if (pubLen == 65) { Serial.print("[Admin] pubKey65: "); printHex(pub, 65); }
-                else Serial.println("[Admin] pubKey not stored");
-            } else if (c == 'h') {
-                Serial.println("Commands: p f F r C v x h");
-            }
+        uint32_t now = millis();
+        if (c == lastCmd && now - lastCmdMs < 250) {
+            return;
+        }
+        lastCmd = c; lastCmdMs = now;
+
+        if (c == 'p') {
+            // Show FSM diagnostics
+            FSMIntegration::SerialCmd::printDiagnostics();
+        } else if (c == 'f') {
+            FSMIntegration::SerialCmd::toggleForceProvision();
+        } else if (c == 'F') {
+            FSMIntegration::SerialCmd::armOneShotForce();
+        } else if (c == 'r') {
+            FSMIntegration::SerialCmd::clearKeys();
+        } else if (c == 'C') {
+            FSMIntegration::SerialCmd::clearAll();
+        } else if (c == 'v') {
+            bool ok = ProvisioningPhase::validateStoredCertMatchesStoredPub();
+            Serial.printf("[Admin] Cert vs pub match: %s\n", ok ? "YES" : "NO/UNAVAILABLE");
+        } else if (c == 'x') {
+            uint8_t pub[65]; size_t pubLen = ProvisioningPhase::getPhonePubRaw(pub, sizeof(pub));
+            if (pubLen == 65) { Serial.print("[Admin] pubKey65: "); printHex(pub, 65); }
+            else Serial.println("[Admin] pubKey not stored");
+        } else if (c == 'h') {
+            Serial.println("Commands: p f F r C v x h");
         }
     }
 } // anonymous namespace

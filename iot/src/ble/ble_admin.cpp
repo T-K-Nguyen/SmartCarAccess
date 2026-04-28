@@ -220,6 +220,13 @@ namespace {
     explicit AdminUwbOobCallbacks(NimBLECharacteristic* info): _info(info) {}
     void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
       std::string v = c->getValue();
+        // Dump raw payload for debugging to help diagnose bad_mac issues
+        Serial.print("[BLE-Admin] OOB raw bytes:");
+        for (size_t i = 0; i < v.size(); ++i) {
+          uint8_t b = static_cast<uint8_t>(v[i]);
+          Serial.printf(" %02X", b);
+        }
+        Serial.println();
       const uint8_t* raw = reinterpret_cast<const uint8_t*>(v.data());
       const char* err = nullptr;
       const bool ok = UwbUciHost::submitBleOob(raw, v.size(), &err);
