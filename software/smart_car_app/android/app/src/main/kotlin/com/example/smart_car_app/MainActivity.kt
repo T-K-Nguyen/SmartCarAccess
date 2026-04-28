@@ -28,6 +28,7 @@ class MainActivity : FlutterActivity() {
 
     private var readerModeEnabled = false
     private var isForeground = false
+    private var uwbBridge: UwbRangingBridge? = null
     private val nfcAdapter: NfcAdapter? by lazy { NfcAdapter.getDefaultAdapter(this) }
     private val pendingIntent: PendingIntent by lazy {
         val intent = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -36,6 +37,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        uwbBridge = UwbRangingBridge(this, flutterEngine.dartExecutor.binaryMessenger)
         // Register Phase B handshake channel (Android Keystore-backed ECDSA signing)
         HandshakeChannel.register(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
@@ -250,6 +252,23 @@ class MainActivity : FlutterActivity() {
             disableReaderMode()
         }
         disableForegroundDispatch()
+    }
+
+    override fun onDestroy() {
+        uwbBridge?.dispose()
+        uwbBridge = null
+        super.onDestroy()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (uwbBridge?.onRequestPermissionsResult(requestCode, grantResults) == true) {
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 
     private fun enableReaderMode() {

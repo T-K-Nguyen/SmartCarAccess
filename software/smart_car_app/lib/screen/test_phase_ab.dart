@@ -454,7 +454,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                       borderRadius: BorderRadius.circular(12),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.05),
+                          color: Colors.black.withValues(alpha: 0.05),
                           blurRadius: 10,
                           offset: const Offset(0, 2),
                         ),
@@ -470,9 +470,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                         return ListTile(
                           dense: true,
                           selected: isSelected,
-                          selectedTileColor: const Color(
-                            0xFF273671,
-                          ).withOpacity(0.1),
+                          selectedTileColor: const Color(0xFF273671).withValues(alpha: 0.1),
                           leading: Icon(
                             Icons.bluetooth,
                             color: isSelected
@@ -607,7 +605,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
                   borderRadius: BorderRadius.circular(12),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.1),
+                      color: Colors.black.withValues(alpha: 0.1),
                       blurRadius: 10,
                       offset: const Offset(0, 2),
                     ),
@@ -753,7 +751,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.1),
+        color: Colors.white.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: isSuccess ? Colors.greenAccent : Colors.white24,
@@ -783,7 +781,7 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
           Text(
             subtitle,
             style: TextStyle(
-              color: Colors.white.withOpacity(0.7),
+              color: Colors.white.withValues(alpha: 0.7),
               fontSize: 11,
             ),
           ),
@@ -791,4 +789,5 @@ class _TestPhaseABScreenState extends State<TestPhaseABScreen> {
       ),
     );
   }
+
 }

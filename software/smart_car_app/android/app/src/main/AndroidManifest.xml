@@ -14,9 +14,11 @@
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.UWB_RANGING" />
     <!-- Location for BLE scan on pre-Android 12 devices -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-feature android:name="android.hardware.uwb" android:required="false" />
     <!-- Vibration for notifications -->
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Background BLE runtime prerequisites (Step 7) -->
