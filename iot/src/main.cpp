@@ -168,7 +168,7 @@ void setup() {
 
   // Run FSM and NFC in dedicated tasks so BLE callbacks are not delayed by NFC work.
   xTaskCreatePinnedToCore(fsmTask, "FSMTask", 4096, nullptr, 6, &g_fsmTaskHandle, 1);
-  // xTaskCreatePinnedToCore(nfcTask, "NFCTask", 6144, nullptr, 4, &g_nfcTaskHandle, 1);
+  xTaskCreatePinnedToCore(nfcTask, "NFCTask", 6144, nullptr, 4, &g_nfcTaskHandle, 1);
   
   Serial.println("\n[System] Ready. FSM active, waiting for events...\n");
 }

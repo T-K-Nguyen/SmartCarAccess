@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'nfc_provisioning_service.dart';
 import 'pke_auth_orchestrator.dart';
@@ -144,15 +145,24 @@ Future<bool> onIosBackground(ServiceInstance service) async {
 
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
-  const Duration scanTimeout = Duration(seconds: 4);
-  const Duration scanTick = Duration(seconds: 8);
-  const Duration retryBase = Duration(seconds: 2);
-  const Duration retryMax = Duration(seconds: 20);
-
   WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
 
   debugPrint('[PKE][BG] onStart entered');
+
+  // Check if background service is enabled; stop immediately if disabled
+  final prefs = await SharedPreferences.getInstance();
+  final isEnabled = prefs.getBool('pke_bg_service_enabled') ?? true;
+  if (!isEnabled) {
+    debugPrint('[PKE][BG] Background service is disabled, stopping immediately');
+    service.stopSelf();
+    return;
+  }
+
+  const Duration scanTimeout = Duration(seconds: 4);
+  const Duration scanTick = Duration(seconds: 8);
+  const Duration retryBase = Duration(seconds: 2);
+  const Duration retryMax = Duration(seconds: 20);
 
   await NfcProvisioningService.initialize(ownerIdHint: 'background');
 
@@ -385,18 +395,25 @@ void onStart(ServiceInstance service) async {
   }
 
   void stopService() {
-    debugPrint('[PKE][BG] stopService requested');
+    debugPrint('[PKE][BG] stopService requested - beginning cleanup');
     heartbeat?.cancel();
+    debugPrint('[PKE][BG] heartbeat timer cancelled');
     scanLoop?.cancel();
+    debugPrint('[PKE][BG] scan loop timer cancelled');
     unawaited(scanSubscription?.cancel());
+    debugPrint('[PKE][BG] scan subscription cancelled');
     unawaited(FlutterBluePlus.stopScan());
+    debugPrint('[PKE][BG] BLE scan stopped');
     unawaited(authOrchestrator.disconnect());
+    debugPrint('[PKE][BG] auth orchestrator disconnected');
     telemetry.emit(
       event: PkeTelemetryEvent.unlockDecision,
       unlockDecision: 'deny',
       details: 'background_service_stopped',
     );
+    debugPrint('[PKE][BG] calling service.stopSelf()');
     service.stopSelf();
+    debugPrint('[PKE][BG] service.stopSelf() completed');
   }
 
   service.on('stopService').listen((_) {

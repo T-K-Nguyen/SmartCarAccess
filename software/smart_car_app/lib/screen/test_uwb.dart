@@ -120,7 +120,7 @@ class _TestUwbScreenState extends State<TestUwbScreen> {
       });
 
       await FlutterBluePlus.stopScan();
-      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
       await Future<void>.delayed(const Duration(seconds: 10));
       await FlutterBluePlus.stopScan();
       _appendLog('Found ${_devices.length} BLE device(s)');

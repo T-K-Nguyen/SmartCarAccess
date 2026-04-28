@@ -17,6 +17,7 @@ import 'package:smart_car_app/service/doze_exemption_service.dart';
 import 'package:smart_car_app/service/initial_data_helper.dart';
 import 'package:smart_car_app/service/master_card_provisioning.dart';
 import 'package:smart_car_app/service/language_service.dart';
+import 'package:smart_car_app/service/background_service_control.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:smart_car_app/theme/app_colors.dart';
@@ -38,6 +39,8 @@ class _DashboardState extends State<Dashboard> {
   final BleRuntimePermissionService _blePermissionService =
       BleRuntimePermissionService();
   final DozeExemptionService _dozeExemptionService = DozeExemptionService();
+  late BackgroundServiceControlService _bgServiceControl;
+  bool _bgServiceEnabled = true;
 
   List<Map<String, dynamic>> _cars = [];
   List<Map<String, dynamic>> _digitalKeys = [];
@@ -56,6 +59,8 @@ class _DashboardState extends State<Dashboard> {
     super.initState();
     _languageService = LanguageService.instance;
     _languageService.addListener(_onLanguageChanged);
+    _bgServiceControl = BackgroundServiceControlService();
+    _initializeBgServiceState();
     _loadData();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkBleRuntimePermissions(requestIfNeeded: true);
@@ -67,6 +72,45 @@ class _DashboardState extends State<Dashboard> {
         InitialDataHelper.addSampleDataIfNeeded(context);
       }
     });
+  }
+
+  Future<void> _initializeBgServiceState() async {
+    final enabled = await _bgServiceControl.isEnabled();
+    if (mounted) {
+      setState(() {
+        _bgServiceEnabled = enabled;
+      });
+    }
+  }
+
+  Future<void> _handleBgServiceToggle() async {
+    try {
+      final newState = await _bgServiceControl.toggleService();
+      if (mounted) {
+        setState(() {
+          _bgServiceEnabled = newState;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              _bgServiceEnabled
+                  ? 'Background service enabled'
+                  : 'Background service disabled',
+            ),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error toggling service: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   void _onLanguageChanged() {
@@ -314,6 +358,14 @@ class _DashboardState extends State<Dashboard> {
       elevation: 0,
       centerTitle: false,
       actions: [
+        IconButton(
+          icon: Icon(
+            _bgServiceEnabled ? Icons.cloud_done : Icons.cloud_off,
+            color: _bgServiceEnabled ? Colors.green : Colors.grey,
+          ),
+          tooltip: _bgServiceEnabled ? 'BLE Service On' : 'BLE Service Off',
+          onPressed: _handleBgServiceToggle,
+        ),
         IconButton(
           icon: const Icon(Icons.science_outlined, color: AppColors.textPrimary),
           tooltip: 'Test Phase A/B',
