@@ -19,6 +19,7 @@ void main() async {
   debugPrint(
     '[PKE][APP] rollout flags background=${rolloutFlags.backgroundMode ? 1 : 0} fast_tx=${rolloutFlags.fastTransaction ? 1 : 0} bonding_enforce=${rolloutFlags.bondingEnforce ? 1 : 0}',
   );
+  PkeBackgroundService.registerForegroundHandoffListener();
   await PkeBackgroundService.ensureForRollout(rolloutFlags);
   debugPrint('[PKE][APP] background service ensureForRollout finished');
   await Firebase.initializeApp();

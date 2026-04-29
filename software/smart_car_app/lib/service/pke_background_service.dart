@@ -24,6 +24,10 @@ class PkeBackgroundService {
 
   static final FlutterBackgroundService _service = FlutterBackgroundService();
   static bool _configured = false;
+  static bool _foregroundListenerConfigured = false;
+  static bool _foregroundHandoffInFlight = false;
+  static UwbService? _foregroundUwb;
+  static StreamSubscription<dynamic>? _foregroundHandoffSub;
 
   static void _log(String message) {
     debugPrint('[PKE][BG] $message');
@@ -48,6 +52,104 @@ class PkeBackgroundService {
     } else {
       _log('background-service already running');
     }
+  }
+
+  static void registerForegroundHandoffListener() {
+    if (!Platform.isAndroid || _foregroundListenerConfigured) {
+      return;
+    }
+
+    _foregroundListenerConfigured = true;
+    _foregroundUwb ??= UwbService(enableEventChannel: true, logToConsole: true);
+
+    _foregroundHandoffSub = FlutterBackgroundService()
+        .on('runUwbHandoff')
+        .listen((event) {
+      final payload = event is Map<dynamic, dynamic> ? event : null;
+      final deviceAddress = payload?['deviceAddress']?.toString().trim();
+      final requestId = payload?['requestId']?.toString();
+
+      if (deviceAddress == null || deviceAddress.isEmpty) {
+        _log('foreground handoff ignored: missing deviceAddress');
+        return;
+      }
+
+      if (_foregroundHandoffInFlight) {
+        _log('foreground handoff ignored: another handoff in flight');
+        return;
+      }
+
+      _foregroundHandoffInFlight = true;
+      unawaited(_handleForegroundHandoff(deviceAddress, requestId));
+    });
+  }
+
+  static Future<void> _handleForegroundHandoff(
+    String deviceAddress,
+    String? requestId,
+  ) async {
+    final service = FlutterBackgroundService();
+    final uwb = _foregroundUwb;
+    bool ok = false;
+
+    if (uwb == null) {
+      _log('foreground handoff failed: UWB service not initialized');
+      service.invoke('uwbHandoffResult', {
+        'requestId': requestId,
+        'ok': false,
+        'error': 'uwb_unavailable',
+      });
+      _foregroundHandoffInFlight = false;
+      return;
+    }
+
+    try {
+      final targetAddress = deviceAddress.trim().toUpperCase();
+      _log('foreground handoff start target=$targetAddress');
+
+      BluetoothDevice? targetDevice;
+      final results = await uwb.scan(timeout: const Duration(seconds: 8));
+      for (final result in results) {
+        if (result.device.remoteId.str.toUpperCase() == targetAddress) {
+          targetDevice = result.device;
+          break;
+        }
+      }
+
+      if (targetDevice == null) {
+        throw Exception('foreground handoff: BLE target not found');
+      }
+
+      await uwb.connect(targetDevice);
+
+      final payload = uwb.buildDefaultOobPayloadV1(
+        role: UwbOobPayload.carRoleControlee,
+        sessionId: DateTime.now().millisecondsSinceEpoch & 0xFFFFFFFF,
+        phoneMac: 0x0001,
+        carMac: 0x0002,
+        channel: 9,
+      );
+
+      final prepared = await uwb.preparePayloadForOob(payload);
+      final preparedPayload = prepared['payload'] as Uint8List?;
+      if (preparedPayload == null) {
+        throw Exception('foreground handoff: prepared payload missing');
+      }
+
+      await uwb.sendOobThenJoinFromPayload(preparedPayload);
+      ok = true;
+      _log('foreground handoff completed');
+    } catch (e, st) {
+      _log('foreground handoff failed: $e');
+      debugPrint('[PKE][FG] $st');
+    } finally {
+      _foregroundHandoffInFlight = false;
+    }
+
+    service.invoke('uwbHandoffResult', {
+      'requestId': requestId,
+      'ok': ok,
+    });
   }
 
   static Future<bool> isRunning() {
@@ -170,7 +272,6 @@ void onStart(ServiceInstance service) async {
 
   final telemetry = PkeTelemetry(source: 'app_bg');
   final authOrchestrator = PkeAuthOrchestrator(telemetry: telemetry);
-  final uwbService = UwbService();
   var authInFlight = false;
   var scanInFlight = false;
   var consecutiveAuthFailures = 0;
@@ -237,54 +338,29 @@ void onStart(ServiceInstance service) async {
     BluetoothDevice? discoveredDevice,
   }) async {
     try {
-      final targetAddress = deviceAddress?.trim().toUpperCase();
-      BluetoothDevice? targetDevice = discoveredDevice;
-
-      if (targetDevice == null) {
-        if (targetAddress == null || targetAddress.isEmpty) {
-          throw Exception('No BLE target available for UWB handoff');
-        }
-
-        final results = await uwbService.scan(timeout: const Duration(seconds: 8));
-        for (final result in results) {
-          if (result.device.remoteId.str.toUpperCase() == targetAddress) {
-            targetDevice = result.device;
-            break;
-          }
-        }
+      final targetAddress = (discoveredDevice?.remoteId.str ?? deviceAddress)
+          ?.trim()
+          .toUpperCase();
+      if (targetAddress == null || targetAddress.isEmpty) {
+        throw Exception('No BLE target available for UWB handoff');
       }
-
-      if (targetDevice == null) {
-        throw Exception('Unable to resolve BLE target for UWB handoff');
-      }
+      final requestId = DateTime.now().millisecondsSinceEpoch.toString();
 
       telemetry.emit(
         event: PkeTelemetryEvent.scanWake,
         details: 'background_uwb_handoff_start',
       );
-      debugPrint(
-        '[PKE][BG] UWB handoff target=${targetDevice.remoteId.str} name=${targetDevice.platformName}',
-      );
+      debugPrint('[PKE][BG] Delegating UWB handoff to foreground engine');
+      debugPrint('[PKE][BG] UWB handoff target=$targetAddress requestId=$requestId');
 
-      await uwbService.connect(targetDevice);
-
-      final payload = uwbService.buildDefaultOobPayloadV1(
-        role: UwbOobPayload.carRoleControlee,
-        sessionId: DateTime.now().millisecondsSinceEpoch & 0xFFFFFFFF,
-        phoneMac: 0x0001,
-        carMac: 0x0002,
-        channel: 9,
-      );
-
-      final prepared = await uwbService.preparePayloadForOob(payload);
-      final preparedPayload = prepared['payload'] as Uint8List;
-
-      await uwbService.sendOobThenJoinFromPayload(preparedPayload);
-
-      debugPrint('[PKE][BG] UWB handoff completed');
+      service.invoke('runUwbHandoff', {
+        'deviceAddress': targetAddress,
+        'requestId': requestId,
+      });
       return true;
-    } catch (e) {
+    } catch (e, st) {
       debugPrint('[PKE][BG] UWB handoff failed: $e');
+      debugPrint('[PKE][BG] Stack trace: $st');
       return false;
     }
   }
@@ -473,9 +549,6 @@ void onStart(ServiceInstance service) async {
     debugPrint('[PKE][BG] scan subscription cancelled');
     unawaited(FlutterBluePlus.stopScan());
     debugPrint('[PKE][BG] BLE scan stopped');
-    unawaited(uwbService.stopRanging());
-    unawaited(uwbService.disconnect());
-    debugPrint('[PKE][BG] UWB service cleanup requested');
     unawaited(authOrchestrator.disconnect());
     debugPrint('[PKE][BG] auth orchestrator disconnected');
     telemetry.emit(
@@ -496,6 +569,13 @@ void onStart(ServiceInstance service) async {
     final payload = event is Map<dynamic, dynamic> ? event : null;
     final deviceAddress = payload?['deviceAddress'] as String?;
     runAuthOnce('invoke', deviceAddress: deviceAddress);
+  });
+
+  service.on('uwbHandoffResult').listen((event) {
+    final payload = event is Map<dynamic, dynamic> ? event : null;
+    final requestId = payload?['requestId']?.toString() ?? '-';
+    final ok = payload?['ok'] == true;
+    debugPrint('[PKE][BG] foreground handoff result requestId=$requestId ok=${ok ? 1 : 0}');
   });
 
   scanSubscription = FlutterBluePlus.scanResults.listen((results) {

@@ -51,6 +51,7 @@ class UwbRangingBridge(
     private var rangingJob: Job? = null
     private var rangingStartedAtMs: Long = 0L
     private var positionSeenInCurrentRun: Boolean = false
+    private var latestRangingEvent: Map<String, Any?>? = null
 
     init {
         methodChannel.setMethodCallHandler(this)
@@ -94,6 +95,9 @@ class UwbRangingBridge(
                 result.success(true)
             }
             "isRangingActive" -> result.success(rangingJob?.isActive == true)
+            "getLatestRanging" -> {
+                result.success(latestRangingEvent)
+            }
             else -> result.notImplemented()
         }
     }
@@ -191,10 +195,10 @@ class UwbRangingBridge(
         }
 
         val remoteAddress = call.argument<String>("remoteAddress") ?: ""
-        val sessionId = call.argument<Int>("sessionId") ?: 42
-        val subSessionId = call.argument<Int>("subSessionId") ?: 0
-        val channel = call.argument<Int>("channel") ?: 9
-        val preambleIndex = call.argument<Int>("preambleIndex") ?: 9
+        val sessionId = ((call.argument<Any>("sessionId") as? Number) ?: 42).toInt()
+        val subSessionId = ((call.argument<Any>("subSessionId") as? Number) ?: 0).toInt()
+        val channel = ((call.argument<Any>("channel") as? Number) ?: 9).toInt()
+        val preambleIndex = ((call.argument<Any>("preambleIndex") as? Number) ?: 9).toInt()
         val updateRate = call.argument<String>("updateRate") ?: "frequent"
         val sessionKeyInfo = toByteArray(call.argument<Any>("sessionKeyInfo"))
             ?: byteArrayOf(0x08, 0x07, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06)
@@ -234,26 +238,26 @@ class UwbRangingBridge(
                         is RangingResult.RangingResultPosition -> {
                             positionSeenInCurrentRun = true
                             val position = rangingResult.position
-                            eventSink?.success(
-                                mapOf(
-                                    "type" to "position",
-                                    "distanceM" to position.distance?.value,
-                                    "azimuthDeg" to position.azimuth?.value,
-                                    "elevationDeg" to position.elevation?.value,
-                                    "elapsedRealtimeNanos" to position.elapsedRealtimeNanos,
-                                ),
+                            val event = mapOf(
+                                "type" to "position",
+                                "distanceM" to position.distance?.value,
+                                "azimuthDeg" to position.azimuth?.value,
+                                "elevationDeg" to position.elevation?.value,
+                                "elapsedRealtimeNanos" to position.elapsedRealtimeNanos,
                             )
+                            latestRangingEvent = event
+                            eventSink?.success(event)
                         }
 
                         is RangingResult.RangingResultPeerDisconnected -> {
                             val elapsedMs = System.currentTimeMillis() - rangingStartedAtMs
-                            eventSink?.success(
-                                mapOf(
-                                    "type" to "peer_disconnected",
-                                    "elapsedMs" to elapsedMs,
-                                    "positionSeen" to positionSeenInCurrentRun,
-                                ),
+                            val event = mapOf(
+                                "type" to "peer_disconnected",
+                                "elapsedMs" to elapsedMs,
+                                "positionSeen" to positionSeenInCurrentRun,
                             )
+                            latestRangingEvent = event
+                            eventSink?.success(event)
                         }
                     }
                 }
@@ -263,11 +267,11 @@ class UwbRangingBridge(
             } catch (e: Exception) {
                 if (isAlreadyStartedError(e.message)) {
                     Log.w(TAG, "Ranging already started for this scope; treating as idempotent success")
-                    eventSink?.success(
-                        mapOf(
-                            "type" to "already_started",
-                        ),
+                    val event = mapOf<String, Any?>(
+                        "type" to "already_started",
                     )
+                    latestRangingEvent = event
+                    eventSink?.success(event)
                     return@launch
                 }
                 Log.e(TAG, "Ranging failed", e)
@@ -286,6 +290,7 @@ class UwbRangingBridge(
         positionSeenInCurrentRun = false
         if (!keepSession) {
             sessionScope = null
+            latestRangingEvent = null
         }
     }
 

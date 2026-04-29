@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
@@ -168,6 +169,11 @@ class UwbService {
   StreamSubscription<List<int>>? _infoSub;
   StreamSubscription<BluetoothConnectionState>? _connSub;
   StreamSubscription<dynamic>? _uwbEventSub;
+  
+  Timer? _pollingTimer;
+  final bool _enableEventChannel;
+  final bool _logToConsole;
+  bool _pollingErrorLogged = false;
 
   final StreamController<String> _logController = StreamController<String>.broadcast();
   final StreamController<Uint8List> _infoController = StreamController<Uint8List>.broadcast();
@@ -182,26 +188,63 @@ class UwbService {
   BluetoothDevice? get connectedDevice => _device;
   bool get isConnected => _device != null && _device!.isConnected;
 
-  UwbService() {
+  UwbService({bool enableEventChannel = true, bool logToConsole = false})
+      : _enableEventChannel = enableEventChannel,
+        _logToConsole = logToConsole {
     if (!Platform.isAndroid) {
       return;
     }
-    _uwbEventSub = _uwbEventChannel.receiveBroadcastStream().listen(
-      (dynamic event) {
-        final parsed = UwbRangingEvent.fromDynamic(event);
-        _rangingController.add(parsed);
-        if (parsed.hasPosition) {
-          _log(
-            'UWB <= ${parsed.type} d=${_fmt(parsed.distanceM)}m az=${_fmt(parsed.azimuthDeg)} el=${_fmt(parsed.elevationDeg)}',
-          );
-        } else {
-          _log('UWB <= ${parsed.type}');
+    if (!_enableEventChannel) {
+      _startPollingFallback();
+      return;
+    }
+    _activateEventChannelWithFallback();
+  }
+
+  void _activateEventChannelWithFallback() {
+    try {
+      _uwbEventSub = _uwbEventChannel.receiveBroadcastStream().listen(
+        (dynamic event) {
+          final parsed = UwbRangingEvent.fromDynamic(event);
+          _rangingController.add(parsed);
+          if (parsed.hasPosition) {
+            _log(
+              'UWB <= ${parsed.type} d=${_fmt(parsed.distanceM)}m az=${_fmt(parsed.azimuthDeg)} el=${_fmt(parsed.elevationDeg)}',
+            );
+          } else {
+            _log('UWB <= ${parsed.type}');
+          }
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          _log('UWB event stream error: $error');
+          _startPollingFallback();
+        },
+      );
+    } catch (e) {
+      _log('EventChannel unavailable (background isolate?): $e');
+      _startPollingFallback();
+    }
+  }
+
+  void _startPollingFallback() {
+    if (_pollingTimer != null) {
+      return;
+    }
+    _log('Starting UWB ranging polling fallback (200ms interval)');
+    _pollingTimer = Timer.periodic(const Duration(milliseconds: 200), (_) async {
+      try {
+        final result = await _uwbMethodChannel.invokeMethod<Map<dynamic, dynamic>?>('getLatestRanging');
+        if (result != null) {
+          final parsed = UwbRangingEvent.fromDynamic(result);
+          _rangingController.add(parsed);
         }
-      },
-      onError: (Object error, StackTrace stackTrace) {
-        _log('UWB event stream error: $error');
-      },
-    );
+      } catch (e) {
+        if (!_pollingErrorLogged) {
+          _pollingErrorLogged = true;
+          _log('Polling getLatestRanging failed: $e');
+        }
+      }
+    });
   }
 
   Future<void> ensureBluetoothReady() async {
@@ -516,7 +559,7 @@ class UwbService {
       _log('UWB support check failed (may be in background context): $e; proceeding anyway');
     }
 
-    final granted = await ensureUwbPermission();
+    await ensureUwbPermission();
 
     final session = await prepareSession(controller: true);
     int localShortAddress;
@@ -630,7 +673,11 @@ class UwbService {
       throw Exception('No matching prepared UWB session. Send OOB first or prepare again.');
     }
     await requestRemoteUwbStart();
-    await startRangingFromOob(preparedOob);
+    final started = await startRangingFromOob(preparedOob);
+    if (!started) {
+      _log('UWB startRangingFromOob returned false');
+      throw Exception('UWB startRangingFromOob failed');
+    }
     _log(
       'UWB session started: phone=controller car=${preparedOob.carIsControlee ? 'controlee' : 'controller'} remote=${preparedOob.remoteAddress}',
     );
@@ -709,6 +756,8 @@ class UwbService {
     _connSub = null;
     _uwbEventSub?.cancel();
     _uwbEventSub = null;
+    _pollingTimer?.cancel();
+    _pollingTimer = null;
     _clearCharacteristicsOnly();
     clearPreparedContext();
     _device = null;
@@ -735,6 +784,9 @@ class UwbService {
 
   void _log(String msg) {
     _logController.add('[${DateTime.now().toIso8601String().substring(11, 19)}] $msg');
+    if (_logToConsole) {
+      debugPrint('[UWB] $msg');
+    }
   }
 
   static void _addLe16(BytesBuilder out, int value) {

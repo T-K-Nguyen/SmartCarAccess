@@ -9,6 +9,7 @@
 #include "uwb/uci_session_manager.h"
 #include "uwb/uci_uart_link.h"
 #include "uwb/uci_host_bridge.h"
+#include "uwb/uci_door_unlock.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -138,6 +139,7 @@ void uwbTask(void* parameter) {
       g_uciManager->poll();
     }
     UwbUciHost::tick();
+    UwbDoorUnlock::tick();
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -177,6 +179,10 @@ void setup() {
   UwbUciHost::init(g_uciManager);
   Serial.printf("[UCI] UART1 ready RX=%d TX=%d baud=%lu\n", UCI_UART_RX_PIN, UCI_UART_TX_PIN, static_cast<unsigned long>(UCI_UART_BAUD));
   Serial.println("[UCI] Type 'uci_help' in serial monitor for commands.");
+
+  // Initialize door unlock module with hysteresis logic
+  UwbDoorUnlock::begin();
+  Serial.println("[System] Door unlock module initialized");
 
   // Run FSM and NFC in dedicated tasks so BLE callbacks are not delayed by NFC work.
   xTaskCreatePinnedToCore(fsmTask, "FSMTask", 4096, nullptr, 6, &g_fsmTaskHandle, 1);

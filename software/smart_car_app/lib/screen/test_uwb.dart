@@ -54,6 +54,15 @@ class _TestUwbScreenState extends State<TestUwbScreen> {
     _rangingSub = _uwb.rangingEvents.listen((event) {
       if (!mounted) return;
       setState(() => _lastRangingEvent = event);
+      
+      // Add visual feedback on the phone when in unlock zone
+      if (event.distanceM != null) {
+        if (event.distanceM! <= 2.0) {
+          _appendLog('🎯 [UNLOCK ZONE] Distance: ${event.distanceM!.toStringAsFixed(2)}m');
+        } else if (event.distanceM! > 3.0) {
+          _appendLog('✓ [RESET ZONE] Distance: ${event.distanceM!.toStringAsFixed(2)}m - Ready to unlock again');
+        }
+      }
     });
     _buildDefaultPayload();
   }

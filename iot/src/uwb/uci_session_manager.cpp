@@ -1,4 +1,5 @@
 #include "uwb/uci_session_manager.h"
+#include "uwb/uci_door_unlock.h"
 
 namespace UwbUci {
 
@@ -150,6 +151,35 @@ void UciSessionManager::onPacket(const UciPacket& packet) {
     Serial.printf("[UCI] RangingData notification #%lu payload_len=%u\n",
                   static_cast<unsigned long>(rangingNotifCount_),
                   static_cast<unsigned>(packet.payload.size()));
+    // Dump payload hex for debugging distance parsing
+    Serial.print("[UCI] Ranging payload hex:");
+    for (size_t i = 0; i < packet.payload.size(); ++i) {
+      Serial.printf(" %02X", packet.payload[i]);
+    }
+    Serial.println();
+    
+    // Parse measurement per FiRa/CCC UCI spec:
+    // - payload[24] = number of measurements (n)
+    // - for first measurement: status at payload[27], distance at payload[29:30] (uint16 little-endian, cm)
+    if (packet.payload.size() >= 31) {
+      const uint8_t num_meas = packet.payload[24];
+      Serial.printf("[UCI] num_measurements=%u\n", static_cast<unsigned>(num_meas));
+      if (num_meas > 0 && packet.payload.size() >= 31) {
+        const uint8_t status = packet.payload[27];
+        const size_t dist_off = 29;
+        uint16_t dist_cm = static_cast<uint16_t>(packet.payload[dist_off]) |
+                           (static_cast<uint16_t>(packet.payload[dist_off + 1]) << 8);
+        const float distanceMeters = static_cast<float>(dist_cm) / 100.0f;
+        if (status == 0x00) {
+          Serial.printf("[UCI] Valid Distance: %.2fm (status=0x%02X)\n", distanceMeters, status);
+          UwbDoorUnlock::handleRangingDistance(static_cast<double>(distanceMeters));
+        } else {
+          Serial.printf("[UCI] Ignoring measurement. Status error: 0x%02X\n", status);
+        }
+      }
+    } else {
+      Serial.println("[UCI] Payload too small for measurement parsing");
+    }
   }
 }
 
@@ -169,6 +199,11 @@ bool UciSessionManager::sendCommandWithRetry(
     responseStatus_ = 0xFF;
     responsePayload_.clear();
 
+    // Log outgoing UCI command for debugging
+    Serial.printf("[UCI] Sending cmd gid=0x%02X oid=0x%02X payload_len=%u attempt=%u\n", gid, oid, (unsigned)payload.size(), static_cast<unsigned>(attempt + 1));
+    Serial.print("[UCI] Outgoing payload:");
+    for (size_t i = 0; i < payload.size(); ++i) Serial.printf(" %02X", payload[i]);
+    Serial.println();
     const bool sendOk = link_.sendPacket(Mt::Command, gid, oid, payload, 0);
     if (!sendOk) {
       waitingResponse_ = false;
