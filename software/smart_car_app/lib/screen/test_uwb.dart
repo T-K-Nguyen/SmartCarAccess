@@ -161,7 +161,10 @@ class _TestUwbScreenState extends State<TestUwbScreen> {
     await _uwb.disconnect();
     if (!mounted) return;
     setState(() {
+      _selectedDevice = null;
       _lastPrepareSession = null;
+      _lastOob = null;
+      _lastRangingEvent = null;
     });
   }
 
@@ -373,39 +376,48 @@ class _TestUwbScreenState extends State<TestUwbScreen> {
         children: [
           Row(
             children: [
-              const Text(
-                'Select BLE device:',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF273671),
+              Expanded(
+                child: Text(
+                  'Select BLE device:',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF273671),
+                  ),
                 ),
               ),
               const Spacer(),
               Text(
                 _isScanning ? 'Scanning...' : '${_devices.length} found',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontWeight: FontWeight.w500),
               ),
             ],
           ),
           const SizedBox(height: 8),
-          Row(
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
               ElevatedButton.icon(
                 onPressed: _isScanning ? null : _scan,
                 icon: const Icon(Icons.bluetooth_searching),
                 label: Text(_isScanning ? 'Scanning...' : 'Scan'),
               ),
-              const SizedBox(width: 8),
               ElevatedButton.icon(
-                onPressed: (_selectedDevice != null && !_uwb.isConnected && !_isScanning) ? _connectSelected : null,
+                onPressed: (_selectedDevice != null && !_uwb.isConnected && !_isScanning)
+                    ? _connectSelected
+                    : null,
                 icon: const Icon(Icons.link),
                 label: const Text('Connect'),
               ),
-              const SizedBox(width: 8),
-              OutlinedButton(
+              OutlinedButton.icon(
                 onPressed: _uwb.isConnected ? _disconnect : null,
-                child: const Text('Disconnect'),
+                icon: const Icon(Icons.link_off),
+                label: const Text('Disconnect'),
               ),
             ],
           ),

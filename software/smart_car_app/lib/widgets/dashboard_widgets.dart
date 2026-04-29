@@ -219,12 +219,14 @@ class VehicleStatusCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 16),
-                Expanded(
+                Flexible(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         vehicle['name'],
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
@@ -234,29 +236,41 @@ class VehicleStatusCard extends StatelessWidget {
                       const SizedBox(height: 4),
                       Text(
                         '${vehicle['model']} • ${vehicle['location']}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: Colors.grey[600],
                           fontSize: 14,
                         ),
                       ),
                       const SizedBox(height: 8),
-                      Row(
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 4,
                         children: [
                           _buildLockBadge(vehicle['isLocked'] ?? true),
-                          const SizedBox(width: 8),
                           _buildBatteryBadge(vehicle['batteryLevel'] ?? 50),
                         ],
                       ),
                     ],
                   ),
                 ),
-                _buildStatusChip(vehicle['keyStatus']),
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: _buildStatusChip(vehicle['keyStatus']),
+                  ),
+                ),
                 if (onDelete != null)
-                  IconButton(
-                    onPressed: onDelete,
-                    icon: const Icon(Icons.delete_outline),
-                    color: Colors.red[400],
-                    tooltip: 'Delete vehicle',
+                  SizedBox(
+                    width: 36,
+                    child: IconButton(
+                      padding: EdgeInsets.zero,
+                      onPressed: onDelete,
+                      icon: const Icon(Icons.delete_outline, size: 18),
+                      color: Colors.red[400],
+                      tooltip: 'Delete vehicle',
+                    ),
                   ),
               ],
             ),
@@ -411,7 +425,7 @@ class VehicleStatusCard extends StatelessWidget {
   Widget _buildStatusChip(String status) {
     Color color = status == 'Active' ? Colors.green : Colors.orange;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
         color: color.withOpacity(0.1),
         borderRadius: BorderRadius.circular(20),
@@ -419,6 +433,8 @@ class VehicleStatusCard extends StatelessWidget {
       ),
       child: Text(
         status,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
         style: TextStyle(
           color: color,
           fontWeight: FontWeight.bold,
