@@ -112,19 +112,11 @@ class PkeBackgroundService {
       final targetAddress = deviceAddress.trim().toUpperCase();
       _log('foreground handoff start target=$targetAddress');
 
-      BluetoothDevice? targetDevice;
-      final results = await uwb.scan(timeout: const Duration(seconds: 8));
-      for (final result in results) {
-        if (result.device.remoteId.str.toUpperCase() == targetAddress) {
-          targetDevice = result.device;
-          break;
-        }
-      }
-
-      if (targetDevice == null) {
-        throw Exception('foreground handoff: BLE target not found');
-      }
-
+      // Skip the 8-second scan. Re-use the known MAC address.
+      // Because the background isolate is holding the connection open, 
+      // the OS will instantly resolve this connect request.
+      final targetDevice = BluetoothDevice.fromId(targetAddress);
+      
       await uwb.connect(targetDevice);
 
       final payload = uwb.buildDefaultOobPayloadV1(
@@ -447,13 +439,17 @@ void onStart(ServiceInstance service) async {
       );
 
       if (result.success) {
-        debugPrint('[PKE][BG] auth success - releasing BLE auth session before UWB handoff');
-        await authOrchestrator.disconnect();
-
+        debugPrint('[PKE][BG] auth success - holding BLE session open for UWB handoff');
+        
+        // Trigger foreground UWB setup WHILE the background connection is still alive
         final handoffOk = await runUwbHandoff(
           deviceAddress: target,
           discoveredDevice: discoveredDevice,
         );
+        
+        // NOW it is safe to release the background orchestrator's hold on the connection
+        await authOrchestrator.disconnect();
+        
         resetRetryBackoff();
         telemetry.emit(
           event: PkeTelemetryEvent.unlockDecision,
