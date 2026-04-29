@@ -27,7 +27,6 @@ class PkeBackgroundService {
   static bool _foregroundListenerConfigured = false;
   static bool _foregroundHandoffInFlight = false;
   static UwbService? _foregroundUwb;
-  static StreamSubscription<dynamic>? _foregroundHandoffSub;
 
   static void _log(String message) {
     debugPrint('[PKE][BG] $message');
@@ -62,9 +61,9 @@ class PkeBackgroundService {
     _foregroundListenerConfigured = true;
     _foregroundUwb ??= UwbService(enableEventChannel: true, logToConsole: true);
 
-    _foregroundHandoffSub = FlutterBackgroundService()
-        .on('runUwbHandoff')
-        .listen((event) {
+    FlutterBackgroundService()
+      .on('runUwbHandoff')
+      .listen((event) {
       final payload = event is Map<dynamic, dynamic> ? event : null;
       final deviceAddress = payload?['deviceAddress']?.toString().trim();
       final requestId = payload?['requestId']?.toString();
@@ -81,6 +80,12 @@ class PkeBackgroundService {
 
       _foregroundHandoffInFlight = true;
       unawaited(_handleForegroundHandoff(deviceAddress, requestId));
+    });
+
+    FlutterBackgroundService().on('stopUwbHandoff').listen((event) {
+      final payload = event is Map<dynamic, dynamic> ? event : null;
+      final requestId = payload?['requestId']?.toString();
+      unawaited(_handleForegroundHandoffStop(requestId));
     });
   }
 
@@ -150,6 +155,32 @@ class PkeBackgroundService {
       'requestId': requestId,
       'ok': ok,
     });
+  }
+
+  static Future<void> _handleForegroundHandoffStop(String? requestId) async {
+    final service = FlutterBackgroundService();
+    final uwb = _foregroundUwb;
+
+    try {
+      _log('foreground UWB stop requested requestId=${requestId ?? '-'}');
+      if (uwb != null) {
+        await uwb.stopRanging();
+        await uwb.disconnect();
+      }
+      _log('foreground UWB stop completed requestId=${requestId ?? '-'}');
+      service.invoke('uwbHandoffStopped', {
+        'requestId': requestId,
+        'ok': true,
+      });
+    } catch (e, st) {
+      _log('foreground UWB stop failed: $e');
+      debugPrint('[PKE][FG] $st');
+      service.invoke('uwbHandoffStopped', {
+        'requestId': requestId,
+        'ok': false,
+        'error': e.toString(),
+      });
+    }
   }
 
   static Future<bool> isRunning() {
@@ -549,6 +580,9 @@ void onStart(ServiceInstance service) async {
     debugPrint('[PKE][BG] scan subscription cancelled');
     unawaited(FlutterBluePlus.stopScan());
     debugPrint('[PKE][BG] BLE scan stopped');
+    final stopRequestId = DateTime.now().millisecondsSinceEpoch.toString();
+    debugPrint('[PKE][BG] requesting foreground UWB stop requestId=$stopRequestId');
+    service.invoke('stopUwbHandoff', {'requestId': stopRequestId});
     unawaited(authOrchestrator.disconnect());
     debugPrint('[PKE][BG] auth orchestrator disconnected');
     telemetry.emit(
@@ -576,6 +610,13 @@ void onStart(ServiceInstance service) async {
     final requestId = payload?['requestId']?.toString() ?? '-';
     final ok = payload?['ok'] == true;
     debugPrint('[PKE][BG] foreground handoff result requestId=$requestId ok=${ok ? 1 : 0}');
+  });
+
+  service.on('uwbHandoffStopped').listen((event) {
+    final payload = event is Map<dynamic, dynamic> ? event : null;
+    final requestId = payload?['requestId']?.toString() ?? '-';
+    final ok = payload?['ok'] == true;
+    debugPrint('[PKE][BG] foreground UWB stopped requestId=$requestId ok=${ok ? 1 : 0}');
   });
 
   scanSubscription = FlutterBluePlus.scanResults.listen((results) {
