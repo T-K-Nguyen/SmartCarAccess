@@ -44,6 +44,8 @@ void tick();
 bool isDoorUnlocked();
 int getConsecutiveReadCount();
 double getLastDistance();
+double getLastFilteredDistance();
+double getLastResidual();
 
 /**
  * Manually trigger relay (for testing/admin commands)
