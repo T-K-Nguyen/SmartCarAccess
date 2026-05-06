@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "uwb/uci_uart_link.h"
+#include "Kalman.h"
 
 namespace UwbUci {
 
@@ -80,6 +81,9 @@ class UciSessionManager {
   UciRunConfig activeCfg_;
 
   uint32_t rangingNotifCount_;
+  // Kalman filter for UWB distance smoothing.
+  Kalman uwbFilter_{0.05, 0.2, 1.0, 0.0};
+  bool first_reading_ = true;
 };
 
 }  // namespace UwbUci

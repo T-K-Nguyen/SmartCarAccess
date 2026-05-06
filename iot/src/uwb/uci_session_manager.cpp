@@ -39,6 +39,8 @@ constexpr uint8_t kAppStaticStsIv = 0x28;
 
 constexpr uint8_t kSessionTypeRanging = 0x00;
 constexpr uint8_t kStatusOk = 0x00;
+constexpr double kNearFieldSaturationReuseThresholdM = 0.5;
+constexpr double kAntennaOffsetM = 0.24;
 
 }  // namespace
 
@@ -78,6 +80,7 @@ bool UciSessionManager::runOnce(const UciRunConfig& cfg) {
   rangingNotifCount_ = 0;
   activeSessionId_ = 0;
   activeSessionIdValid_ = false;
+  first_reading_ = true;
   Serial.println("[UCI] ==== Run sequence begin ====");
 
   const bool initOk = commandSessionInit(cfg);
@@ -128,6 +131,7 @@ bool UciSessionManager::stopActiveSession() {
   activeSessionId_ = 0;
   activeSessionIdValid_ = false;
   sessionActive_ = false;
+  first_reading_ = true;
   Serial.printf("[UCI] ==== Stop sequence done. result=%s ====" "\n", ok ? "SUCCESS" : "FAIL");
   return ok;
 }
@@ -152,11 +156,11 @@ void UciSessionManager::onPacket(const UciPacket& packet) {
                   static_cast<unsigned long>(rangingNotifCount_),
                   static_cast<unsigned>(packet.payload.size()));
     // Dump payload hex for debugging distance parsing
-    Serial.print("[UCI] Ranging payload hex:");
-    for (size_t i = 0; i < packet.payload.size(); ++i) {
-      Serial.printf(" %02X", packet.payload[i]);
-    }
-    Serial.println();
+    // Serial.print("[UCI] Ranging payload hex:");
+    // for (size_t i = 0; i < packet.payload.size(); ++i) {
+    //   Serial.printf(" %02X", packet.payload[i]);
+    // }
+    // Serial.println();
     
     // Parse measurement per FiRa/CCC UCI spec:
     // - payload[24] = number of measurements (n)
@@ -166,14 +170,79 @@ void UciSessionManager::onPacket(const UciPacket& packet) {
       Serial.printf("[UCI] num_measurements=%u\n", static_cast<unsigned>(num_meas));
       if (num_meas > 0 && packet.payload.size() >= 31) {
         const uint8_t status = packet.payload[27];
-        const size_t dist_off = 29;
-        uint16_t dist_cm = static_cast<uint16_t>(packet.payload[dist_off]) |
-                           (static_cast<uint16_t>(packet.payload[dist_off + 1]) << 8);
-        const float distanceMeters = static_cast<float>(dist_cm) / 100.0f;
+        // Handle saturation / too-close before attempting to decode distance
+        if (status == 0x1B && !first_reading_) {
+          const double lastFilteredDistance = UwbDoorUnlock::getLastFilteredDistance();
+          if (lastFilteredDistance > -1.0 && lastFilteredDistance < kNearFieldSaturationReuseThresholdM) {
+            Serial.printf("[UCI] Saturation Error 0x1B detected. Reusing last filtered distance: %.2fm\n",
+                          lastFilteredDistance);
+            UwbDoorUnlock::handleRangingDistance(lastFilteredDistance);
+            return;
+          }
+        }
+
         if (status == 0x00) {
-          Serial.printf("[UCI] Valid Distance: %.2fm (status=0x%02X)\n", distanceMeters, status);
-          UwbDoorUnlock::handleRangingDistance(static_cast<double>(distanceMeters));
-        } else {
+          const size_t dist_off = 29;
+          // Use unsigned decode then reinterpret as signed to avoid underflow issues
+          uint16_t raw_cm_u = static_cast<uint16_t>(packet.payload[dist_off]) |
+                              (static_cast<uint16_t>(packet.payload[dist_off + 1]) << 8);
+          int16_t dist_cm = static_cast<int16_t>(raw_cm_u);
+
+          double rawDistanceMeters = static_cast<double>(dist_cm) / 100.0;
+
+          // Apply antenna offset (may produce slight negative values before sanity check)
+          rawDistanceMeters += kAntennaOffsetM;
+          
+          
+
+
+
+          // ======================================================================================================================
+          // [GIẢ LẬP RELAY ATTACK] - CHỈ MỞ UNCOMMENT KHI THU THẬP LABEL 2
+          // Bản chất Relay Attack làm trễ sóng, tạo ra các đỉnh nhiễu (Spike) về ToF.
+          // Đoạn code này cứ mỗi 50 frame (~5 giây) sẽ tạo ra một đợt tấn công kéo dài 
+          // 10 frame (~1 giây) bằng cách cộng dồn khoảng cách ảo.
+          // =================================================================
+          // static int attack_frame_counter = 0;
+          // attack_frame_counter++;
+          
+          // if (attack_frame_counter % 50 > 40) {
+          //     // Cộng thêm 8.0m khoảng cách ảo (độ trễ Relay)
+          //     // Kết hợp hàm random() để tạo độ nhiễu rung lắc (Jitter) của trạm lặp
+          //     rawDistanceMeters += 8.0 + (random(-20, 20) / 100.0); 
+          //     Serial.println("[ATTACK] Đang bơm nhiễu Relay Attack (+8.0m) !!!");
+          // }
+          // ====================================================================================================================
+
+
+
+
+
+          // Sanity check: allow slight negative due to offset, but drop extreme values
+          if (rawDistanceMeters < -1.0 || rawDistanceMeters > 30.0) {
+            Serial.printf("[UCI] Dropped out-of-bounds reading: %.2fm\n", rawDistanceMeters);
+            return;
+          }
+
+          double filteredDistanceMeters = rawDistanceMeters;
+          if (first_reading_) {
+            uwbFilter_ = Kalman(0.05, 0.2, 1.0, rawDistanceMeters);
+            first_reading_ = false;
+          } else {
+            filteredDistanceMeters = uwbFilter_.getFilteredValue(rawDistanceMeters);
+          }
+
+          const double residual = rawDistanceMeters - filteredDistanceMeters;
+          Serial.printf("[UCI] Valid Distance: Raw=%.2fm, Filtered=%.2fm, Res=%.2fm (status=0x%02X)\n",
+                        rawDistanceMeters, filteredDistanceMeters, residual, status);
+          Serial.printf("[LSTM_DATA],%lu,%.2f,%.2f,%.2f\n",
+                        static_cast<unsigned long>(millis()),
+                        rawDistanceMeters,
+                        filteredDistanceMeters,
+                        residual);
+          // Pass filtered (clean) distance to door logic
+          UwbDoorUnlock::handleRangingDistance(filteredDistanceMeters);
+        } else if (status != 0x1B) {
           Serial.printf("[UCI] Ignoring measurement. Status error: 0x%02X\n", status);
         }
       }

@@ -1,7 +1,6 @@
 #include "uwb/uci_door_unlock.h"
 #include <Arduino.h>
 #include <cstring>
-#include "Kalman.h"
 
 namespace UwbDoorUnlock {
 
@@ -14,16 +13,6 @@ static double last_residual_m = 0.0;
 static uint32_t relay_deactivate_time_ms = 0;
 static bool relay_active = false;
 
-static constexpr double kKalmanProcessNoise = 0.05;
-static constexpr double kKalmanSensorNoise = 0.2;
-static constexpr double kKalmanEstimatedError = 1.0;
-static constexpr double kKalmanInitialValue = 0.0;
-static Kalman uwb_filter(
-  kKalmanProcessNoise,
-  kKalmanSensorNoise,
-  kKalmanEstimatedError,
-  kKalmanInitialValue);
-
 void begin() {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
@@ -33,11 +22,6 @@ void begin() {
   last_filtered_distance_m = 0.0;
   last_residual_m = 0.0;
   relay_active = false;
-  uwb_filter = Kalman(
-      kKalmanProcessNoise,
-      kKalmanSensorNoise,
-      kKalmanEstimatedError,
-      kKalmanInitialValue);
   Serial.printf("[DOOR] Initialized: threshold=%.1fm reset=%.1fm hits=%d relay_pin=%d\n",
                 UNLOCK_THRESHOLD_M, RESET_THRESHOLD_M, REQUIRED_CONSECUTIVE_HITS, RELAY_PIN);
 }
@@ -50,9 +34,10 @@ static void fireRelayPulse() {
 }
 
 void handleRangingDistance(double distanceM) {
-  last_distance_m = distanceM;
-  last_filtered_distance_m = uwb_filter.getFilteredValue(distanceM);
-  last_residual_m = last_distance_m - last_filtered_distance_m;
+  // Input is expected to already be filtered by the session manager
+  last_distance_m = distanceM;            // raw/received (may be equal to filtered if no raw kept)
+  last_filtered_distance_m = distanceM;   // already-filtered value
+  last_residual_m = 0.0;                  // residual not computed here
 
   // 1. Check if user is walking away to reset the lock state
   if (last_filtered_distance_m > RESET_THRESHOLD_M) {
@@ -134,11 +119,6 @@ void resetDoorState() {
   last_distance_m = 0.0;
   last_filtered_distance_m = 0.0;
   last_residual_m = 0.0;
-  uwb_filter = Kalman(
-      kKalmanProcessNoise,
-      kKalmanSensorNoise,
-      kKalmanEstimatedError,
-      kKalmanInitialValue);
   if (relay_active) {
     digitalWrite(RELAY_PIN, LOW);
     relay_active = false;
