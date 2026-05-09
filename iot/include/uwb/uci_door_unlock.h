@@ -34,6 +34,17 @@ void begin();
 void handleRangingDistance(double distanceM);
 
 /**
+ * Process UWB distance with AI relay-attack detection.
+ * The door only opens when distance < 2m AND AI confirms normal approach (p_walk > 0.80).
+ * If p_attack > 0.70, the relay is temporarily disabled (attack protection).
+ * @param distanceM Kalman-filtered distance in meters
+ * @param p_walk Probability of normal walking approach [0-1]
+ * @param p_loiter Probability of hovering / loitering [0-1]
+ * @param p_attack Probability of relay attack [0-1]
+ */
+void handleRangingWithAI(double distanceM, float p_walk, float p_loiter, float p_attack);
+
+/**
  * Tick function for background state management
  */
 void tick();

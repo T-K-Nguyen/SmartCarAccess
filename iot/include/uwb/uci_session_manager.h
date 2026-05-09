@@ -6,6 +6,7 @@
 
 #include "uwb/uci_uart_link.h"
 #include "Kalman.h"
+#include "uwb/lstm_inference.h"
 
 namespace UwbUci {
 
@@ -84,6 +85,8 @@ class UciSessionManager {
   // Kalman filter for UWB distance smoothing.
   Kalman uwbFilter_{0.05, 0.2, 1.0, 0.0};
   bool first_reading_ = true;
+  // LSTM inference engine for relay attack detection
+  LstmInference lstm_ai_;
 };
 
 }  // namespace UwbUci

@@ -58,6 +58,7 @@ UciSessionManager::UciSessionManager(UciUartLink& link)
       activeCfg_(),
       rangingNotifCount_(0) {
   link_.setPacketCallback([this](const UciPacket& packet) { onPacket(packet); });
+  lstm_ai_.begin();
 }
 
 void UciSessionManager::poll() {
@@ -240,8 +241,22 @@ void UciSessionManager::onPacket(const UciPacket& packet) {
                         rawDistanceMeters,
                         filteredDistanceMeters,
                         residual);
-          // Pass filtered (clean) distance to door logic
-          UwbDoorUnlock::handleRangingDistance(filteredDistanceMeters);
+          
+          // Run LSTM inference to detect relay attacks
+          float p_walk = 0.0f, p_loiter = 0.0f, p_attack = 0.0f;
+          bool ai_ready = lstm_ai_.predict(static_cast<float>(filteredDistanceMeters),
+                                            static_cast<float>(residual),
+                                            p_walk, p_loiter, p_attack);
+          
+          if (ai_ready) {
+            Serial.printf("[AI] Walk: %.2f | Loiter: %.2f | Attack: %.2f\n",
+                          p_walk, p_loiter, p_attack);
+            UwbDoorUnlock::handleRangingWithAI(filteredDistanceMeters, p_walk, p_loiter, p_attack);
+          } else {
+            Serial.printf("[AI] Window warm-up: %d/15 frames\n", static_cast<int>(lstm_ai_.getFrameCount()));
+            // During warm-up, still process distance but don't make lock decisions
+            UwbDoorUnlock::handleRangingDistance(filteredDistanceMeters);
+          }
         } else if (status != 0x1B) {
           Serial.printf("[UCI] Ignoring measurement. Status error: 0x%02X\n", status);
         }
