@@ -130,7 +130,7 @@ void handleRangingWithAI(double distanceM, float p_walk, float p_loiter, float p
 
   // 1. HIGHEST PRIORITY: Attack Detection (security threshold at 0.70)
   if (p_attack > 0.70f) {
-    Serial.printf("[DOOR-SEC] RELAY ATTACK DETECTED! p_attack=%.2f. System temporarily locked.\\n", p_attack);
+    Serial.printf("[DOOR-SEC] RELAY ATTACK DETECTED! p_attack=%.2f. System temporarily locked.\n", p_attack);
     consecutive_close_reads = 0;
     is_door_unlocked = false;
     if (relay_active) {
@@ -144,7 +144,7 @@ void handleRangingWithAI(double distanceM, float p_walk, float p_loiter, float p
   // 2. Check if user is walking away (reset state)
   if (last_filtered_distance_m > RESET_THRESHOLD_M) {
     if (is_door_unlocked) {
-      Serial.printf("[DOOR] User left the zone (distance=%.2fm > reset=%.2fm). Resetting lock state.\\n",
+      Serial.printf("[DOOR] User left the zone (distance=%.2fm > reset=%.2fm). Resetting lock state.\n",
                     last_filtered_distance_m, RESET_THRESHOLD_M);
       is_door_unlocked = false;
     }
@@ -161,7 +161,7 @@ void handleRangingWithAI(double distanceM, float p_walk, float p_loiter, float p
   // Door opens when BOTH: distance < 2m AND AI is confident (p_walk > 0.80)
   if (last_filtered_distance_m <= UNLOCK_THRESHOLD_M && p_walk > 0.80f) {
     consecutive_close_reads++;
-    Serial.printf("[DOOR] In zone + AI confident! Hit: %d/%d (dist=%.2fm, p_walk=%.2f)\\n",
+    Serial.printf("[DOOR] In zone + AI confident! Hit: %d/%d (dist=%.2fm, p_walk=%.2f)\n",
                   consecutive_close_reads, REQUIRED_CONSECUTIVE_HITS, 
                   last_filtered_distance_m, p_walk);
 
@@ -174,7 +174,7 @@ void handleRangingWithAI(double distanceM, float p_walk, float p_loiter, float p
   } else {
     // If distance is near but AI is unsure, do not proceed
     if (consecutive_close_reads > 0) {
-      Serial.printf("[DOOR] AI confidence insufficient (p_walk=%.2f). Resetting counter.\\n", p_walk);
+      Serial.printf("[DOOR] AI confidence insufficient (p_walk=%.2f). Resetting counter.\n", p_walk);
       consecutive_close_reads = 0;
     }
   }

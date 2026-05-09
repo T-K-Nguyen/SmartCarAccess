@@ -204,15 +204,15 @@ void UciSessionManager::onPacket(const UciPacket& packet) {
           // Đoạn code này cứ mỗi 50 frame (~5 giây) sẽ tạo ra một đợt tấn công kéo dài 
           // 10 frame (~1 giây) bằng cách cộng dồn khoảng cách ảo.
           // =================================================================
-          // static int attack_frame_counter = 0;
-          // attack_frame_counter++;
+          static int attack_frame_counter = 0;
+          attack_frame_counter++;
           
-          // if (attack_frame_counter % 50 > 40) {
-          //     // Cộng thêm 8.0m khoảng cách ảo (độ trễ Relay)
-          //     // Kết hợp hàm random() để tạo độ nhiễu rung lắc (Jitter) của trạm lặp
-          //     rawDistanceMeters += 8.0 + (random(-20, 20) / 100.0); 
-          //     Serial.println("[ATTACK] Đang bơm nhiễu Relay Attack (+8.0m) !!!");
-          // }
+          if (attack_frame_counter % 50 > 40) {
+              // Cộng thêm 8.0m khoảng cách ảo (độ trễ Relay)
+              // Kết hợp hàm random() để tạo độ nhiễu rung lắc (Jitter) của trạm lặp
+              rawDistanceMeters += 8.0 + (random(-20, 20) / 100.0); 
+              Serial.println("[ATTACK] Đang bơm nhiễu Relay Attack (+8.0m) !!!");
+          }
           // ====================================================================================================================
 
 
