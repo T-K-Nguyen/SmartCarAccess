@@ -1,11 +1,6 @@
-## ESP32 Smart Car Access (IoT)
+## ESP32 Smart Car Access (IoT) - Academic Project README
 
-This repository is the in-vehicle side of a digital key system inspired by CCC Release 3.
-
-If you are new to this domain, think of the system like this:
-- The car (ESP32) is the gatekeeper.
-- The phone is the key holder.
-- The cloud is only a mailbox for share packages and app state, not a source of truth for unlock secrets.
+This repository contains the in-vehicle side of a digital key system inspired by CCC Release 3, plus a companion Android application for provisioning, authentication, and user-facing controls. The system is built to study secure access control with NFC, BLE, and UWB, and to evaluate edge AI for relay-attack detection.
 
 Core security rules:
 1. Immobilizer secrets stay in the vehicle.
@@ -13,47 +8,87 @@ Core security rules:
 
 ---
 
-## 1) Quick Glossary (Beginner Friendly)
+## Abstract
 
-- CCC: Car Connectivity Consortium digital key standard family.
-- AID: Applet ID. Like the app name inside NFC card emulation.
-- HCE: Host Card Emulation. Android emulates a smart card over NFC.
-- APDU: Command/response packet format for smart card style communication.
-- Provisioning: First-time pairing of owner phone and vehicle.
-- Endpoint key (`ep_pub`): Owner phone public key.
-- Vehicle key (`v_pub`): Vehicle public key.
-- Attestation package: Signed key-share package that proves owner approval.
+This project implements a multi-factor, multi-transport digital key system on an ESP32 platform. The vehicle uses NFC for initial owner provisioning, BLE for authenticated session establishment, and UWB for proximity verification. A Kalman-filtered ranging pipeline produces stable distance measurements and feature residuals, which are fed into an on-device LSTM model (TensorFlow Lite Micro) to classify normal approach, loitering, and relay attacks. The result is a defense-in-depth architecture that couples cryptographic authentication with physical proximity validation and lightweight anomaly detection.
 
 ---
 
-## 2) System Architecture
+## Repository Structure
 
-Main components:
-1. ESP32 firmware:
-- NFC reader (PN532) for owner provisioning.
-- BLE services for authentication and attestation upload.
-- CCC mailbox in NVS for persistent confidential state.
+- Firmware (ESP32, PlatformIO): [iot](iot)
+- Android app (Flutter + Kotlin): [software/smart_car_app](software/smart_car_app)
+- UWB/AI tools (Python): [iot/tools](iot/tools)
 
-2. Android app:
-- HCE applet for NFC APDU exchange.
-- Android Keystore for phone private key operations.
-- Flutter UI for scanning, provisioning, and management.
-
-3. Firebase:
-- Stores app-level metadata and share records.
-- Does not store vehicle immobilizer tokens.
+Key firmware modules:
+- UWB session manager: [iot/src/uwb/uci_session_manager.cpp](iot/src/uwb/uci_session_manager.cpp)
+- Door unlock logic: [iot/src/uwb/uci_door_unlock.cpp](iot/src/uwb/uci_door_unlock.cpp)
+- LSTM inference: [iot/src/uwb/lstm_inference.cpp](iot/src/uwb/lstm_inference.cpp)
+- LSTM configuration: [iot/include/uwb/lstm_inference.h](iot/include/uwb/lstm_inference.h)
 
 ---
 
-## 3) CCC Mailbox (Vehicle Confidential Storage)
+## System Architecture
+
+### Components
+
+1. Vehicle (ESP32 firmware)
+   - NFC reader (PN532) for owner provisioning
+   - BLE services for authentication and attestation
+   - UWB session manager for ranging and anomaly detection
+   - Secure mailbox in NVS for confidential state
+
+2. Phone (Android + Flutter)
+   - HCE applet for NFC APDU exchange
+   - Android Keystore for private key operations
+   - UI for provisioning, diagnostics, and test harnesses
+
+3. Cloud (Firebase)
+   - Stores app metadata and share records
+   - Does not store immobilizer tokens
+
+### Data Flow (High Level)
+
+1. NFC provisioning establishes owner keys
+2. BLE authentication establishes a trusted session
+3. UWB ranging measures proximity
+4. Kalman + LSTM pipeline classifies user behavior
+5. Door relay fires only when both cryptographic and physical criteria are met
+
+---
+
+## Security Model and Threat Scope
+
+### Security Goals
+
+- Prevent unauthorized unlocks without a valid cryptographic identity
+- Prevent relay attacks that spoof proximity
+- Keep immobilizer tokens local to the vehicle
+- Enable offline verification for attestation packages
+
+### Threats Considered
+
+- Relay attacks (UWB distance manipulation)
+- Stale APDU responses
+- BLE replay or timing anomalies
+
+### Trust Boundaries
+
+- Vehicle: root of trust for immobilizer secrets
+- Phone: holds private keys in Android Keystore
+- Cloud: untrusted for unlock decisions
+
+---
+
+## CCC Mailbox (Vehicle Confidential Storage)
 
 Stored in ESP32 NVS (`ccc_dk`) and mirrored in RAM:
-- `v_id` (8 bytes): Vehicle ID generated once.
-- `v_pub` (65 bytes): Vehicle public key generated once.
-- `ep_pub` (65 bytes): Owner public key from successful provisioning.
-- `slot_bmp` (8 bits): Active slots bitmap.
-- `sig_bmp` (16 bits): Signaling flags bitmap.
-- `tok_0..tok_7` (32 bytes each): Immobilizer tokens.
+- `v_id` (8 bytes): Vehicle ID generated once
+- `v_pub` (65 bytes): Vehicle public key generated once
+- `ep_pub` (65 bytes): Owner public key from successful provisioning
+- `slot_bmp` (8 bits): Active slots bitmap
+- `sig_bmp` (16 bits): Signaling flags bitmap
+- `tok_0..tok_7` (32 bytes each): Immobilizer tokens
 
 Current behavior:
 1. First boot creates `v_id` and `v_pub`.
@@ -62,312 +97,206 @@ Current behavior:
 
 ---
 
-## 4) Owner Provisioning (Phase A) - Current Live Flow
+## Provisioning (Phase A - NFC)
 
-The implementation now follows this robust order:
-
-1. SELECT AID
-- ESP32 sends SELECT to CCC HCE applet AID.
-- Android returns SELECT payload tags (`5A`, `5C`) + `9000`.
-- ESP32 validates payload, not only `SW=9000`, to reject stale responses.
-
-2. MasterCard-based authentication (SPAKE2+ shell)
-- ESP32 builds challenge: `vehicle_id(8) || nonce(16)`.
-- Sends INS `0x30` with TLV `0x50` challenge.
-- Requests verify via INS `0x32`, expects TLV `0x58` HMAC.
-- ESP32 computes local HMAC and must match exactly.
-
-3. Base key exchange pull (GET DATA)
-- ESP32 sends INS `0xCA` (`Lc=0`).
-- Android returns base credential packet wrapped by tag `7F24`.
-- ESP32 unwraps and parses phone endpoint public key and optional cert chain.
-
-4. Vehicle key exchange push (WRITE DATA)
-- ESP32 sends INS `0xD4` with TLVs:
-  - `0x80`: `vehicle_id`
-  - `0x81`: `vehicle_pub_key`
-- Android validates and stores this binding locally.
-
-5. Signature proof (GET DATA with challenge)
-- ESP32 sends INS `0xCA` with 24-byte challenge as APDU data.
-- Android signs with Keystore private key and returns DER signature.
-- ESP32 verifies signature with parsed `ep_pub`.
-- Fail-closed behavior: empty/invalid signature is rejected.
-
-6. Commit gate (OP CONTROL FLOW)
-- ESP32 sends INS `0x3C` with `P1=0x11`.
-- If commit fails, provisioning is aborted and not persisted.
-
-7. Persist owner data in mailbox
-- Store owner `ep_pub`.
-- Activate slot 0.
-- Ensure `tok_0`.
-- Set signaling flag.
-
-8. Result notify and close
-- ESP32 sends INS `0xDA` result to app.
-- App updates provisioning result flags.
-- Session exits with bounded removal wait to avoid re-trigger loops.
-
----
-
-## 5) Reliability Hardening That Was Recently Added
-
-This is what was updated and why it matters:
-
-1. First-tap reliability
-- Detection tuned for faster phone pickup on first tap.
-- Prevents the old "first tap ignored, second tap works" behavior.
-
-2. Stale-frame protection
-- SELECT response content is validated to avoid accepting delayed old frames.
-
-3. APDU recovery strategy
-- In-place retry first.
-- Then controlled `inRelease -> reselect -> resend` recovery.
-
-4. Provisioning transaction hardening
-- Added WRITE DATA (`0xD4`) path for vehicle key push.
-- Moved SPAKE2+ authentication before key exchange.
-- Removed zero-length signature acceptance fallback.
-- OP CONTROL is now a commit gate (not merely informational).
-
-5. UX and result consistency
-- Countdown timeout in app no longer overwrites already successful provisioning.
-- Back/close result handling keeps dashboard provisioning state consistent.
-
-6. Cloud write compatibility fallback
-- Primary owner provisioning record is saved into authorized `cars` doc.
-- Optional mirror write to `Vehicles` is best-effort and ignored on permission-denied.
-- This avoids false "registration failed" while preserving app continuity.
-
----
-
-## 6) BLE Authentication (Phase B)
-
-Purpose:
-- After provisioning, prove phone owns the enrolled key and establish a secure session.
+Provisioning is implemented as a strict, fail-closed APDU flow. The vehicle validates content, not only status words, to prevent stale-frame acceptance.
 
 High-level steps:
-1. Exchange ephemeral public keys.
-2. Verify phone signature using stored owner key.
-3. Derive shared session keys via ECDH.
-4. Perform challenge-response bound to `vehicle_id`.
-5. Notify FSM and open encrypted command path.
+1. SELECT AID: Validate AID and response payload tags
+2. Authentication (SPAKE2+ shell): HMAC verification
+3. GET DATA: Pull phone endpoint key and optional chain
+4. WRITE DATA: Push vehicle public key and bind
+5. Signature proof: Phone signs challenge, ESP32 verifies with `ep_pub`
+6. Commit gate (OP CONTROL): Failure aborts persistence
+7. Persist owner slot and tokens
+8. Final result notify and session close
 
 ---
 
-## 7) Attestation Service (Critical for Key Sharing)
+## BLE Authentication (Phase B)
 
-### What attestation means in plain language
+Purpose: prove the phone owns the enrolled key and establish a session for secure commands.
 
-Attestation is a signed permission slip from the owner that says:
-- which vehicle,
-- which friend key,
-- which slot,
-- what time window,
-- what entitlement,
-are allowed.
-
-Without a valid owner signature, the vehicle rejects the package.
-
-### Why attestation matters
-
-1. Key Sharing:
-- Owner can authorize another user key without giving away owner private key.
-
-2. Policy control:
-- Can limit access by time (`valid_from`, `valid_until`) and entitlement.
-
-3. Auditable trust:
-- Vehicle can independently verify owner approval offline.
-
-### Current payload format (147 bytes)
-
-Layout:
-- `0x00..0x07`: Vehicle_ID (8)
-- `0x08`: Slot_ID (1)
-- `0x09..0x49`: Friend public key (65)
-- `0x4A..0x4D`: Valid_From (uint32, big-endian)
-- `0x4E..0x51`: Valid_Until (uint32, big-endian)
-- `0x52`: Entitlement (1)
-- `0x53..0x72`: Signature_R (32)
-- `0x73..0x92`: Signature_S (32)
-
-Verification on ESP32:
-1. Vehicle_ID must match local mailbox `v_id`.
-2. Signature must verify with stored owner public key.
-3. Time window must be valid (trusted epoch required).
-4. Slot_ID must be in range 1..7.
-
-Current policy:
-- Even valid slot 1..7 attestation is currently blocked with `ERR_SLOT_LOCKED` until sharing activation is enabled.
-
-Service UUIDs:
-- Service: `555a0001-00aa-1111-2222-333344445555`
-- Auth_RX: `555a0002-00aa-1111-2222-333344445555`
-- Auth_TX: `555a0003-00aa-1111-2222-333344445555`
-
-Responses:
-- `READY`, `OK`, `ERR_LEN`, `ERR_VID`, `ERR_SIG`, `ERR_TIME`, `ERR_SLOT`, `ERR_NOT_PROVISIONED`, `ERR_SLOT_LOCKED`
+High-level steps:
+1. Exchange ephemeral public keys
+2. Verify phone signature with stored owner key
+3. Derive shared session keys via ECDH
+4. Perform challenge-response bound to `v_id`
+5. Notify FSM and open encrypted command path
 
 ---
 
-## 8) Android App + Cloud Integration Notes
+## UWB Ranging and AI Pipeline
 
-NFC result handshake:
-- `flutter.provision_result` (bool)
-- `flutter.provision_ts` (epoch ms)
+### Measurement Processing
 
-Current app behavior:
-1. On success, dashboard marks car as provisioned.
-2. `ownerProvisioning` record is written into the `cars` document.
-3. Optional mirror write to `Vehicles/<vehicle_id_hex>` may be blocked by Firestore rules and is treated as non-fatal.
+The UWB session manager parses FiRa/CCC UCI ranging notifications and applies robustness logic, including:
 
-If you still see Firestore permission warnings for `Vehicles`, provisioning can still be healthy as long as:
-- car doc has `provisioned: true`
-- car doc has `ownerProvisioning` payload
+- Saturation handling: status `0x1B` reuses last filtered distance if in the near-field window
+- Antenna offset correction: constant offset applied to distance
+- Sanity bounds: out-of-range distances are dropped
+
+Key constants (current values):
+- Antenna offset: 0.24 m
+- Near-field reuse threshold: 0.5 m
+
+### Kalman Smoothing
+
+Each valid measurement is filtered with a 1D Kalman filter. Residuals are computed to capture timing anomalies:
+
+$$r_t = d^{raw}_t - d^{filt}_t$$
+
+The velocity feature is computed from filtered distance:
+
+$$v_t = \frac{d^{filt}_t - d^{filt}_{t-1}}{\Delta t}$$
+
+### Feature Normalization
+
+Each feature is normalized using z-score parameters from the training dataset:
+
+$$x' = \frac{x - \mu}{\sigma}$$
+
+### LSTM Inference
+
+The LSTM model runs on-device using TensorFlow Lite Micro. It consumes a sliding window of features:
+
+- Features: [distance, residual, velocity]
+- Window length: configured by `TIME_STEPS`
+- Output: softmax probabilities for `p_walk`, `p_loiter`, `p_attack`
+
+Implementation references:
+- LSTM configuration: [iot/include/uwb/lstm_inference.h](iot/include/uwb/lstm_inference.h)
+- LSTM runtime: [iot/src/uwb/lstm_inference.cpp](iot/src/uwb/lstm_inference.cpp)
+
+### Door Unlock Logic (AI-Gated)
+
+Unlock is a conjunction of physical proximity and AI confidence, with hysteresis to prevent chattering:
+
+- Distance threshold: 2.0 m
+- Reset threshold: 3.0 m
+- Required consecutive hits: 3
+- Attack reject: if `p_attack > 0.70`, the relay is disabled
+- Positive accept: if distance <= 2.0 m and `p_walk > 0.80`
+
+Door control reference: [iot/include/uwb/uci_door_unlock.h](iot/include/uwb/uci_door_unlock.h)
 
 ---
 
-## 9) BLE Admin Commands
+## Experimental Controls and Attack Simulation
 
-Notable commands:
-- `0x01`: Clear provisioning only
-- `0x02`: Clear all provisioning data
-- `0x33`: Status summary
-- `0x34`: Validate cert vs stored public key
-- `0x35`: Check if public key is present
-- `0x36`: CCC mailbox summary
+The UWB pipeline includes an optional relay-attack simulation block for dataset collection. It injects synthetic latency spikes into the distance signal at a fixed cadence. This block is useful for controlled experiments but must be disabled for real-world evaluation.
+
+Attack simulation location: [iot/src/uwb/uci_session_manager.cpp](iot/src/uwb/uci_session_manager.cpp)
 
 ---
 
-## 10) Build and Flash
+## Data Logging and Visualization
 
-Firmware:
+### Serial Log Formats
 
-```bash
+The firmware emits structured logs for real-time visualization and dataset collection:
+
+- Distance and residual:
+  - `[LSTM_DATA],<timestamp_ms>,<raw_m>,<filtered_m>,<residual_m>`
+- AI output:
+  - `[AI] Walk: <p> | Loiter: <p> | Attack: <p>`
+- Door action:
+  - `[DOOR] *** FIRING UNLOCK RELAY ***`
+
+### Tools
+
+1. CSV logger for ML dataset collection:
+   - [iot/tools/serial_csv_logger.py](iot/tools/serial_csv_logger.py)
+
+2. Real-time academic plotter (3 stacked subplots, shared time axis, vector export):
+   - [iot/tools/realtime_lstm_visualizer.py](iot/tools/realtime_lstm_visualizer.py)
+
+Tool documentation:
+- [iot/tools/README_VISUALIZATION.md](iot/tools/README_VISUALIZATION.md)
+
+---
+
+## Build and Run
+
+### Firmware (PlatformIO)
+
+From repository root:
+
+```
+cd iot
 platformio run
 platformio run --target upload
 platformio device monitor
 ```
 
----
+Configuration file:
+- [iot/platformio.ini](iot/platformio.ini)
 
-## 11) Time Requirement
+### Python Tools (Visualization)
 
-Attestation validation depends on trusted time.
+```
+cd iot/tools
+pip install -r requirements.txt
+python realtime_lstm_visualizer.py --port COM6
+```
 
-Without trusted epoch:
-- verifier may return `ERR_TIME`.
+Requirements:
+- [iot/tools/requirements.txt](iot/tools/requirements.txt)
 
-Time source options:
-1. SNTP/NTP
-2. RTC module
-3. BLE time sync from phone
+Export vector plots:
 
----
-
-## 12) Current Limitations
-
-1. Slots 1..7 are verified but intentionally not activated yet.
-2. Token MAC binding for share payload is not yet implemented in the current 147-byte format.
-3. `Vehicles` collection write may require Firestore rule updates (optional path).
-
----
-
-## 13) What We Updated, Why It Matters, and What Comes Next
-
-This section explains recent updates in simple terms and the roadmap.
-
-### What we just updated
-
-1. Provisioning trust flow got stricter:
-- Added explicit vehicle-to-phone WRITE DATA (`0xD4`).
-- Authentication now runs earlier.
-- Signature verification is strict fail-closed.
-- Commit step (`0x3C`) now gates persistence.
-
-2. NFC user experience improved:
-- Better first tap reliability.
-- Bounded removal wait with less log spam.
-
-3. App consistency improved:
-- Success no longer flips to timeout by accident.
-- Cloud write fallback avoids false failure experience when optional collection is blocked.
-
-### Why this is important
-
-1. Security:
-- Better guarantees that only verified data becomes persistent owner state.
-
-2. Reliability:
-- Fewer transport edge-case failures and better recovery.
-
-3. Product readiness:
-- Strong provisioning foundation makes the next phases much easier and safer.
-
-### What next we can do
-
-1. Authentication phase hardening (BLE Phase B):
-- Add richer session lifecycle checks.
-- Add replay protection and strict session expiry handling.
-
-2. UWB ranging phase:
-- Integrate secure ranging session setup after BLE/NFC trust is established.
-- Use UWB distance as an extra signal for passive entry decisions.
-
-3. Key sharing phase:
-- Enable slot activation 1..7 once attestation policy is finalized.
-- Add friend key lifecycle: issue, rotate, revoke, expire.
-
-4. Attestation evolution:
-- Add optional token-bound MAC field if needed for stronger cryptographic coupling.
-- Extend entitlement model for feature-level permissions.
-
-5. Cloud and policy hardening:
-- Finalize Firestore rules for `Vehicles` writes by authorized owner only.
-- Add audit trail and recovery flows.
-
-6. Production readiness:
-- Ensure trusted time source is always available.
-- Remove debug bypass paths.
-- Add full E2E automated verification for provisioning and attestation.
+```
+python realtime_lstm_visualizer.py --port COM6 --export-pdf scenario_walk.pdf
+python realtime_lstm_visualizer.py --port COM6 --export-svg scenario_walk.svg
+```
 
 ---
 
-## 14) Security Notes
+## Evaluation Protocol (Suggested)
+
+To demonstrate cause-effect relationships between physical signals and AI decisions, capture three representative scenarios and export each to PDF/SVG:
+
+1. Normal walk-in
+   - Distance decreases smoothly
+   - Residual remains low
+   - `p_walk` increases toward 1.0
+   - Door opens and a shaded band appears in the plot
+
+2. Relay attack
+   - Distance shows abrupt drops
+   - Residual spikes
+   - `p_attack` dominates
+   - No door-open shading
+
+3. Loitering
+   - Distance oscillates around the threshold
+   - Velocity fluctuates near zero
+   - `p_loiter` dominates
+   - No door-open shading
+
+These plots provide publication-quality evidence of the system's decision logic and are designed for academic figures and posters.
+
+---
+
+## Limitations and Future Work
+
+1. Share slots 1..7 are verified but intentionally disabled pending final policy decisions.
+2. Token MAC binding for share payloads is not yet implemented.
+3. Trusted time sources (NTP/RTC/BLE sync) should be enforced for time-bound attestations.
+4. Attack simulation code should be guarded behind a compile-time flag for production.
+
+---
+
+## Security Notes
 
 1. Owner private key remains in Android Keystore.
 2. ESP32 stores owner public key and verifies locally.
 3. Cloud must never store immobilizer tokens.
 4. Debug/test bypass features must be disabled in production.
 
+---
 
+## Related Documentation
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+- Detailed visualization guide: [iot/tools/README_VISUALIZATION.md](iot/tools/README_VISUALIZATION.md)
+- UWB AI implementation details: [iot/IMPLEMENTATION_SUMMARY.md](iot/IMPLEMENTATION_SUMMARY.md)
